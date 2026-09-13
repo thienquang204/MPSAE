@@ -1,0 +1,70 @@
+# syntax=docker/dockerfile:1
+# Single image for every graduate-thesis experiment and report.
+FROM nvidia/cuda:13.0.2-devel-ubuntu24.04
+
+LABEL org.opencontainers.image.title="Graduate thesis all-experiments runner"
+LABEL org.opencontainers.image.description="Single-image CSR, MP-SAE, pairwise MMPOT, and true MMPOT ImageNet suite"
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PATH=/opt/venv/bin:$PATH \
+    HF_HOME=/data/huggingface \
+    HF_DATASETS_CACHE=/data/huggingface/datasets \
+    TORCH_HOME=/data/torch
+
+WORKDIR /app
+
+ARG TARGETARCH
+ARG FAISS_VERSION=1.14.3
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+       python3 python3-dev python3-venv git cmake ninja-build swig tini \
+       build-essential libopenblas-dev libgomp1 ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3 -m venv /opt/venv
+
+COPY requirements.txt ./
+RUN python -m pip install --upgrade pip \
+    && python -m pip install --requirement requirements.txt
+
+# No CUDA FAISS wheel supports the ARM64 GB10. Compile a native GPU build for
+# compute capability 12.1 (sm_121) using the CUDA 13 toolkit in this image.
+# amd64 continues to use the prebuilt wheel selected by requirements.txt.
+RUN if [ "$TARGETARCH" = "arm64" ]; then \
+        git clone --branch "v${FAISS_VERSION}" --depth 1 https://github.com/facebookresearch/faiss.git /tmp/faiss; \
+        cmake -S /tmp/faiss -B /tmp/faiss/build -G Ninja \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_CUDA_ARCHITECTURES=121 \
+          -DFAISS_ENABLE_GPU=ON \
+          -DFAISS_ENABLE_PYTHON=ON \
+          -DFAISS_ENABLE_CUVS=OFF \
+          -DFAISS_OPT_LEVEL=generic \
+          -DFAISS_ENABLE_EXTRAS=OFF \
+          -DBUILD_TESTING=OFF \
+          -DBUILD_SHARED_LIBS=OFF \
+          -DBLA_VENDOR=OpenBLAS \
+          -DPython_EXECUTABLE=/opt/venv/bin/python; \
+        cmake --build /tmp/faiss/build --target swigfaiss --parallel "$(nproc)"; \
+        python -m pip install /tmp/faiss/build/faiss/python; \
+        rm -rf /tmp/faiss; \
+    fi
+
+RUN python -c "import faiss; assert hasattr(faiss, 'StandardGpuResources'), 'image contains CPU-only FAISS'"
+
+COPY matryoshka_real_mmpot_experiment.py matryoshka_mmpot_experiment.py \
+     csr_vs_mmpot_imagenet.py experiment_reporting.py \
+     aggregate_backbone_results.py aggregate_all_experiments.py \
+     download_imagenet.py summarize_results.py \
+     container_pipeline.sh run_csr_vs_mmpot_imagenet.sh \
+     run_all_experiments_container.sh ./
+
+RUN chmod +x /app/container_pipeline.sh /app/run_csr_vs_mmpot_imagenet.sh \
+    /app/run_all_experiments_container.sh
+
+RUN mkdir -p /data/huggingface /data/torch /output
+
+VOLUME ["/data", "/output"]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/app/run_all_experiments_container.sh"]
