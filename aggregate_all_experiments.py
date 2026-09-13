@@ -15,7 +15,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 DEFAULT_EXPERIMENTS = ("csr_vs_mpsae", "mmpot_proxy", "mmpot_true")
 PORTABLE_SUFFIXES = {".csv", ".json", ".log", ".md", ".pdf", ".png", ".tex", ".txt"}
-EXCLUDED_PARTS = {"cache", "feature_cache", "weights", "__pycache__"}
+EXCLUDED_PARTS = {"cache", "feature_cache", "wandb", "weights", "__pycache__"}
 
 
 def parse_names(value: str) -> List[str]:

@@ -36,6 +36,36 @@ Re-running the same command reuses the Docker layers, validated dataset, feature
 
 Every training runner stores checkpoints, raw JSON/JSONL history, normalized CSV history, result JSON, and clearly named PNG/PDF figures.
 
+All three training runners also support Weights & Biases monitoring. The
+defaults are entity `tdnthienquang-home` and project `MPSAE`. Keep the API
+key out of source control: put it in the local `.env` used by the Docker
+launcher:
+
+```bash
+WANDB_API_KEY=your_key_here
+WANDB_ENTITY=tdnthienquang-home
+WANDB_PROJECT=MPSAE
+```
+
+When `WANDB_API_KEY` is present, online monitoring is enabled automatically.
+For a direct run, the equivalent is:
+
+```bash
+export WANDB_API_KEY=your_key_here
+python csr_vs_mmpot_imagenet.py ... --wandb-mode online
+```
+
+Use `--wandb-mode offline` to collect a run without network access, or
+`--wandb-mode disabled` to turn tracking off even when a key is present.
+`--wandb-run-name`, `--wandb-group`, and `--wandb-tags` control dashboard
+organization. Each output directory stores only its non-secret W&B run ID, so
+`--resume` continues the same dashboard run.
+
+W&B receives batch losses and OT diagnostics at `--print-freq`, complete
+epoch metrics, validation/benchmark results, configuration, and its standard
+CPU/GPU/RAM telemetry. Parameter and gradient hooks are deliberately not
+enabled, keeping monitoring overhead small.
+
 For each CSR backbone, the important files are named with the backbone, for example:
 
 ```text

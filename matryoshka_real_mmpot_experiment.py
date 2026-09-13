@@ -95,6 +95,13 @@ from torchvision import datasets, models, transforms
 from tqdm.auto import tqdm
 
 from experiment_reporting import generate_matryoshka_report
+from wandb_tracking import (
+    add_wandb_arguments,
+    finish_wandb,
+    init_wandb,
+    log_wandb_metrics,
+    update_wandb_summary,
+)
 
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
@@ -257,6 +264,7 @@ def build_parser() -> argparse.ArgumentParser:
     bench.add_argument("--probe-lr", type=float, default=0.1)
     bench.add_argument("--probe-weight-decay", type=float, default=0.0)
     bench.add_argument("--probe-max-train-batches", type=int, default=0)
+    add_wandb_arguments(parser)
     return parser
 
 
@@ -1078,6 +1086,22 @@ def train_one_epoch(
         sums["mass"] += float(diagnostics["mass"].detach()) * count
         sums["cap"] += float(diagnostics["cap_violation"].detach()) * count
         if args.print_freq > 0 and (batch_index % args.print_freq == 0):
+            log_wandb_metrics(
+                f"{model.method}/batch",
+                {
+                    "step": epoch * len(loader) + batch_index,
+                    "epoch": epoch + 1,
+                    "loss": loss.detach(),
+                    "mrl_loss": mrl_loss.detach(),
+                    "ot_loss": ot_loss.detach(),
+                    "ot_mass": diagnostics["mass"].detach(),
+                    "ot_cap_violation": diagnostics[
+                        "cap_violation"
+                    ].detach(),
+                    "learning_rate": optimizer.param_groups[0]["lr"],
+                },
+                step_metric="step",
+            )
             print(
                 f"epoch={epoch + 1:03d} batch={batch_index:05d} "
                 f"loss={float(loss.detach()):.4f} mrl={float(mrl_loss.detach()):.4f} "
@@ -1554,6 +1578,7 @@ def train_and_benchmark_method(
             "best_metric": best_metric,
         }
         append_jsonl(history_path, record)
+        log_wandb_metrics(method, record, step_metric="epoch")
         print(
             f"epoch={epoch + 1:03d} train_loss={train_stats.loss:.4f} "
             f"mean_top1={head_stats['mean_top1']:.3f} full_top1={head_stats['full_top1']:.3f} "
@@ -1627,6 +1652,7 @@ def train_and_benchmark_method(
             )
         finally:
             del probe_train_loader, probe_val_loader
+    log_wandb_metrics(f"{method}/benchmark", results)
     atomic_json_dump(results, method_dir / "results.json")
     return results
 
@@ -1701,6 +1727,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args.output_dir = args.output_dir.expanduser().resolve()
     args.output_dir.mkdir(parents=True, exist_ok=True)
     methods = list(METHODS) if args.method == "both" else [args.method]
+    init_wandb(
+        args,
+        default_name=(
+            f"true-{args.ot_marginals}m-{args.architecture}-"
+            f"{args.method}-{args.optimizer}"
+        ),
+        default_group="true-mmpot",
+        extra_config={
+            "experiment_family": "true_mmpot",
+            "image_size": image_size,
+            "num_classes": bundle.num_classes,
+        },
+        tags=("true-mmpot", args.architecture, args.optimizer),
+    )
     print(
         f"dataset={args.dataset} train={len(bundle.train)} val={len(bundle.val)} "
         f"classes={bundle.num_classes} image_size={image_size} methods={methods}",
@@ -1742,6 +1782,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         filename_prefix="true_mmpot",
     )
     atomic_json_dump(summary, args.output_dir / "summary.json")
+    update_wandb_summary({"dataset": summary["dataset"], "methods": method_results})
+    finish_wandb()
     print(f"\nCompleted. Summary: {args.output_dir / 'summary.json'}", flush=True)
     if rows:
         print(f"Comparison table: {args.output_dir / 'comparison.csv'}", flush=True)

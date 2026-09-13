@@ -73,6 +73,14 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, Subset
 from torchvision import datasets, models, transforms
 
+from wandb_tracking import (
+    add_wandb_arguments,
+    finish_wandb,
+    init_wandb,
+    log_wandb_metrics,
+    update_wandb_summary,
+)
+
 
 MATRYOSHKA = "matryoshka"
 MP_SAE = "mpsae"
@@ -216,6 +224,7 @@ def build_parser() -> argparse.ArgumentParser:
                      help="CUDA device for FAISS (defaults to the model CUDA device, otherwise 0)")
     knn.add_argument("--faiss-temp-memory-mib", type=int, default=512,
                      help="temporary GPU memory reserved by FAISS; 0 disables its allocation stack")
+    add_wandb_arguments(p)
     return p
 
 
@@ -1028,6 +1037,20 @@ def train_matryoshka_backbone(
             for dimension, dimension_loss in per_dimension_losses.items():
                 dimension_loss_sums[dimension] += float(dimension_loss.detach()) * count
             if args.print_freq > 0 and step % args.print_freq == 0:
+                log_wandb_metrics(
+                    f"{MATRYOSHKA}/batch",
+                    {
+                        "step": epoch * len(loader) + step,
+                        "epoch": epoch + 1,
+                        "classification": objective.detach(),
+                        "learning_rate": epoch_learning_rate,
+                        "per_dimension_classification": {
+                            dimension: loss.detach()
+                            for dimension, loss in per_dimension_losses.items()
+                        },
+                    },
+                    step_metric="step",
+                )
                 print(
                     f"{MATRYOSHKA}/{args.backbone} epoch={epoch + 1} "
                     f"step={step}/{len(loader)} "
@@ -1049,6 +1072,7 @@ def train_matryoshka_backbone(
             },
         }
         history.append(record)
+        log_wandb_metrics(MATRYOSHKA, record, step_metric="epoch")
         save_checkpoint(
             checkpoint, model, optimizer, epoch, history, args,
             extra={
@@ -1266,6 +1290,28 @@ def train_mp_sae(
             sums["constraint_error"] += ot_diag["constraint_error"] * count
             sums["ot_iterations"] += ot_diag["iterations"] * count
             if args.print_freq > 0 and step % args.print_freq == 0:
+                log_wandb_metrics(
+                    f"{MP_SAE}/batch",
+                    {
+                        "step": epoch * len(loader) + step,
+                        "epoch": epoch + 1,
+                        "total": objective.detach(),
+                        "reconstruction": recon_loss.detach(),
+                        "reconstruction_main": recon_stats["recon"].detach(),
+                        "reconstruction_nested": recon_stats[
+                            "nested_recon"
+                        ].detach(),
+                        "reconstruction_auxiliary": recon_stats["aux"].detach(),
+                        "mmpot_regularizer": repr_loss.detach(),
+                        "dead_fraction": recon_stats["dead_fraction"].detach(),
+                        "ot_mass_error": mass_error,
+                        "ot_capacity_violation": ot_diag["cap_violation"],
+                        "ot_constraint_error": ot_diag["constraint_error"],
+                        "ot_iterations": ot_diag["iterations"],
+                        "learning_rate": optimizer.param_groups[0]["lr"],
+                    },
+                    step_metric="step",
+                )
                 print(
                     f"{MP_SAE}/{args.backbone} epoch={epoch+1} step={step}/{len(loader)} "
                     f"loss={float(objective):.5f} recon={float(recon_loss):.5f} repr={float(repr_loss):.5f}",
@@ -1292,7 +1338,9 @@ def train_mp_sae(
             seconds=seconds,
             samples_per_second=samples / max(seconds, 1e-12),
         )
-        history.append({"epoch": epoch + 1, **asdict(result)})
+        epoch_record = {"epoch": epoch + 1, **asdict(result)}
+        history.append(epoch_record)
+        log_wandb_metrics(MP_SAE, epoch_record, step_metric="epoch")
         save_checkpoint(
             checkpoint,
             model,
@@ -1437,6 +1485,11 @@ def benchmark_method(
             "gallery_samples": len(gallery_labels),
             "query_samples": queries,
         }
+        log_wandb_metrics(
+            f"{method}/knn",
+            {"budget": k, **results[str(k)]},
+            step_metric="budget",
+        )
         del index, gpu_resources, gallery_labels
     return {
         "protocol": "FAISS_IndexFlatL2_train_gallery_validation_queries_1NN",
@@ -1981,6 +2034,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     seed_all(args.seed)
     device = choose_device(args.device)
     configure_runtime(args, device)
+    init_wandb(
+        args,
+        default_name=f"csr-{backbone.name}-{args.method}",
+        default_group="csr-architecture-ablation",
+        extra_config={
+            "experiment_family": "csr_vs_mpsae",
+            "backbone_display_name": backbone.display_name,
+            "backbone_weights": backbone.weights_id,
+        },
+        tags=("csr", args.backbone, args.method),
+    )
     print(
         f"backbone={backbone.name} feature_dim={backbone.output_dim} "
         f"sae_hidden_dim={args.hidden_dim} device={device} output={args.output_dir}",
@@ -2149,6 +2213,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         device, run_started_at, time.time() - run_started
     )
     atomic_json(summary, args.output_dir / "summary.json")
+    update_wandb_summary(
+        {"runtime": summary["runtime"], "results": results}
+    )
+    finish_wandb()
     print(f"complete: {args.output_dir / 'summary.json'}", flush=True)
     return 0
 

@@ -54,7 +54,7 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then \
 RUN python -c "import faiss; assert hasattr(faiss, 'StandardGpuResources'), 'image contains CPU-only FAISS'"
 
 COPY matryoshka_real_mmpot_experiment.py matryoshka_mmpot_experiment.py \
-     csr_vs_mmpot_imagenet.py experiment_reporting.py \
+     csr_vs_mmpot_imagenet.py experiment_reporting.py wandb_tracking.py \
      aggregate_backbone_results.py aggregate_all_experiments.py \
      download_imagenet.py summarize_results.py \
      container_pipeline.sh run_csr_vs_mmpot_imagenet.sh \
