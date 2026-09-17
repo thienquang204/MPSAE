@@ -1,124 +1,108 @@
-# Graduate thesis experiment suite
+# Graduate thesis: three-method ImageNet ablation
 
-This directory contains three reproducible ImageNet experiment families:
+This directory now has one experiment setting only: a side-by-side comparison
+of **Matryoshka Representation Learning (MRL)**, **Contrastive Sparse
+Representation (CSR)**, and **MP-SAE** on **ResNet-18** and **ResNet-50**.
+The launcher always executes the complete 3-method × 2-backbone matrix.
 
-- `csr_vs_mmpot_imagenet.py`: a controlled architecture ablation of Matryoshka versus frozen-backbone MP-SAE. ResNet-18 and ResNet-50 are the default matched pair; Swin-T remains optional.
-- `matryoshka_mmpot_experiment.py`: MRL versus the tractable pairwise MMPOT proxy.
-- `matryoshka_real_mmpot_experiment.py`: MRL versus the true three-marginal partial-OT objective.
+## Compared methods
 
-## One-command Docker workflow
+- **Matryoshka:** the selected ResNet is fine-tuned end to end with independent
+  classifiers on nested, power-of-two feature prefixes. The objective is the
+  weighted sum of the nested cross-entropies (default coefficient `1.0`).
+- **CSR:** the ImageNet-pretrained ResNet is frozen. A width-`4d` tied Top-K
+  sparse autoencoder is trained with independently weighted Top-K,
+  Top-4K, auxiliary, and NCL components.
+- **MP-SAE:** starts from exactly the same SAE initialization and frozen feature
+  cache as CSR, trains independently weighted Top-K, nested Top-2K/Top-4K,
+  auxiliary, and three-marginal partial-matching components, and runs for four
+  additional epochs.
 
-Accept the ImageNet terms at `ILSVRC/imagenet-1k`, copy `.env.example` to `.env`, replace the token placeholder, and run one clearly named file:
+All methods are evaluated at the same budgets (`K=8,16,32,64,128,256`) using
+the ImageNet train split as the gallery, validation as queries, and exact L2
+1-nearest-neighbour search. ResNet-18 and ResNet-50 both use torchvision's
+ImageNet-1K V1 weight recipe.
+
+Model and optimizer weights are never written. The run keeps only reusable
+pretrained/frozen feature caches plus histories, metrics, plots, tables, logs,
+and a portable result ZIP. Because there are no training checkpoints, an
+interrupted training arm starts again when the command is rerun.
+
+## Run everything in one command
+
+Accept the ImageNet terms at `ILSVRC/imagenet-1k`, then:
 
 ```bash
 cp .env.example .env
+# Edit .env and replace HF_TOKEN with a read-only Hugging Face token.
 bash run_all_experiments_docker.sh
 ```
 
-That launcher builds one image from the clearly named `Dockerfile.all-experiments`, prepares or reuses the persistent ImageNet volume, runs every experiment selected by `SUITE_EXPERIMENTS`, resumes checkpoints by default, generates plots/tables/loss records, and creates one portable ZIP. It requires Docker, an NVIDIA GPU, NVIDIA Container Toolkit, and sufficient storage for ImageNet and the feature caches.
+Requirements: Docker, an NVIDIA GPU, NVIDIA Container Toolkit, and enough disk
+space for ImageNet plus ResNet-18/50 feature caches. The Docker image handles
+Python dependencies, CUDA FAISS, dataset preparation, both backbones, all three
+training arms, evaluation, plots, tables, and result packaging without further
+input.
 
-The final files are under:
+Outputs are written to:
 
 ```text
-runs/all_experiments/
-  ALL_EXPERIMENTS_COMPLETE.json
-  all_experiments_results.zip
-  all_experiments_artifact_manifest.json
-  csr_vs_mpsae/
-  mmpot_proxy/
-  mmpot_true/
+runs/three_method_ablation/
+  resnet18/
+    matryoshka/{history.json,results.json}
+    csr/{history.json,results.json}
+    mpsae/{history.json,results.json}
+    summary.json
+    comparison.csv
+  resnet50/
+    ...
+  architecture_ablation_per_budget.csv
+  architecture_ablation_effect_summary.csv
+  architecture_ablation_summary.json
+  architecture_ablation_effect.{png,pdf}
+  architecture_ablation_results.{md,tex}
+  artifact_manifest.json
+  imagenet_architecture_ablation_results.zip
+  RUN_COMPLETE.json
   logs/
 ```
 
-Re-running the same command reuses the Docker layers, validated dataset, feature caches, and checkpoints. Set `PULL_BASE_IMAGE=1` only when a fresh base image is wanted.
-
-## Tracking and plots
-
-Every training runner stores checkpoints, raw JSON/JSONL history, normalized CSV history, result JSON, and clearly named PNG/PDF figures.
-
-All three training runners also support Weights & Biases monitoring. The
-defaults are entity `tdnthienquang-home` and project `MPSAE`. Keep the API
-key out of source control: put it in the local `.env` used by the Docker
-launcher:
-
-```bash
-WANDB_API_KEY=your_key_here
-WANDB_ENTITY=tdnthienquang-home
-WANDB_PROJECT=MPSAE
-```
-
-When `WANDB_API_KEY` is present, online monitoring is enabled automatically.
-For a direct run, the equivalent is:
-
-```bash
-export WANDB_API_KEY=your_key_here
-python csr_vs_mmpot_imagenet.py ... --wandb-mode online
-```
-
-Use `--wandb-mode offline` to collect a run without network access, or
-`--wandb-mode disabled` to turn tracking off even when a key is present.
-`--wandb-run-name`, `--wandb-group`, and `--wandb-tags` control dashboard
-organization. Each output directory stores only its non-secret W&B run ID, so
-`--resume` continues the same dashboard run.
-
-W&B receives batch losses and OT diagnostics at `--print-freq`, complete
-epoch metrics, validation/benchmark results, configuration, and its standard
-CPU/GPU/RAM telemetry. Parameter and gradient hooks are deliberately not
-enabled, keeping monitoring overhead small.
-
-For each CSR backbone, the important files are named with the backbone, for example:
-
-```text
-csr_resnet50_training_loss_history.csv
-csr_resnet50_loss_component_impact.csv
-csr_resnet50_loss_component_impact.json
-csr_resnet50_training_loss_curves.png
-csr_resnet50_training_procedure_overview.png
-csr_resnet50_loss_component_impact.png
-csr_resnet50_representation_accuracy_comparison.png
-```
-
-The CSR history records every Matryoshka head cross-entropy plus MP-SAE main, nested, auxiliary, and MMPOT losses in raw and objective-weighted form. The impact report records observed decrease and objective contribution. “Impact” is deliberately defined as measured contribution to the optimized objective, not as a causal ablation claim.
-
-The cross-backbone architecture ablation additionally creates
-`architecture_ablation_per_budget.csv`,
-`architecture_ablation_effect_summary.csv`,
-`architecture_ablation_summary.json`,
-`architecture_ablation_effect.png/.pdf`,
-`architecture_ablation_results.md/.tex`, and
-`imagenet_architecture_ablation_results.zip`.
-
-The method effect is MP-SAE top-1 minus Matryoshka top-1. Its summary includes
-the mean, median, range, standard deviation, positive-budget fraction, relative
-error reduction, and ResNet-50 versus ResNet-18 sensitivity. Aggregation first
-verifies that both comparison arms and the controlled training/evaluation
-settings match across architectures.
-
-The pairwise and true MMPOT runners create similarly explicit `pairwise_mmpot_*` and `true_mmpot_*` reports, including training procedure, loss-component, and benchmark plots.
+The aggregate tables report all three pairwise effects: CSR minus Matryoshka,
+MP-SAE minus Matryoshka, and MP-SAE minus CSR.
 
 ## Configuration
 
-All normal controls live in `.env`. The defaults run all three experiment families. Useful development overrides include:
+`.env.example` contains the complete setting. Important controls are:
 
 ```bash
-SUITE_EXPERIMENTS=csr_vs_mpsae
-CSR_BACKBONES=resnet18,resnet50
-CSR_MAX_TRAIN=50000
-CSR_MAX_VAL=10000
-CSR_EPOCHS=3
-MMPOT_MAX_TRAIN_BATCHES=100
-MMPOT_MAX_VAL_BATCHES=50
+ABLATION_EPOCHS=10
+MPSAE_EXTRA_EPOCHS=4
+ABLATION_BATCH_SIZE=1024
+TOPK=8,16,32,64,128,256
+TRAIN_K=32
+MAX_TRAIN=0
+MAX_VAL=0
+
+MRL_CLASSIFICATION_WEIGHT=1.0
+CSR_MAIN_RECON_WEIGHT=1.0
+CSR_MULTI_TOPK_RECON_WEIGHT=0.125
+CSR_AUX_RECON_WEIGHT=0.03125
+CSR_CONTRASTIVE_WEIGHT=1.0
+MPSAE_MAIN_RECON_WEIGHT=1.0
+MPSAE_NESTED_RECON_WEIGHT=0.125
+MPSAE_AUX_RECON_WEIGHT=0.03125
+MPSAE_MMPOT_WEIGHT=1.3
 ```
 
-Outputs and caches have separate directories, and portable bundles exclude `.pt` checkpoints, model weights, and feature caches.
+`MPSAE_EXTRA_EPOCHS` is fixed to 4 by the launcher. `MAX_TRAIN=0` and
+`MAX_VAL=0` use all ImageNet samples; smaller positive values are useful only
+for code development. A CSR or MP-SAE component can be disabled with weight
+`0`, provided at least one component for that method remains positive.
+`MRL_CLASSIFICATION_WEIGHT` must be positive. Every selected coefficient is
+stored in the run manifest, histories, result JSON, and aggregate protocol.
+Online W&B monitoring is enabled automatically when `WANDB_API_KEY` is
+supplied.
 
-## Specialized entry points
-
-The single Docker launcher is the recommended interface. These lower-level utilities remain available when only one stage is needed:
-
-- `run_csr_vs_mmpot_imagenet.sh`: matched ResNet-18/ResNet-50 architecture ablation in an already prepared environment.
-- `run_imagenet_download.sh`: optional background ImageNet download helper.
-- `run_full_pipeline.sh`: compatibility alias for `run_all_experiments_docker.sh`.
-- `container_pipeline.sh`: compatibility alias for the container-side all-experiments entry point.
-
-No generated dataset, token, checkpoint, cache, or result artifact is stored in the Docker build context.
+The lower-level `run_csr_vs_mmpot_imagenet.sh` entry point can run the same
+study in an already prepared environment, but the Docker launcher above is the
+intended portable, unattended interface.

@@ -1,24 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Container-side entry point. The host-facing run_all_experiments_docker.sh
-# builds one image and invokes this script once for the complete suite.
-
-if [[ "${1:-}" == "--help" ]]; then
-    cat <<'EOF'
-Run every configured graduate-thesis experiment and create one result bundle.
-
-Configuration is supplied through environment variables; start with
-.env.example. Important variables are SUITE_EXPERIMENTS, DATA_PREP,
-CSR_BACKBONES, CSR_EPOCHS, MMPOT_EPOCHS, and OUTPUT_ROOT.
-EOF
-    exit 0
-fi
-
+# One in-container setting: Matryoshka, CSR, and MP-SAE on ResNet-18/50.
 DATA_ROOT="${DATA_ROOT:-/data/huggingface}"
-SUITE_ROOT="${SUITE_ROOT:-/output/all_experiments}"
 OUTPUT_MOUNT="${OUTPUT_MOUNT:-/output}"
-SUITE_EXPERIMENTS="${SUITE_EXPERIMENTS:-csr_vs_mpsae,mmpot_proxy,mmpot_true}"
+SUITE_ROOT="${SUITE_ROOT:-$OUTPUT_MOUNT/three_method_ablation}"
 DATA_PREP="${DATA_PREP:-auto}"
 IMAGENET_SPLITS="${IMAGENET_SPLITS:-train,validation}"
 HF_DATASET_ID="${HF_DATASET_ID:-ILSVRC/imagenet-1k}"
@@ -32,54 +18,41 @@ CHANNELS_LAST="${CHANNELS_LAST:-1}"
 HOST_UID="${HOST_UID:-0}"
 HOST_GID="${HOST_GID:-0}"
 
-# The default architecture ablation changes only the backbone between
-# ResNet-18 and ResNet-50. Add swin_t explicitly for an extended study.
-CSR_BACKBONES="${CSR_BACKBONES:-resnet18,resnet50}"
-CSR_METHOD="${CSR_METHOD:-both}"
-CSR_EPOCHS="${CSR_EPOCHS:-10}"
-CSR_BATCH_SIZE="${CSR_BATCH_SIZE:-1024}"
-CSR_FEATURE_BATCH_SIZE="${CSR_FEATURE_BATCH_SIZE:-512}"
-CSR_MAX_TRAIN="${CSR_MAX_TRAIN:-0}"
-CSR_MAX_VAL="${CSR_MAX_VAL:-0}"
-CSR_HIDDEN_DIM="${CSR_HIDDEN_DIM:-0}"
-CSR_TRAIN_K="${CSR_TRAIN_K:-32}"
-CSR_TOPK="${CSR_TOPK:-8,16,32,64,128,256}"
-CSR_LR="${CSR_LR:-4e-5}"
-CSR_MRL_LR="${CSR_MRL_LR:-1e-2}"
-CSR_MRL_MOMENTUM="${CSR_MRL_MOMENTUM:-0.9}"
-CSR_WEIGHT_DECAY="${CSR_WEIGHT_DECAY:-1e-4}"
-CSR_OT_MASS="${CSR_OT_MASS:-0.9}"
-CSR_OT_ETA="${CSR_OT_ETA:-0.2}"
-CSR_OT_ITERS="${CSR_OT_ITERS:-100}"
-CSR_OT_MICROBATCH="${CSR_OT_MICROBATCH:-32}"
-CSR_FAISS_GPU_DEVICE="${CSR_FAISS_GPU_DEVICE:-0}"
-CSR_FAISS_TEMP_MEMORY_MIB="${CSR_FAISS_TEMP_MEMORY_MIB:-512}"
-CSR_REBUILD_CACHE="${CSR_REBUILD_CACHE:-0}"
-CSR_RESUME="${CSR_RESUME:-1}"
-CSR_CACHE_DIR="${CSR_CACHE_DIR:-/data/csr_feature_cache}"
-CSR_WEIGHTS_CACHE="${CSR_WEIGHTS_CACHE:-/data/torch}"
-
-MMPOT_ARCHITECTURE="${MMPOT_ARCHITECTURE:-resnet50}"
-MMPOT_METHOD="${MMPOT_METHOD:-both}"
-MMPOT_EPOCHS="${MMPOT_EPOCHS:-5}"
-MMPOT_BATCH_SIZE="${MMPOT_BATCH_SIZE:-256}"
-MMPOT_BENCHMARKS="${MMPOT_BENCHMARKS:-head,linear}"
-MMPOT_PROBE_EPOCHS="${MMPOT_PROBE_EPOCHS:-5}"
-MMPOT_OPTIMIZERS="${MMPOT_OPTIMIZERS:-sgd}"
-MMPOT_SGD_LR="${MMPOT_SGD_LR:-0.1}"
-MMPOT_ADAM_LR="${MMPOT_ADAM_LR:-0.001}"
-MMPOT_MOMENTUM="${MMPOT_MOMENTUM:-0.9}"
-MMPOT_WEIGHT_DECAY="${MMPOT_WEIGHT_DECAY:-1e-4}"
-MMPOT_OT_LAMBDA="${MMPOT_OT_LAMBDA:-0.5}"
-MMPOT_OT_MASS="${MMPOT_OT_MASS:-0.8}"
-MMPOT_OT_ETA="${MMPOT_OT_ETA:-0.1}"
-MMPOT_OT_ITERS="${MMPOT_OT_ITERS:-50}"
-MMPOT_OT_GRAD="${MMPOT_OT_GRAD:-envelope}"
-MMPOT_OT_SOLVER_MODE="${MMPOT_OT_SOLVER_MODE:-cyclic}"
-MMPOT_MAX_TRAIN_BATCHES="${MMPOT_MAX_TRAIN_BATCHES:-0}"
-MMPOT_MAX_VAL_BATCHES="${MMPOT_MAX_VAL_BATCHES:-0}"
-MMPOT_PRETRAINED="${MMPOT_PRETRAINED:-1}"
-MMPOT_RESUME="${MMPOT_RESUME:-1}"
+# The experiment matrix is intentionally fixed to both requested architectures
+# and all three methods. Normal resource/hyperparameter controls remain in .env.
+BACKBONES="resnet18,resnet50"
+BASE_EPOCHS="${ABLATION_EPOCHS:-10}"
+MPSAE_EXTRA_EPOCHS="${MPSAE_EXTRA_EPOCHS:-4}"
+BATCH_SIZE="${ABLATION_BATCH_SIZE:-1024}"
+FEATURE_BATCH_SIZE="${FEATURE_BATCH_SIZE:-512}"
+MAX_TRAIN="${MAX_TRAIN:-0}"
+MAX_VAL="${MAX_VAL:-0}"
+HIDDEN_DIM="${HIDDEN_DIM:-0}"
+TRAIN_K="${TRAIN_K:-32}"
+TOPK="${TOPK:-8,16,32,64,128,256}"
+MRL_CLASSIFICATION_WEIGHT="${MRL_CLASSIFICATION_WEIGHT:-1.0}"
+CSR_MAIN_RECON_WEIGHT="${CSR_MAIN_RECON_WEIGHT:-1.0}"
+CSR_MULTI_TOPK_RECON_WEIGHT="${CSR_MULTI_TOPK_RECON_WEIGHT:-0.125}"
+CSR_AUX_RECON_WEIGHT="${CSR_AUX_RECON_WEIGHT:-0.03125}"
+CSR_CONTRASTIVE_WEIGHT="${CSR_CONTRASTIVE_WEIGHT:-1.0}"
+MPSAE_MAIN_RECON_WEIGHT="${MPSAE_MAIN_RECON_WEIGHT:-1.0}"
+MPSAE_NESTED_RECON_WEIGHT="${MPSAE_NESTED_RECON_WEIGHT:-0.125}"
+MPSAE_AUX_RECON_WEIGHT="${MPSAE_AUX_RECON_WEIGHT:-0.03125}"
+MPSAE_MMPOT_WEIGHT="${MPSAE_MMPOT_WEIGHT:-1.3}"
+MPSAE_LR="${MPSAE_LR:-4e-5}"
+CSR_LR="${CSR_LR:-1e-4}"
+MRL_LR="${MRL_LR:-1e-2}"
+MRL_MOMENTUM="${MRL_MOMENTUM:-0.9}"
+WEIGHT_DECAY="${WEIGHT_DECAY:-1e-4}"
+OT_MASS="${OT_MASS:-0.9}"
+OT_ETA="${OT_ETA:-0.2}"
+OT_ITERS="${OT_ITERS:-100}"
+OT_MICROBATCH="${OT_MICROBATCH:-32}"
+FAISS_GPU_DEVICE="${FAISS_GPU_DEVICE:-0}"
+FAISS_TEMP_MEMORY_MIB="${FAISS_TEMP_MEMORY_MIB:-512}"
+REBUILD_CACHE="${REBUILD_CACHE:-0}"
+FEATURE_CACHE="${FEATURE_CACHE:-/data/three_method_feature_cache}"
+WEIGHTS_CACHE="${WEIGHTS_CACHE:-/data/torch}"
 
 die() {
     echo "Error: $*" >&2
@@ -95,18 +68,19 @@ bool_flag() {
     esac
 }
 
+[[ "$MPSAE_EXTRA_EPOCHS" == "4" ]] \
+    || die "MPSAE_EXTRA_EPOCHS is fixed at 4 for this ablation"
 case "$SUITE_ROOT" in
     "$OUTPUT_MOUNT"|"$OUTPUT_MOUNT"/*) ;;
     *) die "SUITE_ROOT must be inside the persistent $OUTPUT_MOUNT mount" ;;
 esac
-
 if ! mountpoint -q "$OUTPUT_MOUNT" 2>/dev/null \
     && ! grep -qE "[[:space:]]${OUTPUT_MOUNT}[[:space:]]" /proc/self/mountinfo /proc/mounts 2>/dev/null; then
     die "$OUTPUT_MOUNT is not mounted; refusing to create disposable results"
 fi
 
 mkdir -p "$SUITE_ROOT/logs"
-rm -f "$SUITE_ROOT/ALL_EXPERIMENTS_COMPLETE.json"
+rm -f "$SUITE_ROOT/RUN_COMPLETE.json"
 
 handoff_output() {
     local status=$?
@@ -181,171 +155,81 @@ case "$DATA_PREP" in
 esac
 dataset_ready || die "ImageNet preparation did not produce a valid manifest"
 
-IFS=',' read -r -a requested_experiments <<< "$SUITE_EXPERIMENTS"
-experiments=()
-for requested in "${requested_experiments[@]}"; do
-    name="${requested//[[:space:]]/}"
-    case "$name" in
-        csr_vs_mpsae|mmpot_proxy|mmpot_true) experiments+=("$name") ;;
-        "") ;;
-        *) die "unsupported suite experiment '$name'" ;;
-    esac
-done
-(( ${#experiments[@]} > 0 )) || die "SUITE_EXPERIMENTS is empty"
-
 {
-    echo "suite_started_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    echo "experiments=$(IFS=,; echo "${experiments[*]}")"
+    echo "study=matryoshka_csr_mpsae_architecture_ablation"
+    echo "started_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "backbones=$BACKBONES"
+    echo "methods=matryoshka,csr,mpsae"
+    echo "base_epochs=$BASE_EPOCHS"
+    echo "mpsae_extra_epochs=$MPSAE_EXTRA_EPOCHS"
+    echo "mrl_classification_weight=$MRL_CLASSIFICATION_WEIGHT"
+    echo "csr_main_recon_weight=$CSR_MAIN_RECON_WEIGHT"
+    echo "csr_multi_topk_recon_weight=$CSR_MULTI_TOPK_RECON_WEIGHT"
+    echo "csr_aux_recon_weight=$CSR_AUX_RECON_WEIGHT"
+    echo "csr_contrastive_weight=$CSR_CONTRASTIVE_WEIGHT"
+    echo "mpsae_main_recon_weight=$MPSAE_MAIN_RECON_WEIGHT"
+    echo "mpsae_nested_recon_weight=$MPSAE_NESTED_RECON_WEIGHT"
+    echo "mpsae_aux_recon_weight=$MPSAE_AUX_RECON_WEIGHT"
+    echo "mpsae_mmpot_weight=$MPSAE_MMPOT_WEIGHT"
+    echo "model_weights_saved=false"
     echo "dataset_root=$DATA_ROOT"
     echo "dataset_id=$HF_DATASET_ID"
     echo "dataset_revision=$HF_REVISION"
-    echo "device=$DEVICE"
-    echo "workers=$WORKERS"
-    echo "prefetch_factor=$PREFETCH_FACTOR"
-    echo "amp=$AMP"
-    echo "channels_last=$CHANNELS_LAST"
-    echo "wandb_mode=${WANDB_MODE:-auto}"
-    echo "wandb_entity=${WANDB_ENTITY:-tdnthienquang-home}"
-    echo "wandb_project=${WANDB_PROJECT:-MPSAE}"
-    echo "csr_study=controlled_architecture_ablation"
-    echo "csr_effect=mp_sae_top1_minus_matryoshka_top1"
-    echo "csr_backbones=$CSR_BACKBONES"
-    echo "csr_epochs=$CSR_EPOCHS"
-    echo "csr_cache_dir=$CSR_CACHE_DIR"
-    echo "mmpot_architecture=$MMPOT_ARCHITECTURE"
-    echo "mmpot_epochs=$MMPOT_EPOCHS"
-    echo "mmpot_optimizers=$MMPOT_OPTIMIZERS"
-} > "$SUITE_ROOT/suite_run_manifest.txt"
+    echo "seed=$SEED"
+} > "$SUITE_ROOT/ablation_run_manifest.txt"
 
-run_csr() {
-    local output="$SUITE_ROOT/csr_vs_mpsae"
-    local amp_flag channels_flag rebuild_flag resume_flag
-    amp_flag="$(bool_flag "$AMP" --amp --no-amp)"
-    channels_flag="$(bool_flag "$CHANNELS_LAST" --channels-last --no-channels-last)"
-    rebuild_flag="$(bool_flag "$CSR_REBUILD_CACHE" --rebuild-cache '')"
-    resume_flag="$(bool_flag "$CSR_RESUME" --resume '')"
-    [[ "$CSR_METHOD" == "both" ]] || die "CSR_METHOD must be 'both' for the architecture ablation"
-    mkdir -p "$output"
-    DATA_BACKEND=hf \
-    BACKBONES="$CSR_BACKBONES" \
-    CACHE_DIR="$CSR_CACHE_DIR" \
-    OUTPUT_DIR="$output/results" \
-    WEIGHTS_CACHE="$CSR_WEIGHTS_CACHE" \
-    INSTALL_DEPS=0 \
-    FAISS_GPU=1 \
-    AGGREGATE_RESULTS=1 \
-    /app/run_csr_vs_mmpot_imagenet.sh "$DATA_ROOT" \
-        --hf-dataset-id "$HF_DATASET_ID" \
-        --hf-revision "$HF_REVISION" \
-        --method "$CSR_METHOD" \
-        --epochs "$CSR_EPOCHS" \
-        --batch-size "$CSR_BATCH_SIZE" \
-        --feature-batch-size "$CSR_FEATURE_BATCH_SIZE" \
-        --workers "$WORKERS" \
-        --prefetch-factor "$PREFETCH_FACTOR" \
-        --max-train "$CSR_MAX_TRAIN" \
-        --max-val "$CSR_MAX_VAL" \
-        --hidden-dim "$CSR_HIDDEN_DIM" \
-        --train-k "$CSR_TRAIN_K" \
-        --topk "$CSR_TOPK" \
-        --lr "$CSR_LR" \
-        --mrl-lr "$CSR_MRL_LR" \
-        --mrl-momentum "$CSR_MRL_MOMENTUM" \
-        --weight-decay "$CSR_WEIGHT_DECAY" \
-        --ot-mass "$CSR_OT_MASS" \
-        --ot-eta "$CSR_OT_ETA" \
-        --ot-iters "$CSR_OT_ITERS" \
-        --ot-microbatch "$CSR_OT_MICROBATCH" \
-        --device "$DEVICE" \
-        --seed "$SEED" \
-        --faiss-gpu-device "$CSR_FAISS_GPU_DEVICE" \
-        --faiss-temp-memory-mib "$CSR_FAISS_TEMP_MEMORY_MIB" \
-        "$amp_flag" "$channels_flag" \
-        ${rebuild_flag:+"$rebuild_flag"} \
-        ${resume_flag:+"$resume_flag"}
-}
+amp_flag="$(bool_flag "$AMP" --amp --no-amp)"
+channels_flag="$(bool_flag "$CHANNELS_LAST" --channels-last --no-channels-last)"
+rebuild_flag="$(bool_flag "$REBUILD_CACHE" --rebuild-cache '')"
 
-run_legacy() {
-    local stage="$1" script="$2" marginals="$3"
-    local stage_root="$SUITE_ROOT/$stage"
-    local amp_flag channels_flag pretrained_flag resume_value
-    amp_flag="$(bool_flag "$AMP" --amp --no-amp)"
-    channels_flag="$(bool_flag "$CHANNELS_LAST" --channels-last '')"
-    pretrained_flag="$(bool_flag "$MMPOT_PRETRAINED" --pretrained '')"
-    resume_value=""
-    [[ "$MMPOT_RESUME" == "1" ]] && resume_value=auto
-    [[ "$MMPOT_RESUME" == "0" ]] || [[ "$MMPOT_RESUME" == "1" ]] \
-        || die "MMPOT_RESUME must be 0 or 1"
+DATA_BACKEND=hf \
+BACKBONES="$BACKBONES" \
+CACHE_DIR="$FEATURE_CACHE" \
+OUTPUT_DIR="$SUITE_ROOT" \
+WEIGHTS_CACHE="$WEIGHTS_CACHE" \
+INSTALL_DEPS=0 \
+FAISS_GPU=1 \
+AGGREGATE_RESULTS=1 \
+/app/run_csr_vs_mmpot_imagenet.sh "$DATA_ROOT" \
+    --hf-dataset-id "$HF_DATASET_ID" \
+    --hf-revision "$HF_REVISION" \
+    --method all \
+    --epochs "$BASE_EPOCHS" \
+    --mpsae-extra-epochs "$MPSAE_EXTRA_EPOCHS" \
+    --batch-size "$BATCH_SIZE" \
+    --feature-batch-size "$FEATURE_BATCH_SIZE" \
+    --workers "$WORKERS" \
+    --prefetch-factor "$PREFETCH_FACTOR" \
+    --max-train "$MAX_TRAIN" \
+    --max-val "$MAX_VAL" \
+    --hidden-dim "$HIDDEN_DIM" \
+    --train-k "$TRAIN_K" \
+    --topk "$TOPK" \
+    --mrl-classification-weight "$MRL_CLASSIFICATION_WEIGHT" \
+    --csr-main-recon-weight "$CSR_MAIN_RECON_WEIGHT" \
+    --csr-multi-topk-recon-weight "$CSR_MULTI_TOPK_RECON_WEIGHT" \
+    --csr-aux-recon-weight "$CSR_AUX_RECON_WEIGHT" \
+    --csr-contrastive-weight "$CSR_CONTRASTIVE_WEIGHT" \
+    --mpsae-main-recon-weight "$MPSAE_MAIN_RECON_WEIGHT" \
+    --mpsae-nested-recon-weight "$MPSAE_NESTED_RECON_WEIGHT" \
+    --mpsae-aux-recon-weight "$MPSAE_AUX_RECON_WEIGHT" \
+    --mpsae-mmpot-weight "$MPSAE_MMPOT_WEIGHT" \
+    --lr "$MPSAE_LR" \
+    --csr-lr "$CSR_LR" \
+    --mrl-lr "$MRL_LR" \
+    --mrl-momentum "$MRL_MOMENTUM" \
+    --weight-decay "$WEIGHT_DECAY" \
+    --ot-mass "$OT_MASS" \
+    --ot-eta "$OT_ETA" \
+    --ot-iters "$OT_ITERS" \
+    --ot-microbatch "$OT_MICROBATCH" \
+    --device "$DEVICE" \
+    --seed "$SEED" \
+    --faiss-gpu-device "$FAISS_GPU_DEVICE" \
+    --faiss-temp-memory-mib "$FAISS_TEMP_MEMORY_MIB" \
+    "$amp_flag" "$channels_flag" \
+    ${rebuild_flag:+"$rebuild_flag"} \
+    2>&1 | tee -a "$SUITE_ROOT/logs/three_method_ablation.log"
 
-    IFS=',' read -r -a optimizer_list <<< "$MMPOT_OPTIMIZERS"
-    for optimizer_value in "${optimizer_list[@]}"; do
-        optimizer="${optimizer_value//[[:space:]]/}"
-        case "$optimizer" in
-            sgd) optimizer_lr="$MMPOT_SGD_LR" ;;
-            adam|adamw) optimizer_lr="$MMPOT_ADAM_LR" ;;
-            *) die "unsupported MMPOT optimizer '$optimizer'" ;;
-        esac
-        output="$stage_root/$optimizer"
-        mkdir -p "$output"
-        command=(
-            python "$script"
-            --dataset imagenet
-            --data-root "$DATA_ROOT"
-            --hf-dataset-id "$HF_DATASET_ID"
-            --hf-revision "$HF_REVISION"
-            --require-validated-data
-            --architecture "$MMPOT_ARCHITECTURE"
-            --method "$MMPOT_METHOD"
-            --epochs "$MMPOT_EPOCHS"
-            --batch-size "$MMPOT_BATCH_SIZE"
-            --workers "$WORKERS"
-            --prefetch-factor "$PREFETCH_FACTOR"
-            --optimizer "$optimizer"
-            --lr "$optimizer_lr"
-            --momentum "$MMPOT_MOMENTUM"
-            --weight-decay "$MMPOT_WEIGHT_DECAY"
-            --ot-lambda "$MMPOT_OT_LAMBDA"
-            --ot-mass "$MMPOT_OT_MASS"
-            --ot-eta "$MMPOT_OT_ETA"
-            --ot-iters "$MMPOT_OT_ITERS"
-            --ot-grad "$MMPOT_OT_GRAD"
-            --benchmark "$MMPOT_BENCHMARKS"
-            --probe-epochs "$MMPOT_PROBE_EPOCHS"
-            --max-train-batches "$MMPOT_MAX_TRAIN_BATCHES"
-            --max-val-batches "$MMPOT_MAX_VAL_BATCHES"
-            --device "$DEVICE"
-            --seed "$SEED"
-            --output-dir "$output"
-            "$amp_flag"
-        )
-        [[ -n "$channels_flag" ]] && command+=("$channels_flag")
-        [[ -n "$pretrained_flag" ]] && command+=("$pretrained_flag")
-        [[ -n "$resume_value" ]] && command+=(--resume "$resume_value")
-        if [[ "$stage" == "mmpot_true" ]]; then
-            command+=(
-                --ot-marginals "$marginals"
-                --ot-solver-mode "$MMPOT_OT_SOLVER_MODE"
-            )
-        fi
-        "${command[@]}"
-    done
-}
-
-for index in "${!experiments[@]}"; do
-    experiment="${experiments[$index]}"
-    log_path="$SUITE_ROOT/logs/${experiment}.log"
-    echo "[$((index + 1))/${#experiments[@]}] Starting $experiment"
-    case "$experiment" in
-        csr_vs_mpsae) run_csr 2>&1 | tee -a "$log_path" ;;
-        mmpot_proxy) run_legacy mmpot_proxy /app/matryoshka_mmpot_experiment.py 2 2>&1 | tee -a "$log_path" ;;
-        mmpot_true) run_legacy mmpot_true /app/matryoshka_real_mmpot_experiment.py 3 2>&1 | tee -a "$log_path" ;;
-    esac
-done
-
-experiment_csv="$(IFS=,; echo "${experiments[*]}")"
-python /app/aggregate_all_experiments.py \
-    "$SUITE_ROOT" \
-    --experiments "$experiment_csv"
-
-echo "All experiments completed. Portable bundle:"
-echo "  $SUITE_ROOT/all_experiments_results.zip"
+echo "Three-method ablation complete: $SUITE_ROOT"
+echo "Portable results: $SUITE_ROOT/imagenet_architecture_ablation_results.zip"

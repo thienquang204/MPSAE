@@ -1,9 +1,9 @@
 # syntax=docker/dockerfile:1
-# Single image for every graduate-thesis experiment and report.
+# Single image for the Matryoshka/CSR/MP-SAE architecture ablation.
 FROM nvidia/cuda:13.0.2-devel-ubuntu24.04
 
-LABEL org.opencontainers.image.title="Graduate thesis all-experiments runner"
-LABEL org.opencontainers.image.description="Single-image CSR, MP-SAE, pairwise MMPOT, and true MMPOT ImageNet suite"
+LABEL org.opencontainers.image.title="Graduate thesis three-method ablation runner"
+LABEL org.opencontainers.image.description="Matryoshka, CSR, and MP-SAE on ImageNet with ResNet-18 and ResNet-50"
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -53,10 +53,8 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then \
 
 RUN python -c "import faiss; assert hasattr(faiss, 'StandardGpuResources'), 'image contains CPU-only FAISS'"
 
-COPY matryoshka_real_mmpot_experiment.py matryoshka_mmpot_experiment.py \
-     csr_vs_mmpot_imagenet.py experiment_reporting.py wandb_tracking.py \
-     aggregate_backbone_results.py aggregate_all_experiments.py \
-     download_imagenet.py summarize_results.py \
+COPY csr_vs_mmpot_imagenet.py wandb_tracking.py \
+     aggregate_backbone_results.py download_imagenet.py \
      container_pipeline.sh run_csr_vs_mmpot_imagenet.sh \
      run_all_experiments_container.sh ./
 

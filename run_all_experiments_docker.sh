@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# The only host-side command needed for the full experiment suite:
+# The only host-side command needed for the three-method ablation:
 #   bash run_all_experiments_docker.sh
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,11 +17,11 @@ if [[ -f "$ENV_FILE" ]]; then
     set +a
 fi
 
-IMAGE_NAME="${IMAGE_NAME:-graduate-thesis-all-experiments:latest}"
+IMAGE_NAME="${IMAGE_NAME:-graduate-thesis-three-method-ablation:latest}"
 DOCKERFILE="${DOCKERFILE:-$SCRIPT_DIR/Dockerfile.all-experiments}"
 DATA_VOLUME="${DATA_VOLUME:-graduate-thesis-imagenet}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$SCRIPT_DIR/runs}"
-SUITE_DIR="${SUITE_DIR:-all_experiments}"
+SUITE_DIR="${SUITE_DIR:-three_method_ablation}"
 SHM_SIZE="${SHM_SIZE:-16g}"
 PULL_BASE_IMAGE="${PULL_BASE_IMAGE:-0}"
 
@@ -56,11 +56,11 @@ esac
 mkdir -p "$OUTPUT_ROOT/$SUITE_DIR"
 OUTPUT_ROOT="$(cd -- "$OUTPUT_ROOT" && pwd -P)"
 HOST_SUITE_ROOT="$OUTPUT_ROOT/$SUITE_DIR"
-PIPELINE_LOG="$HOST_SUITE_ROOT/all_experiments_docker.log"
+PIPELINE_LOG="$HOST_SUITE_ROOT/three_method_ablation_docker.log"
 exec > >(tee -a "$PIPELINE_LOG") 2>&1
 
 echo "============================================================"
-echo "Graduate thesis: all experiments"
+echo "Graduate thesis: Matryoshka / CSR / MP-SAE ablation"
 echo "Image:        $IMAGE_NAME"
 echo "Dockerfile:   $DOCKERFILE"
 echo "Data volume:  $DATA_VOLUME"
@@ -101,18 +101,18 @@ run_status=0
     "$IMAGE_NAME" || run_status=$?
 
 if [[ "$run_status" == "0" ]]; then
-    completion="$HOST_SUITE_ROOT/ALL_EXPERIMENTS_COMPLETE.json"
-    bundle="$HOST_SUITE_ROOT/all_experiments_results.zip"
+    completion="$HOST_SUITE_ROOT/RUN_COMPLETE.json"
+    bundle="$HOST_SUITE_ROOT/imagenet_architecture_ablation_results.zip"
     [[ -s "$completion" ]] || die "container exited successfully but $completion is missing"
     [[ -s "$bundle" ]] || die "container exited successfully but $bundle is missing"
     echo "============================================================"
-    echo "ALL EXPERIMENTS COMPLETE"
+    echo "THREE-METHOD ABLATION COMPLETE"
     echo "Portable results: $bundle"
     echo "Completion file:  $completion"
     echo "Full Docker log:  $PIPELINE_LOG"
     echo "============================================================"
 else
-    echo "Suite failed with status $run_status; rerun this file to resume." >&2
+    echo "Ablation failed with status $run_status; rerun this file to start a fresh training run while reusing data/features." >&2
     echo "Log: $PIPELINE_LOG" >&2
 fi
 exit "$run_status"

@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""ImageNet experiment: Matryoshka representations versus MP-SAE.
+"""ImageNet ablation: Matryoshka, CSR, and MP-SAE representations.
 
-Supported torchvision backbones are ResNet-18, ResNet-50, and Swin-T. The two
-experiment arms always use the same selected architecture and pretrained
-weights.
+The controlled study runs all three techniques with ResNet-18 and ResNet-50.
+Every arm starts from the matching ImageNet-1K V1 pretrained backbone recipe.
 
 Pipeline
 --------
@@ -12,12 +11,16 @@ Pipeline
 3. Fine-tune the backbone end-to-end with Matryoshka Representation Learning
    (MRL), using a classifier at every requested feature-prefix dimension and
    at the full representation dimension.
-4. Train a tied Top-K sparse autoencoder on frozen backbone features with the
-   multimarginal partial matching gap (M3PG) weighted by the fixed value 1.3.
-5. Encode the train split as the gallery and validation split as queries.
-6. Evaluate exact L2 1-NN with FAISS ``IndexFlatL2`` at each representation
-   budget: MRL prefix dimension K versus K active MP-SAE latents.
-7. Save checkpoints, histories, JSON results, publication tables, and figures.
+4. Train a Top-K CSR sparse autoencoder on the same frozen features using
+   reconstruction and non-negative contrastive learning.
+5. Train a tied Top-K sparse autoencoder on frozen backbone features with the
+   multimarginal partial matching gap (M3PG). Every objective coefficient is
+   explicit and configurable while retaining paper-aligned defaults.
+6. Encode the train split as the gallery and validation split as queries.
+7. Evaluate exact L2 1-NN with FAISS ``IndexFlatL2`` at each representation
+   budget: MRL prefix dimension K versus K active CSR/MP-SAE latents.
+8. Save histories, JSON results, publication tables, and figures. Model weights
+   and optimizer checkpoints are deliberately not saved.
 
 The proposed Multimarginal Presentation with Sparse Autoencoder (MP-SAE) arm
 treats Top-K, Top-2K, and Top-4K codes of the same frozen image embedding as
@@ -33,19 +36,9 @@ Expected ImageNet layout
       val/n01440764/*.JPEG
       ...
 
-Example lightweight development run
------------------------------------
-    python csr_vs_mmpot_imagenet.py --data-root /path/to/imagenet \
-      --backbone swin_t \
-      --cache-dir runs/matryoshka_mpsae/cache --output-dir runs/matryoshka_mpsae \
-      --max-train 50000 --max-val 10000 --epochs 3 --batch-size 256
-
-Paper-scale data (resource intensive)
--------------------------------------
-    python csr_vs_mmpot_imagenet.py --data-root /path/to/imagenet \
-      --backbone resnet50 --cache-dir /fastssd/imagenet_features \
-      --output-dir runs/matryoshka_mpsae --epochs 10 --batch-size 4096 \
-      --topk 8,16,32,64,128,256 --amp
+The complete two-backbone setting is launched by
+``run_all_experiments_docker.sh``; this Python entry point executes one
+backbone unit within that fixed study.
 
 Dependencies: torch, torchvision, numpy, and a CUDA-enabled FAISS build.
 """
@@ -83,9 +76,10 @@ from wandb_tracking import (
 
 
 MATRYOSHKA = "matryoshka"
+CSR = "csr"
 MP_SAE = "mpsae"
-METHODS = (MATRYOSHKA, MP_SAE)
-MMPOT_LOSS_WEIGHT = 1.3
+METHODS = (MATRYOSHKA, CSR, MP_SAE)
+DEFAULT_MPSAE_MMPOT_WEIGHT = 1.3
 IMAGENET_CLASSES = 1000
 
 
@@ -125,14 +119,6 @@ BACKBONE_SPECS = {
         weights=models.ResNet50_Weights.IMAGENET1K_V1,
         classifier_attribute="fc",
     ),
-    "swin_t": BackboneSpec(
-        name="swin_t",
-        display_name="Swin-T",
-        output_dim=768,
-        constructor=models.swin_t,
-        weights=models.Swin_T_Weights.IMAGENET1K_V1,
-        classifier_attribute="head",
-    ),
 }
 BACKBONES = tuple(BACKBONE_SPECS)
 
@@ -140,8 +126,22 @@ BACKBONES = tuple(BACKBONE_SPECS)
 def method_labels(backbone: BackboneSpec) -> Dict[str, str]:
     return {
         MATRYOSHKA: f"Matryoshka {backbone.display_name}",
+        CSR: f"CSR ({backbone.display_name})",
         MP_SAE: f"MP-SAE ({backbone.display_name})",
     }
+
+
+def matryoshka_training_dims(
+    backbone: BackboneSpec, evaluation_budgets: Sequence[int]
+) -> List[int]:
+    """Paper-style power-of-two MRL heads plus every evaluated budget."""
+    dimensions = set(evaluation_budgets)
+    dimension = 8
+    while dimension < backbone.output_dim:
+        dimensions.add(dimension)
+        dimension *= 2
+    dimensions.add(backbone.output_dim)
+    return sorted(dimensions)
 
 
 def parse_ints(value: str) -> List[int]:
@@ -156,7 +156,7 @@ def parse_ints(value: str) -> List[int]:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="ImageNet: end-to-end Matryoshka backbone versus frozen backbone + MP-SAE",
+        description="ImageNet: matched Matryoshka, CSR, and MP-SAE representation ablation",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     data = p.add_argument_group("ImageNet and feature cache")
@@ -164,12 +164,12 @@ def build_parser() -> argparse.ArgumentParser:
     data.add_argument("--data-backend", choices=("imagefolder", "hf"), default="imagefolder")
     data.add_argument(
         "--backbone", choices=BACKBONES, default="resnet18",
-        help="torchvision ImageNet backbone used by both experiment arms",
+        help="torchvision ImageNet backbone used by all three experiment arms",
     )
     data.add_argument("--hf-dataset-id", default="ILSVRC/imagenet-1k")
     data.add_argument("--hf-revision", default="main")
     data.add_argument("--hf-token-env", default="HF_TOKEN")
-    data.add_argument("--cache-dir", type=Path, default=Path("runs/matryoshka_mpsae/cache"))
+    data.add_argument("--cache-dir", type=Path, default=Path("runs/three_method_ablation/cache"))
     data.add_argument("--weights-cache", type=Path, default=Path("weights"), help="local TORCH_HOME for pretrained weights")
     data.add_argument("--rebuild-cache", action="store_true")
     data.add_argument("--feature-batch-size", type=int, default=512)
@@ -178,23 +178,64 @@ def build_parser() -> argparse.ArgumentParser:
     data.add_argument("--max-train", type=int, default=0, help="deterministic subset; 0 uses all training images")
     data.add_argument("--max-val", type=int, default=0, help="deterministic subset; 0 uses all validation images")
 
-    model = p.add_argument_group("sparse autoencoder")
+    model = p.add_argument_group("sparse representations")
     model.add_argument(
         "--hidden-dim", type=int, default=0,
-        help="MP-SAE latent dimension; 0 selects the paper rule h=4d for each backbone",
+        help="CSR/MP-SAE latent dimension; 0 selects the paper rule h=4d for each backbone",
     )
     model.add_argument("--topk", type=parse_ints, default=[8, 16, 32, 64, 128, 256])
     model.add_argument("--train-k", type=int, default=32)
     model.add_argument("--k-aux", type=int, default=512)
-    model.add_argument("--aux-weight", type=float, default=1.0 / 32.0)
     model.add_argument("--dead-steps", type=int, default=1000)
-    model.add_argument("--multi-topk-weight", type=float, default=1.0 / 8.0)
+
+    loss = p.add_argument_group("loss component weights")
+    loss.add_argument(
+        "--mrl-classification-weight", type=float, default=1.0,
+        help="weight on Matryoshka's summed nested classification loss",
+    )
+    loss.add_argument(
+        "--csr-main-recon-weight", type=float, default=1.0,
+        help="weight on CSR's Top-K reconstruction loss",
+    )
+    loss.add_argument(
+        "--csr-multi-topk-recon-weight", type=float, default=1.0 / 8.0,
+        help="weight on CSR's Top-4K reconstruction loss",
+    )
+    loss.add_argument(
+        "--csr-aux-recon-weight", type=float, default=1.0 / 32.0,
+        help="weight on CSR's dead-latent auxiliary reconstruction loss",
+    )
+    loss.add_argument(
+        "--csr-contrastive-weight", type=float, default=1.0,
+        help="gamma multiplying CSR's non-negative contrastive loss",
+    )
+    loss.add_argument(
+        "--mpsae-main-recon-weight", type=float, default=1.0,
+        help="weight on MP-SAE's Top-K reconstruction loss",
+    )
+    loss.add_argument(
+        "--mpsae-nested-recon-weight", type=float, default=1.0 / 8.0,
+        help="weight on MP-SAE's mean Top-2K/Top-4K reconstruction loss",
+    )
+    loss.add_argument(
+        "--mpsae-aux-recon-weight", type=float, default=1.0 / 32.0,
+        help="weight on MP-SAE's dead-latent auxiliary reconstruction loss",
+    )
+    loss.add_argument(
+        "--mpsae-mmpot-weight", type=float, default=DEFAULT_MPSAE_MMPOT_WEIGHT,
+        help="weight on MP-SAE's multimarginal partial-transport gap",
+    )
 
     train = p.add_argument_group("training")
-    train.add_argument("--method", choices=(*METHODS, "both"), default="both")
+    train.add_argument("--method", choices=(*METHODS, "all"), default="all")
     train.add_argument("--epochs", type=int, default=10)
+    train.add_argument(
+        "--mpsae-extra-epochs", type=int, default=4,
+        help="additional MP-SAE epochs beyond the common epoch count; fixed to 4 for this study",
+    )
     train.add_argument("--batch-size", type=int, default=1024)
     train.add_argument("--lr", type=float, default=4e-5)
+    train.add_argument("--csr-lr", type=float, default=1e-4)
     train.add_argument("--weight-decay", type=float, default=1e-4)
     train.add_argument("--mrl-lr", type=float, default=1e-2, help="backbone MRL fine-tuning learning rate")
     train.add_argument("--mrl-momentum", type=float, default=0.9)
@@ -209,8 +250,7 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--device", default="auto")
     train.add_argument("--seed", type=int, default=42)
     train.add_argument("--print-freq", type=int, default=50)
-    train.add_argument("--resume", action="store_true")
-    train.add_argument("--output-dir", type=Path, default=Path("runs/matryoshka_mpsae"))
+    train.add_argument("--output-dir", type=Path, default=Path("runs/three_method_ablation"))
 
     knn = p.add_argument_group("exact FAISS 1-NN")
     knn.add_argument("--knn-batch-size", type=int, default=4096)
@@ -236,21 +276,67 @@ def validate_args(a: argparse.Namespace) -> None:
     elif not a.data_root.is_dir():
         raise FileNotFoundError(f"missing Hugging Face cache directory: {a.data_root}")
     backbone = BACKBONE_SPECS[a.backbone]
-    if a.method in (MATRYOSHKA, "both") and max(a.topk) > backbone.output_dim:
+    if a.method in (MATRYOSHKA, "all") and max(a.topk) > backbone.output_dim:
         raise ValueError(
             f"Matryoshka prefix dimensions cannot exceed the {backbone.display_name} "
             f"feature dimension ({backbone.output_dim})"
         )
     if a.hidden_dim < 0:
         raise ValueError("hidden-dim must be positive, or 0 to select 4x the backbone dimension")
+    if a.train_k < 1 or a.k_aux < 0 or a.dead_steps < 1:
+        raise ValueError("train-k/dead-steps must be positive and k-aux must be non-negative")
+    loss_weights = {
+        "mrl-classification-weight": a.mrl_classification_weight,
+        "csr-main-recon-weight": a.csr_main_recon_weight,
+        "csr-multi-topk-recon-weight": a.csr_multi_topk_recon_weight,
+        "csr-aux-recon-weight": a.csr_aux_recon_weight,
+        "csr-contrastive-weight": a.csr_contrastive_weight,
+        "mpsae-main-recon-weight": a.mpsae_main_recon_weight,
+        "mpsae-nested-recon-weight": a.mpsae_nested_recon_weight,
+        "mpsae-aux-recon-weight": a.mpsae_aux_recon_weight,
+        "mpsae-mmpot-weight": a.mpsae_mmpot_weight,
+    }
+    invalid_loss_weights = [
+        name for name, value in loss_weights.items()
+        if not math.isfinite(value) or value < 0
+    ]
+    if invalid_loss_weights:
+        raise ValueError(
+            "loss weights must be finite and non-negative: "
+            + ", ".join(invalid_loss_weights)
+        )
+    if a.mrl_classification_weight == 0:
+        raise ValueError("mrl-classification-weight must be positive")
+    if (
+        a.csr_main_recon_weight
+        + a.csr_multi_topk_recon_weight
+        + a.csr_aux_recon_weight
+        + a.csr_contrastive_weight
+        == 0
+    ):
+        raise ValueError("at least one CSR loss component weight must be positive")
+    if (
+        a.mpsae_main_recon_weight
+        + a.mpsae_nested_recon_weight
+        + a.mpsae_aux_recon_weight
+        + a.mpsae_mmpot_weight
+        == 0
+    ):
+        raise ValueError("at least one MP-SAE loss component weight must be positive")
     if a.hidden_dim == 0:
         a.hidden_dim = 4 * backbone.output_dim
-    if a.method in (MP_SAE, "both") and a.hidden_dim < max(max(a.topk), 4 * a.train_k):
+    if a.method in (MP_SAE, CSR, "all") and a.hidden_dim < max(max(a.topk), 4 * a.train_k):
         raise ValueError("hidden-dim must be >= max(topk) and >= 4*train-k")
     if not 0.0 < a.ot_mass <= 1.0:
         raise ValueError("ot-mass must be in (0,1]")
+    if a.ot_eta <= 0 or a.ot_iters < 1 or a.ot_tol <= 0:
+        raise ValueError("ot-eta/ot-tol must be positive and ot-iters must be at least 1")
     if min(a.epochs, a.batch_size, a.feature_batch_size, a.ot_microbatch, a.prefetch_factor) < 1:
         raise ValueError("epochs and batch sizes must be positive")
+    if a.mpsae_extra_epochs != 4:
+        raise ValueError("mpsae-extra-epochs is fixed at 4 for this ablation")
+    if a.csr_lr <= 0:
+        raise ValueError("CSR lr must be positive")
     if a.ot_microbatch < 2:
         raise ValueError("ot-microbatch must be at least 2")
     if a.faiss_gpu_device is not None and a.faiss_gpu_device < 0:
@@ -259,6 +345,12 @@ def validate_args(a: argparse.Namespace) -> None:
         raise ValueError("faiss-temp-memory-mib must be non-negative")
     if a.mrl_lr <= 0 or not 0 <= a.mrl_momentum < 1:
         raise ValueError("mrl-lr must be positive and mrl-momentum must be in [0,1)")
+    if a.lr <= 0 or a.weight_decay < 0:
+        raise ValueError("MP-SAE lr must be positive and weight-decay must be non-negative")
+    if a.knn_batch_size < 1 or a.knn_query_batch < 1:
+        raise ValueError("1-NN batch sizes must be positive")
+    if a.max_train < 0 or a.max_val < 0:
+        raise ValueError("max-train/max-val must be non-negative")
     if a.prefetch_factor < 1 or a.workers < 0 or a.print_freq < 0:
         raise ValueError("prefetch-factor must be positive; workers/print-freq must be non-negative")
 
@@ -376,7 +468,8 @@ class MatryoshkaBackbone(nn.Module):
             )
             for dimension in self.nested_dims
         }
-        return torch.stack(tuple(per_dimension.values())).mean(), per_dimension
+        # Standard MRL uses c_m=1 for every nested classifier.
+        return torch.stack(tuple(per_dimension.values())).sum(), per_dimension
 
 
 def matryoshka_transforms(backbone: BackboneSpec) -> Tuple[Any, Any]:
@@ -687,7 +780,8 @@ class TopKSAE(nn.Module):
             self.inactive_steps[active] = 0
 
     def reconstruction_losses(
-        self, x: torch.Tensor, k: int, k_aux: int, multi_weight: float, aux_weight: float
+        self, x: torch.Tensor, k: int, k_aux: int, main_weight: float,
+        nested_weight: float, aux_weight: float,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         pre = self.preactivations(x)
         z1 = self.keep_topk(pre, k)
@@ -708,7 +802,7 @@ class TopKSAE(nn.Module):
             aux = F.mse_loss(aux_z @ self.decoder, residual)
         else:
             aux = main.new_zeros(())
-        total = main + multi_weight * nested + aux_weight * aux
+        total = main_weight * main + nested_weight * nested + aux_weight * aux
         self.update_activity(z1)
         stats = {
             "recon": main,
@@ -718,9 +812,46 @@ class TopKSAE(nn.Module):
         }
         return total, stats, (z1, z2, z4)
 
+    def csr_losses(
+        self, x: torch.Tensor, k: int, k_aux: int, main_weight: float,
+        multi_weight: float, aux_weight: float,
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], torch.Tensor]:
+        """Original CSR objective terms: L(k) + L(4k)/8 + beta L_aux."""
+        pre = self.preactivations(x)
+        z = self.keep_topk(pre, k)
+        z4 = self.keep_topk(pre, min(4 * k, self.decoder.shape[0]))
+        reconstruction = self.decode(z)
+        main = F.mse_loss(reconstruction, x)
+        multi = F.mse_loss(self.decode(z4), x)
+
+        dead = self.inactive_steps >= self.dead_steps
+        if dead.any() and k_aux > 0:
+            masked = pre.masked_fill(~dead[None, :], -torch.inf)
+            aux_k = min(k_aux, int(dead.sum()))
+            aux_z = self.keep_topk(masked, aux_k)
+            residual = (x - reconstruction).detach()
+            auxiliary = F.mse_loss(aux_z @ self.decoder, residual)
+        else:
+            auxiliary = main.new_zeros(())
+        total = main_weight * main + multi_weight * multi + aux_weight * auxiliary
+        self.update_activity(z)
+        return total, {
+            "recon": main,
+            "multi_topk_recon": multi,
+            "aux": auxiliary,
+            "dead_fraction": dead.float().mean(),
+        }, z
+
     @torch.no_grad()
     def normalize_decoder(self) -> None:
         self.decoder.copy_(F.normalize(self.decoder, dim=1))
+
+
+def nonnegative_contrastive_loss(representations: torch.Tensor) -> torch.Tensor:
+    """CSR NCL: identify each non-negative sparse code against batch negatives."""
+    similarities = representations.float() @ representations.float().T
+    targets = torch.arange(similarities.shape[0], device=similarities.device)
+    return F.cross_entropy(similarities, targets)
 
 
 def circular_variance_cost(z1: torch.Tensor, z2: torch.Tensor, z3: torch.Tensor) -> torch.Tensor:
@@ -860,6 +991,7 @@ class EpochResult:
     reconstruction_main: float
     reconstruction_nested: float
     reconstruction_auxiliary: float
+    weighted_main_reconstruction: float
     weighted_nested_reconstruction: float
     weighted_auxiliary_reconstruction: float
     mmpot_regularizer: float
@@ -875,100 +1007,13 @@ class EpochResult:
     samples_per_second: float
 
 
-def checkpoint_signature(args: argparse.Namespace, method: str) -> Dict[str, Any]:
-    """Configuration fields that must match before a checkpoint may resume."""
-    backbone = BACKBONE_SPECS[args.backbone]
-    signature: Dict[str, Any] = {
-        "schema": 1,
-        "method": method,
-        "backbone": backbone.name,
-        "weights": backbone.weights_id,
-        "feature_dim": backbone.output_dim,
-        "data_root": str(args.data_root),
-        "data_backend": args.data_backend,
-        "hf_dataset_id": args.hf_dataset_id,
-        "hf_revision": args.hf_revision,
-        "max_train": args.max_train,
-        "seed": args.seed,
-        "topk": list(args.topk),
-        "epochs": args.epochs,
-        "batch_size": args.batch_size,
-        "weight_decay": args.weight_decay,
-        "amp": args.amp,
-    }
-    if method == MATRYOSHKA:
-        signature.update(
-            {
-                "learning_rate": args.mrl_lr,
-                "momentum": args.mrl_momentum,
-            }
-        )
-    elif method == MP_SAE:
-        signature.update(
-            {
-                "hidden_dim": args.hidden_dim,
-                "train_k": args.train_k,
-                "k_aux": args.k_aux,
-                "aux_weight": args.aux_weight,
-                "multi_topk_weight": args.multi_topk_weight,
-                "learning_rate": args.lr,
-                "mmpot_loss_weight": MMPOT_LOSS_WEIGHT,
-                "ot_mass": args.ot_mass,
-                "ot_eta": args.ot_eta,
-                "ot_iters": args.ot_iters,
-                "ot_tol": args.ot_tol,
-                "ot_microbatch": args.ot_microbatch,
-            }
-        )
-    else:
-        raise ValueError(f"unsupported checkpoint method: {method}")
-    return signature
-
-
-def require_compatible_checkpoint(
-    state: Mapping[str, Any],
-    expected: Mapping[str, Any],
-    path: Path,
-) -> None:
-    recorded = state.get("checkpoint_signature")
-    if recorded != expected:
-        raise RuntimeError(
-            f"refusing to resume incompatible checkpoint {path}. "
-            f"Expected signature {dict(expected)!r}, found {recorded!r}. "
-            "Start a fresh output directory or rerun without --resume."
-        )
-
-
-def save_checkpoint(
-    path: Path,
-    model: nn.Module,
-    optimizer: torch.optim.Optimizer,
-    epoch: int,
-    history: List[Dict[str, Any]],
-    args: argparse.Namespace,
-    extra: Optional[Mapping[str, Any]] = None,
-) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    payload: Dict[str, Any] = {
-        "model": model.state_dict(),
-        "optimizer": optimizer.state_dict(),
-        "epoch": epoch,
-        "history": history,
-        "args": vars(args),
-    }
-    if extra:
-        payload.update(extra)
-    torch.save(payload, tmp)
-    os.replace(tmp, path)
-
-
 def train_matryoshka_backbone(
     device: torch.device, args: argparse.Namespace
 ) -> Tuple[MatryoshkaBackbone, List[Dict[str, Any]]]:
     """Fine-tune the selected backbone with the standard nested-prefix MRL loss."""
     backbone = BACKBONE_SPECS[args.backbone]
-    model = MatryoshkaBackbone(args.weights_cache, backbone, args.topk).to(device)
+    nested_dims = matryoshka_training_dims(backbone, args.topk)
+    model = MatryoshkaBackbone(args.weights_cache, backbone, nested_dims).to(device)
     if args.channels_last:
         model = model.to(memory_format=torch.channels_last)
     optimizer = torch.optim.SGD(
@@ -977,24 +1022,7 @@ def train_matryoshka_backbone(
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     method_dir = args.output_dir / MATRYOSHKA
-    checkpoint = method_dir / "last.pt"
     history: List[Dict[str, Any]] = []
-    start_epoch = 0
-    resume_generator_state: Optional[torch.Tensor] = None
-    resume_scaler_state: Optional[Mapping[str, Any]] = None
-    if args.resume and checkpoint.is_file():
-        state = torch.load(checkpoint, map_location=device, weights_only=False)
-        require_compatible_checkpoint(
-            state, checkpoint_signature(args, MATRYOSHKA), checkpoint
-        )
-        model.load_state_dict(state["model"])
-        optimizer.load_state_dict(state["optimizer"])
-        if "scheduler" in state:
-            scheduler.load_state_dict(state["scheduler"])
-        history = state.get("history", [])
-        start_epoch = int(state["epoch"]) + 1
-        resume_generator_state = state.get("data_generator_state")
-        resume_scaler_state = state.get("grad_scaler")
 
     train_transform, _ = matryoshka_transforms(backbone)
     dataset, _ = build_image_dataset(
@@ -1003,8 +1031,6 @@ def train_matryoshka_backbone(
     )
     dataset = deterministic_subset(dataset, args.max_train, args.seed)
     generator = torch.Generator().manual_seed(args.seed)
-    if resume_generator_state is not None:
-        generator.set_state(resume_generator_state.cpu())
     loader = DataLoader(
         dataset, batch_size=args.batch_size, shuffle=True, generator=generator,
         num_workers=args.workers, pin_memory=device.type == "cuda",
@@ -1012,12 +1038,12 @@ def train_matryoshka_backbone(
         **loader_options(args.workers, args.prefetch_factor),
     )
     scaler = torch.amp.GradScaler("cuda", enabled=args.amp and device.type == "cuda")
-    if resume_scaler_state is not None:
-        scaler.load_state_dict(dict(resume_scaler_state))
-    for epoch in range(start_epoch, args.epochs):
+    for epoch in range(args.epochs):
         model.train()
         epoch_learning_rate = optimizer.param_groups[0]["lr"]
-        loss_sum, samples, started = 0.0, 0, time.time()
+        objective_sum, classification_sum, samples, started = (
+            0.0, 0.0, 0, time.time()
+        )
         dimension_loss_sums = {str(dimension): 0.0 for dimension in model.nested_dims}
         for step, (images, target) in enumerate(loader):
             images = images.to(device, non_blocking=True)
@@ -1027,13 +1053,17 @@ def train_matryoshka_backbone(
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type=device.type, enabled=args.amp and device.type == "cuda"):
                 features = model(images)
-                objective, per_dimension_losses = model.classification_losses(features, target)
+                classification, per_dimension_losses = model.classification_losses(
+                    features, target
+                )
+                objective = args.mrl_classification_weight * classification
             scaler.scale(objective).backward()
             scaler.step(optimizer)
             scaler.update()
             count = images.shape[0]
             samples += count
-            loss_sum += float(objective.detach()) * count
+            objective_sum += float(objective.detach()) * count
+            classification_sum += float(classification.detach()) * count
             for dimension, dimension_loss in per_dimension_losses.items():
                 dimension_loss_sums[dimension] += float(dimension_loss.detach()) * count
             if args.print_freq > 0 and step % args.print_freq == 0:
@@ -1042,7 +1072,9 @@ def train_matryoshka_backbone(
                     {
                         "step": epoch * len(loader) + step,
                         "epoch": epoch + 1,
-                        "classification": objective.detach(),
+                        "total": objective.detach(),
+                        "classification": classification.detach(),
+                        "weighted_classification": objective.detach(),
                         "learning_rate": epoch_learning_rate,
                         "per_dimension_classification": {
                             dimension: loss.detach()
@@ -1054,14 +1086,17 @@ def train_matryoshka_backbone(
                 print(
                     f"{MATRYOSHKA}/{args.backbone} epoch={epoch + 1} "
                     f"step={step}/{len(loader)} "
-                    f"mrl_ce={float(objective):.5f}", flush=True,
+                    f"loss={float(objective):.5f} "
+                    f"mrl_ce={float(classification):.5f}", flush=True,
                 )
         scheduler.step()
         seconds = time.time() - started
         record = {
             "epoch": epoch + 1,
-            "total": loss_sum / samples,
-            "classification": loss_sum / samples,
+            "total": objective_sum / samples,
+            "classification": classification_sum / samples,
+            "weighted_classification": objective_sum / samples,
+            "classification_weight": args.mrl_classification_weight,
             "learning_rate": epoch_learning_rate,
             "seconds": seconds,
             "samples": samples,
@@ -1073,21 +1108,14 @@ def train_matryoshka_backbone(
         }
         history.append(record)
         log_wandb_metrics(MATRYOSHKA, record, step_metric="epoch")
-        save_checkpoint(
-            checkpoint, model, optimizer, epoch, history, args,
-            extra={
-                "scheduler": scheduler.state_dict(),
-                "nested_dims": model.nested_dims,
-                "data_generator_state": generator.get_state(),
-                "grad_scaler": scaler.state_dict(),
-                "checkpoint_signature": checkpoint_signature(args, MATRYOSHKA),
-            },
-        )
         atomic_json(
             {
                 "method": MATRYOSHKA,
                 "backbone": args.backbone,
                 "nested_dims": model.nested_dims,
+                "loss_weights": {
+                    "classification": args.mrl_classification_weight,
+                },
                 "history": history,
             },
             method_dir / "history.json",
@@ -1107,10 +1135,8 @@ def cache_matryoshka_split(
     feature_path, label_path, meta_path = cache_paths(cache_dir, split)
     maximum = args.max_train if split == "train" else args.max_val
     subset_seed = args.seed + (0 if split == "train" else 1)
-    checkpoint_path = args.output_dir / MATRYOSHKA / "last.pt"
-    checkpoint_stat = checkpoint_path.stat()
     expected_metadata = {
-        "cache_format": 3,
+        "cache_format": 4,
         "split": split,
         "feature_dim": model.output_dim,
         "dtype": "float16",
@@ -1125,8 +1151,8 @@ def cache_matryoshka_split(
         "training_learning_rate": args.mrl_lr,
         "training_momentum": args.mrl_momentum,
         "training_weight_decay": args.weight_decay,
-        "checkpoint_bytes": checkpoint_stat.st_size,
-        "checkpoint_modified_ns": checkpoint_stat.st_mtime_ns,
+        "training_classification_weight": args.mrl_classification_weight,
+        "model_weights_saved": False,
         "data_backend": args.data_backend,
         "data_root": str(args.data_root),
         "hf_dataset_id": args.hf_dataset_id if args.data_backend == "hf" else None,
@@ -1134,13 +1160,9 @@ def cache_matryoshka_split(
         "maximum": maximum,
         "subset_seed": subset_seed,
     }
-    if not args.rebuild_cache:
-        cached = compatible_feature_cache(
-            feature_path, label_path, meta_path, expected_metadata
-        )
-        if cached is not None:
-            print(f"cache {MATRYOSHKA} {split}: reusing {feature_path}", flush=True)
-            return cached
+    # This cache comes from the just-trained in-memory model. With no model
+    # checkpoint to bind it to, rebuilding is the only safe behavior.
+    print(f"cache {MATRYOSHKA} {split}: rebuilding from in-memory model", flush=True)
     _, evaluation_transform = matryoshka_transforms(model.backbone)
     dataset, source_split = build_image_dataset(
         split, args.data_root, evaluation_transform, args.data_backend,
@@ -1197,6 +1219,152 @@ def cache_matryoshka_split(
     return metadata
 
 
+def train_csr(
+    initial_state: Mapping[str, torch.Tensor],
+    dataset: CachedFeatures,
+    device: torch.device,
+    args: argparse.Namespace,
+) -> Tuple[TopKSAE, List[Dict[str, Any]]]:
+    """Train original CSR on frozen features with reconstruction plus NCL."""
+    input_dim = int(dataset.features.shape[1])
+    model = TopKSAE(input_dim, args.hidden_dim, args.dead_steps).to(device)
+    model.load_state_dict(initial_state)
+    optimizer = torch.optim.Adam(
+        model.parameters(), lr=args.csr_lr, weight_decay=args.weight_decay
+    )
+    method_dir = args.output_dir / CSR
+    history: List[Dict[str, Any]] = []
+    generator = torch.Generator().manual_seed(args.seed)
+    loader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        generator=generator,
+        num_workers=args.workers,
+        pin_memory=device.type == "cuda",
+        # Match MP-SAE's mini-batches exactly during the common epochs. MP-SAE
+        # needs groups of at least two for the multi-marginal OT objective.
+        drop_last=len(dataset) > args.batch_size,
+        **loader_options(args.workers, args.prefetch_factor),
+    )
+    scaler = torch.amp.GradScaler("cuda", enabled=args.amp and device.type == "cuda")
+
+    for epoch in range(args.epochs):
+        model.train()
+        sums = {
+            "total": 0.0,
+            "reconstruction": 0.0,
+            "main": 0.0,
+            "multi": 0.0,
+            "aux": 0.0,
+            "contrastive": 0.0,
+            "dead": 0.0,
+        }
+        samples, started = 0, time.time()
+        for step, (features, _) in enumerate(loader):
+            features = features.to(device, non_blocking=True)
+            optimizer.zero_grad(set_to_none=True)
+            with torch.autocast(
+                device_type=device.type, enabled=args.amp and device.type == "cuda"
+            ):
+                reconstruction, reconstruction_stats, sparse_codes = model.csr_losses(
+                    features,
+                    args.train_k,
+                    args.k_aux,
+                    args.csr_main_recon_weight,
+                    args.csr_multi_topk_recon_weight,
+                    args.csr_aux_recon_weight,
+                )
+                with torch.autocast(device_type=device.type, enabled=False):
+                    contrastive = nonnegative_contrastive_loss(sparse_codes.float())
+                objective = reconstruction + args.csr_contrastive_weight * contrastive
+            scaler.scale(objective).backward()
+            scaler.step(optimizer)
+            scaler.update()
+            model.normalize_decoder()
+
+            count = features.shape[0]
+            samples += count
+            sums["total"] += float(objective.detach()) * count
+            sums["reconstruction"] += float(reconstruction.detach()) * count
+            sums["main"] += float(reconstruction_stats["recon"].detach()) * count
+            sums["multi"] += float(
+                reconstruction_stats["multi_topk_recon"].detach()
+            ) * count
+            sums["aux"] += float(reconstruction_stats["aux"].detach()) * count
+            sums["contrastive"] += float(contrastive.detach()) * count
+            sums["dead"] += float(reconstruction_stats["dead_fraction"]) * count
+            if args.print_freq > 0 and step % args.print_freq == 0:
+                log_wandb_metrics(
+                    f"{CSR}/batch",
+                    {
+                        "step": epoch * len(loader) + step,
+                        "epoch": epoch + 1,
+                        "total": objective.detach(),
+                        "reconstruction": reconstruction.detach(),
+                        "reconstruction_main": reconstruction_stats["recon"].detach(),
+                        "reconstruction_multi_topk": reconstruction_stats[
+                            "multi_topk_recon"
+                        ].detach(),
+                        "reconstruction_auxiliary": reconstruction_stats["aux"].detach(),
+                        "contrastive": contrastive.detach(),
+                        "dead_fraction": reconstruction_stats["dead_fraction"].detach(),
+                        "learning_rate": optimizer.param_groups[0]["lr"],
+                    },
+                    step_metric="step",
+                )
+                print(
+                    f"{CSR}/{args.backbone} epoch={epoch + 1} "
+                    f"step={step}/{len(loader)} loss={float(objective):.5f} "
+                    f"recon={float(reconstruction):.5f} ncl={float(contrastive):.5f}",
+                    flush=True,
+                )
+        seconds = time.time() - started
+        record = {
+            "epoch": epoch + 1,
+            "total": sums["total"] / samples,
+            "reconstruction": sums["reconstruction"] / samples,
+            "reconstruction_main": sums["main"] / samples,
+            "weighted_main_reconstruction": (
+                args.csr_main_recon_weight * sums["main"] / samples
+            ),
+            "reconstruction_multi_topk": sums["multi"] / samples,
+            "weighted_multi_topk_reconstruction": (
+                args.csr_multi_topk_recon_weight * sums["multi"] / samples
+            ),
+            "reconstruction_auxiliary": sums["aux"] / samples,
+            "weighted_auxiliary_reconstruction": (
+                args.csr_aux_recon_weight * sums["aux"] / samples
+            ),
+            "contrastive": sums["contrastive"] / samples,
+            "weighted_contrastive": (
+                args.csr_contrastive_weight * sums["contrastive"] / samples
+            ),
+            "dead_fraction": sums["dead"] / samples,
+            "learning_rate": optimizer.param_groups[0]["lr"],
+            "samples": samples,
+            "seconds": seconds,
+            "samples_per_second": samples / max(seconds, 1e-12),
+        }
+        history.append(record)
+        log_wandb_metrics(CSR, record, step_metric="epoch")
+        atomic_json(
+            {
+                "method": CSR,
+                "backbone": args.backbone,
+                "loss_weights": {
+                    "main_reconstruction": args.csr_main_recon_weight,
+                    "multi_topk_reconstruction": args.csr_multi_topk_recon_weight,
+                    "auxiliary_reconstruction": args.csr_aux_recon_weight,
+                    "nonnegative_contrastive": args.csr_contrastive_weight,
+                },
+                "history": history,
+            },
+            method_dir / "history.json",
+        )
+    return model, history
+
+
 def train_mp_sae(
     initial_state: Mapping[str, torch.Tensor],
     dataset: CachedFeatures,
@@ -1208,26 +1376,9 @@ def train_mp_sae(
     model.load_state_dict(initial_state)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, eps=6.25e-10)
     method_dir = args.output_dir / MP_SAE
-    checkpoint = method_dir / "last.pt"
     history: List[Dict[str, Any]] = []
-    start_epoch = 0
-    resume_generator_state: Optional[torch.Tensor] = None
-    resume_scaler_state: Optional[Mapping[str, Any]] = None
-    if args.resume and checkpoint.is_file():
-        state = torch.load(checkpoint, map_location=device, weights_only=False)
-        require_compatible_checkpoint(
-            state, checkpoint_signature(args, MP_SAE), checkpoint
-        )
-        model.load_state_dict(state["model"])
-        optimizer.load_state_dict(state["optimizer"])
-        history = state.get("history", [])
-        start_epoch = int(state["epoch"]) + 1
-        resume_generator_state = state.get("data_generator_state")
-        resume_scaler_state = state.get("grad_scaler")
 
     generator = torch.Generator().manual_seed(args.seed)
-    if resume_generator_state is not None:
-        generator.set_state(resume_generator_state.cpu())
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -1239,9 +1390,8 @@ def train_mp_sae(
         **loader_options(args.workers, args.prefetch_factor),
     )
     scaler = torch.amp.GradScaler("cuda", enabled=args.amp and device.type == "cuda")
-    if resume_scaler_state is not None:
-        scaler.load_state_dict(dict(resume_scaler_state))
-    for epoch in range(start_epoch, args.epochs):
+    mpsae_epochs = args.epochs + args.mpsae_extra_epochs
+    for epoch in range(mpsae_epochs):
         model.train()
         sums = {
             "total": 0.0,
@@ -1262,7 +1412,12 @@ def train_mp_sae(
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type=device.type, enabled=args.amp and device.type == "cuda"):
                 recon_loss, recon_stats, views = model.reconstruction_losses(
-                    features, args.train_k, args.k_aux, args.multi_topk_weight, args.aux_weight
+                    features,
+                    args.train_k,
+                    args.k_aux,
+                    args.mpsae_main_recon_weight,
+                    args.mpsae_nested_recon_weight,
+                    args.mpsae_aux_recon_weight,
                 )
                 # Force the numerically sensitive OT path to float32.
                 with torch.autocast(device_type=device.type, enabled=False):
@@ -1270,7 +1425,7 @@ def train_mp_sae(
                         views[0].float(), views[1].float(), views[2].float(),
                         args.ot_mass, args.ot_eta, args.ot_iters, args.ot_tol, args.ot_microbatch,
                     )
-                objective = recon_loss + MMPOT_LOSS_WEIGHT * repr_loss
+                objective = recon_loss + args.mpsae_mmpot_weight * repr_loss
                 mass_error = ot_diag["mass_error"]
             scaler.scale(objective).backward()
             scaler.step(optimizer)
@@ -1324,10 +1479,19 @@ def train_mp_sae(
             reconstruction_main=sums["main"] / samples,
             reconstruction_nested=sums["nested"] / samples,
             reconstruction_auxiliary=sums["aux"] / samples,
-            weighted_nested_reconstruction=args.multi_topk_weight * sums["nested"] / samples,
-            weighted_auxiliary_reconstruction=args.aux_weight * sums["aux"] / samples,
+            weighted_main_reconstruction=(
+                args.mpsae_main_recon_weight * sums["main"] / samples
+            ),
+            weighted_nested_reconstruction=(
+                args.mpsae_nested_recon_weight * sums["nested"] / samples
+            ),
+            weighted_auxiliary_reconstruction=(
+                args.mpsae_aux_recon_weight * sums["aux"] / samples
+            ),
             mmpot_regularizer=sums["repr"] / samples,
-            weighted_mmpot_regularizer=MMPOT_LOSS_WEIGHT * sums["repr"] / samples,
+            weighted_mmpot_regularizer=(
+                args.mpsae_mmpot_weight * sums["repr"] / samples
+            ),
             dead_fraction=sums["dead"] / samples,
             ot_mass_error=sums["mass_error"] / samples,
             ot_capacity_violation=sums["cap_violation"] / samples,
@@ -1341,24 +1505,17 @@ def train_mp_sae(
         epoch_record = {"epoch": epoch + 1, **asdict(result)}
         history.append(epoch_record)
         log_wandb_metrics(MP_SAE, epoch_record, step_metric="epoch")
-        save_checkpoint(
-            checkpoint,
-            model,
-            optimizer,
-            epoch,
-            history,
-            args,
-            extra={
-                "checkpoint_signature": checkpoint_signature(args, MP_SAE),
-                "data_generator_state": generator.get_state(),
-                "grad_scaler": scaler.state_dict(),
-            },
-        )
         atomic_json(
             {
                 "method": MP_SAE,
                 "backbone": args.backbone,
-                "mmpot_loss_weight": MMPOT_LOSS_WEIGHT,
+                "training_epochs": mpsae_epochs,
+                "loss_weights": {
+                    "main_reconstruction": args.mpsae_main_recon_weight,
+                    "nested_reconstruction": args.mpsae_nested_recon_weight,
+                    "auxiliary_reconstruction": args.mpsae_aux_recon_weight,
+                    "mmpot_regularizer": args.mpsae_mmpot_weight,
+                },
                 "history": history,
             },
             method_dir / "history.json",
@@ -1378,7 +1535,7 @@ def encode_for_benchmark(
     if method == MATRYOSHKA:
         return features[:, :k].float()
     if model is None:
-        raise ValueError("MP-SAE benchmarking requires a trained sparse autoencoder")
+        raise ValueError(f"{method} benchmarking requires a trained sparse autoencoder")
     return model.encode(features, k).float()
 
 
@@ -1504,22 +1661,46 @@ def comparison_rows(results: Mapping[str, Any]) -> List[Dict[str, Any]]:
     if not all(method in results for method in METHODS):
         return []
     baseline = results[MATRYOSHKA]["knn"]["per_topk"]
+    csr = results[CSR]["knn"]["per_topk"]
     proposed = results[MP_SAE]["knn"]["per_topk"]
+    mrl_weights = results[MATRYOSHKA].get("loss_weights", {})
+    csr_weights = results[CSR].get("loss_weights", {})
+    mpsae_weights = results[MP_SAE].get("loss_weights", {})
     rows: List[Dict[str, Any]] = []
     for k in sorted(int(value) for value in baseline):
         mrl_metrics = baseline[str(k)]
+        csr_metrics = csr[str(k)]
         mp_sae_metrics = proposed[str(k)]
         rows.append({
             "backbone": results[MATRYOSHKA].get("backbone", "unknown"),
             "representation_budget": k,
             "matryoshka_prefix_dim": k,
+            "csr_active_latents": k,
             "mp_sae_active_latents": k,
             "matryoshka_1nn_top1": mrl_metrics["top1"],
+            "csr_1nn_top1": csr_metrics["top1"],
             "mp_sae_1nn_top1": mp_sae_metrics["top1"],
+            "delta_csr_minus_matryoshka": csr_metrics["top1"] - mrl_metrics["top1"],
             "delta_mp_sae_minus_matryoshka": mp_sae_metrics["top1"] - mrl_metrics["top1"],
+            "delta_mp_sae_minus_csr": mp_sae_metrics["top1"] - csr_metrics["top1"],
             "matryoshka_mean_neighbor_l2_squared": mrl_metrics["mean_neighbor_l2_squared"],
+            "csr_mean_neighbor_l2_squared": csr_metrics["mean_neighbor_l2_squared"],
             "mp_sae_mean_neighbor_l2_squared": mp_sae_metrics["mean_neighbor_l2_squared"],
-            "mmpot_loss_weight": MMPOT_LOSS_WEIGHT,
+            "mrl_classification_weight": mrl_weights.get("classification"),
+            "csr_main_recon_weight": csr_weights.get("main_reconstruction"),
+            "csr_multi_topk_recon_weight": csr_weights.get(
+                "multi_topk_reconstruction"
+            ),
+            "csr_aux_recon_weight": csr_weights.get("auxiliary_reconstruction"),
+            "csr_contrastive_weight": csr_weights.get("nonnegative_contrastive"),
+            "mpsae_main_recon_weight": mpsae_weights.get("main_reconstruction"),
+            "mpsae_nested_recon_weight": mpsae_weights.get(
+                "nested_reconstruction"
+            ),
+            "mpsae_aux_recon_weight": mpsae_weights.get(
+                "auxiliary_reconstruction"
+            ),
+            "mpsae_mmpot_weight": mpsae_weights.get("mmpot_regularizer"),
         })
     return rows
 
@@ -1547,21 +1728,29 @@ def write_markdown_table(
     if not rows:
         return
     lines = [
-        f"| Budget K | Matryoshka {backbone.display_name} | MP-SAE | Delta |",
-        "|---:|---:|---:|---:|",
+        f"| Budget K | Matryoshka {backbone.display_name} | CSR | MP-SAE | CSR - Matryoshka | MP-SAE - Matryoshka | MP-SAE - CSR |",
+        "|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in rows:
         lines.append(
             f"| {row['representation_budget']} | {row['matryoshka_1nn_top1']:.2f} | "
-            f"{row['mp_sae_1nn_top1']:.2f} | {row['delta_mp_sae_minus_matryoshka']:+.2f} |"
+            f"{row['csr_1nn_top1']:.2f} | {row['mp_sae_1nn_top1']:.2f} | "
+            f"{row['delta_csr_minus_matryoshka']:+.2f} | "
+            f"{row['delta_mp_sae_minus_matryoshka']:+.2f} | "
+            f"{row['delta_mp_sae_minus_csr']:+.2f} |"
         )
     mrl_mean = float(np.mean([row["matryoshka_1nn_top1"] for row in rows]))
+    csr_mean = float(np.mean([row["csr_1nn_top1"] for row in rows]))
     mp_sae_mean = float(np.mean([row["mp_sae_1nn_top1"] for row in rows]))
-    lines.append(f"| **Mean** | **{mrl_mean:.2f}** | **{mp_sae_mean:.2f}** | **{mp_sae_mean - mrl_mean:+.2f}** |")
+    lines.append(
+        f"| **Mean** | **{mrl_mean:.2f}** | **{csr_mean:.2f}** | "
+        f"**{mp_sae_mean:.2f}** | **{csr_mean - mrl_mean:+.2f}** | "
+        f"**{mp_sae_mean - mrl_mean:+.2f}** | **{mp_sae_mean - csr_mean:+.2f}** |"
+    )
     lines.extend([
         "",
         "Values are ImageNet validation exact L2 1-NN top-1 accuracy (%). ",
-        "K denotes prefix dimension for Matryoshka and active latents for MP-SAE; the MMPOT loss weight is fixed at 1.3.",
+        "K denotes prefix dimension for Matryoshka and active latents for CSR and MP-SAE; configured loss weights are recorded in comparison.csv and summary.json.",
     ])
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -1573,36 +1762,42 @@ def write_latex_table(
         return
     command, row_end = chr(92), chr(92) * 2
 
-    def emphasized(value: float, other: float) -> str:
+    def emphasized(value: float, best: float) -> str:
         formatted = f"{value:.2f}"
-        return f"{command}textbf{{{formatted}}}" if value >= other else formatted
+        return f"{command}textbf{{{formatted}}}" if value >= best else formatted
 
     lines = [
         f"{command}begin{{table}}[t]",
         f"{command}centering",
         f"{command}caption{{ImageNet validation exact L2 1-NN top-1 accuracy ({command}%). "
         f"The budget K is the {backbone.display_name} prefix dimension for Matryoshka and the number "
-        "of active sparse latents for MP-SAE. The MMPOT loss weight is fixed at 1.3.}",
-        f"{command}label{{tab:{backbone.name}-matryoshka-mp-sae}}",
+        "of active sparse latents for CSR and MP-SAE. Configured loss weights are recorded with the results.}",
+        f"{command}label{{tab:{backbone.name}-matryoshka-csr-mp-sae}}",
         f"{command}small",
-        f"{command}begin{{tabular}}{{rrrr}}",
+        f"{command}begin{{tabular}}{{rrrrrrr}}",
         f"{command}toprule",
-        f"Budget K & Matryoshka & MP-SAE & Delta (pp) {row_end}",
+        f"K & Matryoshka & CSR & MP-SAE & CSR-M & MP-SAE-M & MP-SAE-CSR {row_end}",
         f"{command}midrule",
     ]
     for row in rows:
         mrl = float(row["matryoshka_1nn_top1"])
+        csr = float(row["csr_1nn_top1"])
         mp_sae = float(row["mp_sae_1nn_top1"])
+        best = max(mrl, csr, mp_sae)
         lines.append(
-            f"{row['representation_budget']} & {emphasized(mrl, mp_sae)} & "
-            f"{emphasized(mp_sae, mrl)} & {mp_sae - mrl:+.2f} {row_end}"
+            f"{row['representation_budget']} & {emphasized(mrl, best)} & "
+            f"{emphasized(csr, best)} & {emphasized(mp_sae, best)} & "
+            f"{csr - mrl:+.2f} & {mp_sae - mrl:+.2f} & {mp_sae - csr:+.2f} {row_end}"
         )
     mrl_mean = float(np.mean([row["matryoshka_1nn_top1"] for row in rows]))
+    csr_mean = float(np.mean([row["csr_1nn_top1"] for row in rows]))
     mp_sae_mean = float(np.mean([row["mp_sae_1nn_top1"] for row in rows]))
+    best_mean = max(mrl_mean, csr_mean, mp_sae_mean)
     lines.extend([
         f"{command}midrule",
-        f"Mean & {emphasized(mrl_mean, mp_sae_mean)} & {emphasized(mp_sae_mean, mrl_mean)} & "
-        f"{mp_sae_mean - mrl_mean:+.2f} {row_end}",
+        f"Mean & {emphasized(mrl_mean, best_mean)} & {emphasized(csr_mean, best_mean)} & "
+        f"{emphasized(mp_sae_mean, best_mean)} & {csr_mean - mrl_mean:+.2f} & "
+        f"{mp_sae_mean - mrl_mean:+.2f} & {mp_sae_mean - csr_mean:+.2f} {row_end}",
         f"{command}bottomrule",
         f"{command}end{{tabular}}",
         f"{command}end{{table}}",
@@ -1642,25 +1837,33 @@ def plot_publication_comparison(results: Mapping[str, Any], output_dir: Path) ->
 
     budgets = [row["representation_budget"] for row in rows]
     mrl = [row["matryoshka_1nn_top1"] for row in rows]
+    csr = [row["csr_1nn_top1"] for row in rows]
     mp_sae = [row["mp_sae_1nn_top1"] for row in rows]
-    delta = [row["delta_mp_sae_minus_matryoshka"] for row in rows]
-    blue, orange = "#0072B2", "#D55E00"
+    csr_delta = [row["delta_csr_minus_matryoshka"] for row in rows]
+    mp_delta = [row["delta_mp_sae_minus_matryoshka"] for row in rows]
+    blue, green, orange = "#0072B2", "#009E73", "#D55E00"
     fig, axes = plt.subplots(1, 2, figsize=(7.0, 2.75), constrained_layout=True)
 
     axes[0].plot(
         budgets, mrl, color=blue, marker="o",
         label=results[MATRYOSHKA]["display_name"],
     )
-    axes[0].plot(budgets, mp_sae, color=orange, marker="s", label="MP-SAE (weight=1.3)")
+    axes[0].plot(budgets, csr, color=green, marker="^", label="CSR")
+    axes[0].plot(budgets, mp_sae, color=orange, marker="s", label="MP-SAE")
     axes[0].set_title("(a) Exact 1-NN accuracy", loc="left", fontweight="bold")
     axes[0].set_ylabel("ImageNet val. top-1 accuracy (%)")
     axes[0].legend(frameon=False, handlelength=2.2)
 
-    delta_colors = [orange if value >= 0 else blue for value in delta]
-    axes[1].bar(budgets, delta, width=[0.38 * value for value in budgets], color=delta_colors, alpha=0.9)
+    axes[1].plot(
+        budgets, csr_delta, color=green, marker="^", label="CSR - Matryoshka"
+    )
+    axes[1].plot(
+        budgets, mp_delta, color=orange, marker="s", label="MP-SAE - Matryoshka"
+    )
     axes[1].axhline(0.0, color="#333333", linewidth=0.8)
-    axes[1].set_title("(b) Improvement of MP-SAE", loc="left", fontweight="bold")
+    axes[1].set_title("(b) Effect relative to Matryoshka", loc="left", fontweight="bold")
     axes[1].set_ylabel("Delta top-1 accuracy (pp)")
+    axes[1].legend(frameon=False)
 
     for axis in axes:
         axis.set_xlabel("Representation budget K")
@@ -1676,7 +1879,7 @@ def plot_publication_comparison(results: Mapping[str, Any], output_dir: Path) ->
         "backbone", results[MP_SAE].get("backbone", "backbone")
     )
     save_figure_formats(
-        fig, output_dir, f"csr_{backbone_name}_representation_accuracy_comparison"
+        fig, output_dir, f"ablation_{backbone_name}_representation_accuracy_comparison"
     )
     plt.close(fig)
 
@@ -1688,33 +1891,48 @@ def plot_training_diagnostics(results: Mapping[str, Any], output_dir: Path) -> N
     import matplotlib.pyplot as plt
 
     mrl_history = results[MATRYOSHKA]["history"]
+    csr_history = results[CSR]["history"]
     mp_sae_history = results[MP_SAE]["history"]
     blue, orange, green = "#0072B2", "#D55E00", "#009E73"
-    fig, axes = plt.subplots(1, 2, figsize=(7.0, 2.75), constrained_layout=True)
+    fig, axes = plt.subplots(1, 3, figsize=(10.5, 2.75), constrained_layout=True)
 
     axes[0].plot(
         [row["epoch"] for row in mrl_history],
-        [row["classification"] for row in mrl_history],
+        [row["weighted_classification"] for row in mrl_history],
         color=blue, marker="o",
     )
     axes[0].set_title(
         f"(a) {results[MATRYOSHKA]['display_name']}", loc="left", fontweight="bold"
     )
-    axes[0].set_ylabel("Mean nested cross-entropy")
+    axes[0].set_ylabel("Weighted nested cross-entropy")
+
+    csr_epochs = [row["epoch"] for row in csr_history]
+    axes[1].plot(csr_epochs, [row["total"] for row in csr_history], color=green, marker="^", label="Total")
+    axes[1].plot(
+        csr_epochs, [row["reconstruction"] for row in csr_history],
+        color="#56B4E9", marker="o", linestyle="--", label="Reconstruction",
+    )
+    axes[1].plot(
+        csr_epochs, [row["weighted_contrastive"] for row in csr_history],
+        color="#CC79A7", marker="s", linestyle=":", label="NCL",
+    )
+    axes[1].set_title("(b) CSR", loc="left", fontweight="bold")
+    axes[1].set_ylabel("Training loss")
+    axes[1].legend(frameon=False)
 
     epochs = [row["epoch"] for row in mp_sae_history]
-    axes[1].plot(epochs, [row["total"] for row in mp_sae_history], color=orange, marker="s", label="Total")
-    axes[1].plot(
+    axes[2].plot(epochs, [row["total"] for row in mp_sae_history], color=orange, marker="s", label="Total")
+    axes[2].plot(
         epochs, [row["reconstruction"] for row in mp_sae_history],
         color=green, marker="o", linestyle="--", label="Reconstruction",
     )
-    axes[1].plot(
-        epochs, [MMPOT_LOSS_WEIGHT * row["mmpot_regularizer"] for row in mp_sae_history],
-        color="#CC79A7", marker="^", linestyle=":", label="1.3 x MMPOT",
+    axes[2].plot(
+        epochs, [row["weighted_mmpot_regularizer"] for row in mp_sae_history],
+        color="#CC79A7", marker="^", linestyle=":", label="Weighted MMPOT",
     )
-    axes[1].set_title("(b) MP-SAE", loc="left", fontweight="bold")
-    axes[1].set_ylabel("Training loss")
-    axes[1].legend(frameon=False)
+    axes[2].set_title("(c) MP-SAE", loc="left", fontweight="bold")
+    axes[2].set_ylabel("Training loss")
+    axes[2].legend(frameon=False)
 
     for axis in axes:
         axis.set_xlabel("Epoch")
@@ -1725,7 +1943,7 @@ def plot_training_diagnostics(results: Mapping[str, Any], output_dir: Path) -> N
     backbone_name = results[MATRYOSHKA].get(
         "backbone", results[MP_SAE].get("backbone", "backbone")
     )
-    save_figure_formats(fig, output_dir, f"csr_{backbone_name}_training_loss_curves")
+    save_figure_formats(fig, output_dir, f"ablation_{backbone_name}_training_loss_curves")
     plt.close(fig)
 
 
@@ -1747,17 +1965,45 @@ def training_loss_records(
             ]
             if method == MATRYOSHKA:
                 per_dimension = row.get("per_dimension_classification", {})
-                weight = 1.0 / max(1, len(per_dimension))
                 components.extend(
                     (
                         f"classification_dim_{dimension}",
                         "objective_component",
                         float(value),
-                        weight,
+                        args.mrl_classification_weight,
                     )
                     for dimension, value in sorted(
                         per_dimension.items(), key=lambda item: int(item[0])
                     )
+                )
+            elif method == CSR:
+                components.extend(
+                    [
+                        (
+                            "reconstruction_main",
+                            "objective_component",
+                            float(row["reconstruction_main"]),
+                            args.csr_main_recon_weight,
+                        ),
+                        (
+                            "reconstruction_multi_topk",
+                            "objective_component",
+                            float(row["reconstruction_multi_topk"]),
+                            args.csr_multi_topk_recon_weight,
+                        ),
+                        (
+                            "reconstruction_auxiliary",
+                            "objective_component",
+                            float(row["reconstruction_auxiliary"]),
+                            args.csr_aux_recon_weight,
+                        ),
+                        (
+                            "nonnegative_contrastive",
+                            "objective_component",
+                            float(row["contrastive"]),
+                            args.csr_contrastive_weight,
+                        ),
+                    ]
                 )
             else:
                 components.extend(
@@ -1766,25 +2012,25 @@ def training_loss_records(
                             "reconstruction_main",
                             "objective_component",
                             float(row.get("reconstruction_main", row["reconstruction"])),
-                            1.0,
+                            args.mpsae_main_recon_weight,
                         ),
                         (
                             "reconstruction_nested",
                             "objective_component",
                             float(row.get("reconstruction_nested", 0.0)),
-                            args.multi_topk_weight,
+                            args.mpsae_nested_recon_weight,
                         ),
                         (
                             "reconstruction_auxiliary",
                             "objective_component",
                             float(row.get("reconstruction_auxiliary", 0.0)),
-                            args.aux_weight,
+                            args.mpsae_aux_recon_weight,
                         ),
                         (
                             "mmpot_regularizer",
                             "objective_component",
                             float(row["mmpot_regularizer"]),
-                            MMPOT_LOSS_WEIGHT,
+                            args.mpsae_mmpot_weight,
                         ),
                     ]
                 )
@@ -1871,7 +2117,7 @@ def write_training_loss_analysis(
     backbone: BackboneSpec,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     records, impacts = training_loss_records(results, args)
-    prefix = f"csr_{backbone.name}"
+    prefix = f"ablation_{backbone.name}"
     history_path = output_dir / f"{prefix}_training_loss_history.csv"
     impact_path = output_dir / f"{prefix}_loss_component_impact.csv"
     write_comparison_csv(records, history_path)
@@ -1882,9 +2128,23 @@ def write_training_loss_analysis(
                 "Measured weighted contribution to the optimized objective and "
                 "observed start-to-finish decrease; not a causal ablation estimate."
             ),
-            "mmpot_loss_weight": MMPOT_LOSS_WEIGHT,
-            "multi_topk_weight": args.multi_topk_weight,
-            "auxiliary_weight": args.aux_weight,
+            "loss_weights": {
+                MATRYOSHKA: {
+                    "classification": args.mrl_classification_weight,
+                },
+                CSR: {
+                    "main_reconstruction": args.csr_main_recon_weight,
+                    "multi_topk_reconstruction": args.csr_multi_topk_recon_weight,
+                    "auxiliary_reconstruction": args.csr_aux_recon_weight,
+                    "nonnegative_contrastive": args.csr_contrastive_weight,
+                },
+                MP_SAE: {
+                    "main_reconstruction": args.mpsae_main_recon_weight,
+                    "nested_reconstruction": args.mpsae_nested_recon_weight,
+                    "auxiliary_reconstruction": args.mpsae_aux_recon_weight,
+                    "mmpot_regularizer": args.mpsae_mmpot_weight,
+                },
+            },
             "components": impacts,
         },
         output_dir / f"{prefix}_loss_component_impact.json",
@@ -1913,8 +2173,8 @@ def plot_training_procedure(
     configure_publication_style()
     import matplotlib.pyplot as plt
 
-    prefix = f"csr_{backbone.name}"
-    colors = {MATRYOSHKA: "#0072B2", MP_SAE: "#D55E00"}
+    prefix = f"ablation_{backbone.name}"
+    colors = {MATRYOSHKA: "#0072B2", CSR: "#009E73", MP_SAE: "#D55E00"}
     fig, axes = plt.subplots(2, 2, figsize=(8.4, 5.8), constrained_layout=True)
     for method, history in histories.items():
         epochs = [row["epoch"] for row in history]
@@ -1932,13 +2192,17 @@ def plot_training_procedure(
             color=colors[method], marker="o", label=label,
         )
         if method == MATRYOSHKA:
+            classification_weight = results[MATRYOSHKA].get(
+                "loss_weights", {}
+            ).get("classification", 1.0)
             for dimension in sorted(
                 history[-1].get("per_dimension_classification", {}), key=int
             ):
                 axes[0, 1].plot(
                     epochs,
                     [
-                        row.get("per_dimension_classification", {}).get(
+                        classification_weight
+                        * row.get("per_dimension_classification", {}).get(
                             dimension, math.nan
                         )
                         for row in history
@@ -1947,9 +2211,21 @@ def plot_training_procedure(
                     linewidth=1.0,
                     label=f"MRL CE dim {dimension}",
                 )
+        elif method == CSR:
+            component_specs = (
+                ("weighted_main_reconstruction", "CSR weighted main reconstruction", "#009E73"),
+                ("weighted_multi_topk_reconstruction", "CSR weighted 4K reconstruction", "#56B4E9"),
+                ("weighted_auxiliary_reconstruction", "CSR weighted auxiliary", "#E69F00"),
+                ("weighted_contrastive", "CSR weighted NCL", "#CC79A7"),
+            )
+            for key, label_name, color in component_specs:
+                axes[0, 1].plot(
+                    epochs, [row.get(key, math.nan) for row in history],
+                    marker=".", color=color, linestyle="--", label=label_name,
+                )
         else:
             component_specs = (
-                ("reconstruction_main", "Main reconstruction", "#009E73"),
+                ("weighted_main_reconstruction", "Weighted main reconstruction", "#009E73"),
                 ("weighted_nested_reconstruction", "Weighted nested reconstruction", "#56B4E9"),
                 ("weighted_auxiliary_reconstruction", "Weighted auxiliary", "#E69F00"),
                 ("weighted_mmpot_regularizer", "Weighted MMPOT", "#CC79A7"),
@@ -2036,14 +2312,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     configure_runtime(args, device)
     init_wandb(
         args,
-        default_name=f"csr-{backbone.name}-{args.method}",
-        default_group="csr-architecture-ablation",
+        default_name=f"three-method-{backbone.name}-{args.method}",
+        default_group="three-method-architecture-ablation",
         extra_config={
-            "experiment_family": "csr_vs_mpsae",
+            "experiment_family": "matryoshka_csr_mpsae",
             "backbone_display_name": backbone.display_name,
             "backbone_weights": backbone.weights_id,
         },
-        tags=("csr", args.backbone, args.method),
+        tags=("matryoshka", "csr", "mpsae", args.backbone, args.method),
     )
     print(
         f"backbone={backbone.name} feature_dim={backbone.output_dim} "
@@ -2054,7 +2330,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     results: Dict[str, Any] = {}
     dataset_metadata: Dict[str, Any] = {}
 
-    if args.method in (MATRYOSHKA, "both"):
+    if args.method in (MATRYOSHKA, "all"):
         seed_all(args.seed)
         matryoshka_model, history = train_matryoshka_backbone(device, args)
         nested_dims = list(matryoshka_model.nested_dims)
@@ -2077,8 +2353,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 for parameter in matryoshka_model.parameters()
                 if parameter.requires_grad
             ),
-            "training_protocol": f"end_to_end_{backbone.name}_mrl_mean_cross_entropy",
+            "training_protocol": f"end_to_end_{backbone.name}_mrl_sum_cross_entropy",
+            "training_epochs": args.epochs,
             "nested_dims": nested_dims,
+            "loss_weights": {
+                "classification": args.mrl_classification_weight,
+            },
             "history": history,
             "knn": knn,
         }
@@ -2092,7 +2372,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if device.type == "cuda":
             torch.cuda.empty_cache()
 
-    if args.method in (MP_SAE, "both"):
+    if args.method in (CSR, MP_SAE, "all"):
         frozen_backbone = FrozenBackbone(args.weights_cache, backbone).to(device)
         if args.channels_last:
             frozen_backbone = frozen_backbone.to(memory_format=torch.channels_last)
@@ -2127,32 +2407,87 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         template = TopKSAE(backbone.output_dim, args.hidden_dim, args.dead_steps)
         template.pre_bias.data.copy_(estimate_feature_mean(train_data.features))
         initial_state = {key: value.clone() for key, value in template.state_dict().items()}
-        model, history = train_mp_sae(initial_state, train_data, device, args)
-        knn = benchmark_method(MP_SAE, model, train_data, val_data, device, args)
-        results[MP_SAE] = {
-            "display_name": labels[MP_SAE],
-            "backbone": backbone.name,
-            "feature_dim": backbone.output_dim,
-            "trainable_parameters": sum(
-                parameter.numel()
-                for parameter in model.parameters()
-                if parameter.requires_grad
-            ),
-            "training_protocol": f"frozen_{backbone.name}_topk_sae_plus_mmpot",
-            "mmpot_loss_weight": MMPOT_LOSS_WEIGHT,
-            "history": history,
-            "knn": knn,
-        }
-        dataset_metadata[MP_SAE] = {
-            "train": frozen_train_meta, "validation": frozen_val_meta
-        }
-        atomic_json(results[MP_SAE], args.output_dir / MP_SAE / "results.json")
-        del model, train_data, val_data
+        del template
+
+        if args.method in (CSR, "all"):
+            seed_all(args.seed)
+            csr_model, csr_history = train_csr(
+                initial_state, train_data, device, args
+            )
+            csr_knn = benchmark_method(
+                CSR, csr_model, train_data, val_data, device, args
+            )
+            results[CSR] = {
+                "display_name": labels[CSR],
+                "backbone": backbone.name,
+                "feature_dim": backbone.output_dim,
+                "trainable_parameters": sum(
+                    parameter.numel()
+                    for parameter in csr_model.parameters()
+                    if parameter.requires_grad
+                ),
+                "training_protocol": (
+                    f"frozen_{backbone.name}_topk_sae_reconstruction_plus_ncl"
+                ),
+                "training_epochs": args.epochs,
+                "loss_weights": {
+                    "main_reconstruction": args.csr_main_recon_weight,
+                    "multi_topk_reconstruction": args.csr_multi_topk_recon_weight,
+                    "auxiliary_reconstruction": args.csr_aux_recon_weight,
+                    "nonnegative_contrastive": args.csr_contrastive_weight,
+                },
+                "history": csr_history,
+                "knn": csr_knn,
+            }
+            dataset_metadata[CSR] = {
+                "train": frozen_train_meta, "validation": frozen_val_meta
+            }
+            atomic_json(results[CSR], args.output_dir / CSR / "results.json")
+            del csr_model
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+
+        if args.method in (MP_SAE, "all"):
+            seed_all(args.seed)
+            mp_model, mp_history = train_mp_sae(
+                initial_state, train_data, device, args
+            )
+            mp_knn = benchmark_method(
+                MP_SAE, mp_model, train_data, val_data, device, args
+            )
+            results[MP_SAE] = {
+                "display_name": labels[MP_SAE],
+                "backbone": backbone.name,
+                "feature_dim": backbone.output_dim,
+                "trainable_parameters": sum(
+                    parameter.numel()
+                    for parameter in mp_model.parameters()
+                    if parameter.requires_grad
+                ),
+                "training_protocol": f"frozen_{backbone.name}_topk_sae_plus_mmpot",
+                "training_epochs": args.epochs + args.mpsae_extra_epochs,
+                "loss_weights": {
+                    "main_reconstruction": args.mpsae_main_recon_weight,
+                    "nested_reconstruction": args.mpsae_nested_recon_weight,
+                    "auxiliary_reconstruction": args.mpsae_aux_recon_weight,
+                    "mmpot_regularizer": args.mpsae_mmpot_weight,
+                },
+                "history": mp_history,
+                "knn": mp_knn,
+            }
+            dataset_metadata[MP_SAE] = {
+                "train": frozen_train_meta, "validation": frozen_val_meta
+            }
+            atomic_json(
+                results[MP_SAE], args.output_dir / MP_SAE / "results.json"
+            )
+            del mp_model
+        del train_data, val_data, initial_state
         if device.type == "cuda":
             torch.cuda.empty_cache()
 
     summary = {
-        "experiment": f"Matryoshka_{backbone.name}_vs_MP_SAE",
+        "experiment": f"Matryoshka_vs_CSR_vs_MP_SAE_{backbone.name}",
         "study_role": "architecture_ablation_backbone_unit",
         "ablation_variable": "backbone",
         "backbone": {
@@ -2169,9 +2504,32 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "queries": "validation_split",
             "budget_definition": {
                 MATRYOSHKA: f"{backbone.display_name} feature-prefix dimension",
+                CSR: "number of active Top-K sparse latents",
                 MP_SAE: "number of active Top-K sparse latents",
             },
-            "mmpot_loss_weight": MMPOT_LOSS_WEIGHT,
+            "training_epochs": {
+                MATRYOSHKA: args.epochs,
+                CSR: args.epochs,
+                MP_SAE: args.epochs + args.mpsae_extra_epochs,
+            },
+            "model_weights_saved": False,
+            "loss_weights": {
+                MATRYOSHKA: {
+                    "classification": args.mrl_classification_weight,
+                },
+                CSR: {
+                    "main_reconstruction": args.csr_main_recon_weight,
+                    "multi_topk_reconstruction": args.csr_multi_topk_recon_weight,
+                    "auxiliary_reconstruction": args.csr_aux_recon_weight,
+                    "nonnegative_contrastive": args.csr_contrastive_weight,
+                },
+                MP_SAE: {
+                    "main_reconstruction": args.mpsae_main_recon_weight,
+                    "nested_reconstruction": args.mpsae_nested_recon_weight,
+                    "auxiliary_reconstruction": args.mpsae_aux_recon_weight,
+                    "mmpot_regularizer": args.mpsae_mmpot_weight,
+                },
+            },
         },
         "dataset": dataset_metadata,
         "config": serializable_args(args),
@@ -2187,7 +2545,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         results, args, args.output_dir, backbone
     )
     plot_training_procedure(results, loss_impacts, args.output_dir, backbone)
-    artifact_prefix = f"csr_{backbone.name}"
+    artifact_prefix = f"ablation_{backbone.name}"
     summary["training_loss_analysis"] = {
         "impact_definition": (
             "Measured weighted contribution to the optimized objective and "

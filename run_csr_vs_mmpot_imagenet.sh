@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Controlled architecture-ablation launcher for Matryoshka versus MP-SAE.
+# Controlled Matryoshka/CSR/MP-SAE architecture-ablation launcher.
 #
 # Usage:
 #   ./run_csr_vs_mmpot_imagenet.sh /path/to/imagenet
 #   BACKBONES=resnet50 DATA_ROOT=/path/to/imagenet ./run_csr_vs_mmpot_imagenet.sh
-#   DATA_ROOT=/path/to/imagenet ./run_csr_vs_mmpot_imagenet.sh --backbone swin_t --epochs 3
 #   DATA_BACKEND=hf DATA_ROOT=/data/huggingface ./run_csr_vs_mmpot_imagenet.sh
 #
 # ResNet-18 and ResNet-50 run sequentially by default with one shared set of
-# experimental arguments. Swin-T remains an optional additional architecture.
+# experimental arguments. The thesis ablation is restricted to these two
+# ResNet backbones.
 # Set BACKBONES to a comma-separated subset, or pass one --backbone argument.
 # Other arguments after DATA_ROOT are forwarded unchanged to every Python run.
 # Missing dependencies are installed only when INSTALL_DEPS=1; the Docker image
@@ -34,8 +34,8 @@ fi
 
 DATA_BACKEND="${DATA_BACKEND:-imagefolder}"
 BACKBONES="${BACKBONES:-resnet18,resnet50}"
-CACHE_DIR="${CACHE_DIR:-$SCRIPT_DIR/runs/matryoshka_mpsae/cache}"
-OUTPUT_DIR="${OUTPUT_DIR:-$SCRIPT_DIR/runs/matryoshka_mpsae}"
+CACHE_DIR="${CACHE_DIR:-$SCRIPT_DIR/runs/three_method_ablation/cache}"
+OUTPUT_DIR="${OUTPUT_DIR:-$SCRIPT_DIR/runs/three_method_ablation}"
 WEIGHTS_CACHE="${WEIGHTS_CACHE:-$SCRIPT_DIR/weights}"
 INSTALL_DEPS="${INSTALL_DEPS:-0}"
 FAISS_GPU="${FAISS_GPU:-1}"
@@ -98,10 +98,10 @@ backbone_list=()
 for requested in "${requested_backbones[@]}"; do
     backbone="${requested//[[:space:]]/}"
     case "$backbone" in
-        resnet18|resnet50|swin_t) backbone_list+=("$backbone") ;;
+        resnet18|resnet50) backbone_list+=("$backbone") ;;
         "") ;;
         *)
-            echo "Error: unsupported backbone '$backbone' (use resnet18, resnet50, or swin_t)." >&2
+            echo "Error: unsupported backbone '$backbone' (use resnet18 or resnet50)." >&2
             exit 2
             ;;
     esac
@@ -201,7 +201,7 @@ case "$AGGREGATE_RESULTS" in
         ;;
 esac
 
-echo "Running controlled Matryoshka vs MP-SAE architecture ablation"
+echo "Running controlled Matryoshka vs CSR vs MP-SAE architecture ablation"
 echo "  backend: $DATA_BACKEND"
 echo "  data:    $DATA_ROOT"
 echo "  models:  ${backbone_list[*]}"
@@ -243,4 +243,4 @@ if [[ "$AGGREGATE_RESULTS" == "1" ]]; then
     echo "Collect: $OUTPUT_DIR/imagenet_architecture_ablation_results.zip"
 fi
 
-echo "Completed architecture ablation: ${backbone_list[*]}"
+echo "Completed three-method architecture ablation: ${backbone_list[*]}"

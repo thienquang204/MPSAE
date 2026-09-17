@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Build a controlled architecture ablation from Matryoshka/MP-SAE runs.
+"""Build a controlled Matryoshka/CSR/MP-SAE architecture ablation.
 
 The input directory must contain one subdirectory per requested backbone, each
 with the ``summary.json`` written by ``csr_vs_mmpot_imagenet.py``. The output
-files quantify the effect of MP-SAE relative to Matryoshka at every
-representation budget and across backbones. A compact ZIP excludes checkpoints
-and feature caches so it is convenient to copy off a server.
+files compare all three methods at every representation budget and across
+backbones. A compact ZIP excludes feature caches for convenient transfer.
 """
 
 from __future__ import annotations
@@ -22,11 +21,12 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 
-SUPPORTED_BACKBONES = ("resnet18", "resnet50", "swin_t")
+SUPPORTED_BACKBONES = ("resnet18", "resnet50")
 DEFAULT_ABLATION_BACKBONES = ("resnet18", "resnet50")
 MATRYOSHKA = "matryoshka"
+CSR = "csr"
 MP_SAE = "mpsae"
-METHODS = (MATRYOSHKA, MP_SAE)
+METHODS = (MATRYOSHKA, CSR, MP_SAE)
 CONTROLLED_CONFIG_KEYS = (
     "data_root",
     "data_backend",
@@ -40,12 +40,21 @@ CONTROLLED_CONFIG_KEYS = (
     "topk",
     "train_k",
     "k_aux",
-    "aux_weight",
     "dead_steps",
-    "multi_topk_weight",
+    "mrl_classification_weight",
+    "csr_main_recon_weight",
+    "csr_multi_topk_recon_weight",
+    "csr_aux_recon_weight",
+    "csr_contrastive_weight",
+    "mpsae_main_recon_weight",
+    "mpsae_nested_recon_weight",
+    "mpsae_aux_recon_weight",
+    "mpsae_mmpot_weight",
     "epochs",
+    "mpsae_extra_epochs",
     "batch_size",
     "lr",
+    "csr_lr",
     "weight_decay",
     "mrl_lr",
     "mrl_momentum",
@@ -72,6 +81,8 @@ METHOD_RESULT_FILES = (
     "comparison_table.tex",
     "matryoshka/results.json",
     "matryoshka/history.json",
+    "csr/results.json",
+    "csr/history.json",
     "mpsae/results.json",
     "mpsae/history.json",
 )
@@ -131,7 +142,7 @@ def load_backbone_summary(results_root: Path, backbone: str) -> Dict[str, Any]:
     if missing_methods:
         raise RuntimeError(
             f"{path} is incomplete for an architecture ablation; missing "
-            f"{', '.join(missing_methods)} (run with --method both)"
+            f"{', '.join(missing_methods)} (run with --method all)"
         )
     return summary
 
@@ -142,15 +153,15 @@ def validate_controlled_protocol(
     """Require every non-architectural experimental variable to be matched."""
     reference_name = backbones[0]
     reference = summaries[reference_name].get("config", {})
-    if reference.get("method") != "both":
+    if reference.get("method") != "all":
         raise RuntimeError(
-            f"{reference_name} was not run with --method both; architecture "
-            "ablation requires both comparison arms"
+            f"{reference_name} was not run with --method all; architecture "
+            "ablation requires all three comparison arms"
         )
     mismatches: List[str] = []
     for name in backbones[1:]:
         config = summaries[name].get("config", {})
-        if config.get("method") != "both":
+        if config.get("method") != "all":
             mismatches.append(f"{name}.method={config.get('method')!r}")
         for key in CONTROLLED_CONFIG_KEYS:
             if config.get(key) != reference.get(key):
@@ -187,7 +198,7 @@ def validate_controlled_protocol(
         width_multipliers[name] = float(hidden_dim) / float(feature_dim)
     if max(width_multipliers.values()) - min(width_multipliers.values()) > 1e-12:
         raise RuntimeError(
-            "architecture ablation must keep the MP-SAE width multiplier "
+            "architecture ablation must keep the CSR/MP-SAE width multiplier "
             "constant: "
             + ", ".join(
                 f"{name}={multiplier:g}x"
@@ -225,22 +236,25 @@ def extract_rows(summary: Mapping[str, Any]) -> List[Dict[str, Any]]:
     }
     if any(not budgets for budgets in budget_sets.values()):
         raise RuntimeError(f"{backbone['name']} has no per-budget 1-NN results")
-    if budget_sets[MATRYOSHKA] != budget_sets[MP_SAE]:
+    if len({frozenset(budgets) for budgets in budget_sets.values()}) != 1:
         raise RuntimeError(
             f"{backbone['name']} has unmatched representation budgets: "
-            f"Matryoshka={sorted(budget_sets[MATRYOSHKA])}, "
-            f"MP-SAE={sorted(budget_sets[MP_SAE])}"
+            + ", ".join(
+                f"{method}={sorted(budgets)}"
+                for method, budgets in budget_sets.items()
+            )
         )
     budgets = sorted(budget_sets[MATRYOSHKA])
 
     rows: List[Dict[str, Any]] = []
     for budget in budgets:
         mrl_top1 = metric_value(per_method[MATRYOSHKA], budget, "top1")
+        csr_top1 = metric_value(per_method[CSR], budget, "top1")
         mp_top1 = metric_value(per_method[MP_SAE], budget, "top1")
-        if mrl_top1 is None or mp_top1 is None:
+        if mrl_top1 is None or csr_top1 is None or mp_top1 is None:
             raise RuntimeError(
                 f"{backbone['name']} budget {budget} is missing a numeric top1 "
-                "metric for one or both comparison arms"
+                "metric for one or more comparison arms"
             )
         effect = (
             mp_top1 - mrl_top1
@@ -261,6 +275,9 @@ def extract_rows(summary: Mapping[str, Any]) -> List[Dict[str, Any]]:
                 "matryoshka_trainable_parameters": method_results.get(
                     MATRYOSHKA, {}
                 ).get("trainable_parameters"),
+                "csr_trainable_parameters": method_results.get(CSR, {}).get(
+                    "trainable_parameters"
+                ),
                 "mp_sae_trainable_parameters": method_results.get(MP_SAE, {}).get(
                     "trainable_parameters"
                 ),
@@ -270,20 +287,45 @@ def extract_rows(summary: Mapping[str, Any]) -> List[Dict[str, Any]]:
                     else None
                 ),
                 "representation_budget": budget,
+                "mrl_classification_weight": config.get(
+                    "mrl_classification_weight"
+                ),
+                "csr_main_recon_weight": config.get("csr_main_recon_weight"),
+                "csr_multi_topk_recon_weight": config.get(
+                    "csr_multi_topk_recon_weight"
+                ),
+                "csr_aux_recon_weight": config.get("csr_aux_recon_weight"),
+                "csr_contrastive_weight": config.get("csr_contrastive_weight"),
+                "mpsae_main_recon_weight": config.get(
+                    "mpsae_main_recon_weight"
+                ),
+                "mpsae_nested_recon_weight": config.get(
+                    "mpsae_nested_recon_weight"
+                ),
+                "mpsae_aux_recon_weight": config.get("mpsae_aux_recon_weight"),
+                "mpsae_mmpot_weight": config.get("mpsae_mmpot_weight"),
                 "matryoshka_1nn_top1": mrl_top1,
+                "csr_1nn_top1": csr_top1,
                 "mp_sae_1nn_top1": mp_top1,
+                "method_effect_csr_minus_matryoshka_pp": csr_top1 - mrl_top1,
                 "method_effect_mp_sae_minus_matryoshka_pp": effect,
+                "method_effect_mp_sae_minus_csr_pp": mp_top1 - csr_top1,
                 "relative_error_reduction_pct": relative_error_reduction,
                 "mp_sae_wins_at_budget": (
                     int(effect > 0.0) if effect is not None else None
                 ),
                 # Retained for consumers of the earlier aggregate schema.
                 "delta_mp_sae_minus_matryoshka": effect,
+                "delta_csr_minus_matryoshka": csr_top1 - mrl_top1,
+                "delta_mp_sae_minus_csr": mp_top1 - csr_top1,
                 "matryoshka_mean_neighbor_l2_squared": metric_value(
                     per_method[MATRYOSHKA], budget, "mean_neighbor_l2_squared"
                 ),
                 "mp_sae_mean_neighbor_l2_squared": metric_value(
                     per_method[MP_SAE], budget, "mean_neighbor_l2_squared"
+                ),
+                "csr_mean_neighbor_l2_squared": metric_value(
+                    per_method[CSR], budget, "mean_neighbor_l2_squared"
                 ),
             }
         )
@@ -319,6 +361,8 @@ def build_aggregate(
 ) -> Dict[str, Any]:
     aggregate_backbones: Dict[str, Any] = {}
     effect_key = "method_effect_mp_sae_minus_matryoshka_pp"
+    csr_effect_key = "method_effect_csr_minus_matryoshka_pp"
+    mp_vs_csr_key = "method_effect_mp_sae_minus_csr_pp"
     for name in backbones:
         summary = summaries[name]
         backbone_rows = [row for row in rows if row["backbone"] == name]
@@ -327,11 +371,16 @@ def build_aggregate(
             for row in backbone_rows
             if isinstance(row.get(effect_key), (int, float))
         ]
+        csr_effect_values = [float(row[csr_effect_key]) for row in backbone_rows]
+        mp_vs_csr_values = [float(row[mp_vs_csr_key]) for row in backbone_rows]
         aggregate_backbones[name] = {
             **summary["backbone"],
             "source_summary": str(Path(name) / "summary.json"),
             "configuration": summary.get("config", {}),
             "matryoshka_trainable_parameters": summary["results"][MATRYOSHKA].get(
+                "trainable_parameters"
+            ),
+            "csr_trainable_parameters": summary["results"][CSR].get(
                 "trainable_parameters"
             ),
             "mp_sae_trainable_parameters": summary["results"][MP_SAE].get(
@@ -340,7 +389,11 @@ def build_aggregate(
             "mean_matryoshka_1nn_top1": numeric_mean(
                 backbone_rows, "matryoshka_1nn_top1"
             ),
+            "mean_csr_1nn_top1": numeric_mean(backbone_rows, "csr_1nn_top1"),
             "mean_mp_sae_1nn_top1": numeric_mean(backbone_rows, "mp_sae_1nn_top1"),
+            "mean_delta_csr_minus_matryoshka": numeric_mean(
+                backbone_rows, "delta_csr_minus_matryoshka"
+            ),
             "mean_delta_mp_sae_minus_matryoshka": numeric_mean(
                 backbone_rows, "delta_mp_sae_minus_matryoshka"
             ),
@@ -364,6 +417,26 @@ def build_aggregate(
                     backbone_rows, "relative_error_reduction_pct"
                 ),
             },
+            "csr_effect": {
+                "definition": "CSR top-1 minus Matryoshka top-1, in percentage points",
+                "mean_pp": numeric_mean(backbone_rows, csr_effect_key),
+                "median_pp": numeric_median(backbone_rows, csr_effect_key),
+                "minimum_pp": numeric_min(backbone_rows, csr_effect_key),
+                "maximum_pp": numeric_max(backbone_rows, csr_effect_key),
+                "standard_deviation_pp": statistics.pstdev(csr_effect_values),
+                "positive_budget_count": sum(value > 0.0 for value in csr_effect_values),
+                "evaluated_budget_count": len(csr_effect_values),
+            },
+            "mp_sae_vs_csr_effect": {
+                "definition": "MP-SAE top-1 minus CSR top-1, in percentage points",
+                "mean_pp": numeric_mean(backbone_rows, mp_vs_csr_key),
+                "median_pp": numeric_median(backbone_rows, mp_vs_csr_key),
+                "minimum_pp": numeric_min(backbone_rows, mp_vs_csr_key),
+                "maximum_pp": numeric_max(backbone_rows, mp_vs_csr_key),
+                "standard_deviation_pp": statistics.pstdev(mp_vs_csr_values),
+                "positive_budget_count": sum(value > 0.0 for value in mp_vs_csr_values),
+                "evaluated_budget_count": len(mp_vs_csr_values),
+            },
             "per_budget": {
                 str(row["representation_budget"]): {
                     key: value
@@ -375,6 +448,7 @@ def build_aggregate(
                         "feature_dim",
                         "sae_hidden_dim",
                         "matryoshka_trainable_parameters",
+                        "csr_trainable_parameters",
                         "mp_sae_trainable_parameters",
                         "sae_width_multiplier",
                         "representation_budget",
@@ -407,10 +481,14 @@ def build_aggregate(
             - aggregate_backbones["resnet18"]["method_effect"]["mean_pp"]
         )
     return {
-        "experiment": "MP_SAE_architecture_ablation_ImageNet",
+        "experiment": "Matryoshka_CSR_MP_SAE_architecture_ablation_ImageNet",
         "ablation_factor": "frozen_and_matryoshka_backbone_architecture",
         "comparison_arms": list(METHODS),
-        "effect_definition": "MP-SAE top-1 minus Matryoshka top-1, in percentage points",
+        "effect_definitions": {
+            "csr_minus_matryoshka": "CSR top-1 minus Matryoshka top-1, in percentage points",
+            "mp_sae_minus_matryoshka": "MP-SAE top-1 minus Matryoshka top-1, in percentage points",
+            "mp_sae_minus_csr": "MP-SAE top-1 minus CSR top-1, in percentage points",
+        },
         "inference_scope": (
             "Descriptive matched-seed architecture ablation; uncertainty across "
             "independent random seeds is not estimated."
@@ -439,9 +517,14 @@ def effect_summary_rows(
                 "matryoshka_trainable_parameters": backbone.get(
                     "matryoshka_trainable_parameters"
                 ),
+                "csr_trainable_parameters": backbone.get(
+                    "csr_trainable_parameters"
+                ),
                 "mp_sae_trainable_parameters": backbone.get(
                     "mp_sae_trainable_parameters"
                 ),
+                "mean_csr_minus_matryoshka_pp": backbone["csr_effect"]["mean_pp"],
+                "mean_mp_sae_minus_csr_pp": backbone["mp_sae_vs_csr_effect"]["mean_pp"],
                 "mean_method_effect_pp": effect["mean_pp"],
                 "median_method_effect_pp": effect["median_pp"],
                 "minimum_method_effect_pp": effect["minimum_pp"],
@@ -477,13 +560,13 @@ def write_markdown(
     rows: Sequence[Mapping[str, Any]], backbones: Sequence[str], path: Path
 ) -> None:
     lines = [
-        "# ImageNet MP-SAE architecture ablation",
+        "# ImageNet Matryoshka / CSR / MP-SAE architecture ablation",
         "",
-        "The ablation changes only the backbone architecture. The method effect is "
-        "MP-SAE top-1 minus Matryoshka top-1 under a matched protocol.",
+        "The ablation changes only the backbone architecture and reports all pairwise "
+        "method effects under a matched protocol.",
         "",
-        "| Backbone | Feature dim | SAE dim | Budget K | Matryoshka top-1 | MP-SAE top-1 | Effect (pp) | Error reduction |",
-        "|:--|--:|--:|--:|--:|--:|--:|--:|",
+        "| Backbone | Feature dim | SAE dim | K | Matryoshka | CSR | MP-SAE | CSR-M | MP-SAE-M | MP-SAE-CSR |",
+        "|:--|--:|--:|--:|--:|--:|--:|--:|--:|--:|",
     ]
     for name in backbones:
         selected = [row for row in rows if row["backbone"] == name]
@@ -492,22 +575,26 @@ def write_markdown(
                 f"| {row['backbone_display_name']} | {row['feature_dim']} | "
                 f"{row['sae_hidden_dim']} | {row['representation_budget']} | "
                 f"{format_metric(row['matryoshka_1nn_top1'])} | "
+                f"{format_metric(row['csr_1nn_top1'])} | "
                 f"{format_metric(row['mp_sae_1nn_top1'])} | "
+                f"{format_metric(row['method_effect_csr_minus_matryoshka_pp'])} | "
                 f"{format_metric(row['method_effect_mp_sae_minus_matryoshka_pp'])} | "
-                f"{format_metric(row['relative_error_reduction_pct'])}% |"
+                f"{format_metric(row['method_effect_mp_sae_minus_csr_pp'])} |"
             )
         lines.append(
             f"| **{selected[0]['backbone_display_name']} mean** |  |  |  | "
             f"**{format_metric(numeric_mean(selected, 'matryoshka_1nn_top1'))}** | "
+            f"**{format_metric(numeric_mean(selected, 'csr_1nn_top1'))}** | "
             f"**{format_metric(numeric_mean(selected, 'mp_sae_1nn_top1'))}** | "
+            f"**{format_metric(numeric_mean(selected, 'method_effect_csr_minus_matryoshka_pp'))}** | "
             f"**{format_metric(numeric_mean(selected, 'method_effect_mp_sae_minus_matryoshka_pp'))}** | "
-            f"**{format_metric(numeric_mean(selected, 'relative_error_reduction_pct'))}%** |"
+            f"**{format_metric(numeric_mean(selected, 'method_effect_mp_sae_minus_csr_pp'))}** |"
         )
     lines.extend(
         [
             "",
             "Top-1 values and deltas are percentage points on ImageNet validation using exact L2 1-NN.",
-            "K is the Matryoshka prefix dimension or the number of active MP-SAE latents.",
+            "K is the Matryoshka prefix dimension or the number of active CSR/MP-SAE latents.",
             "The effect-summary CSV additionally records the effect range, variability, and fraction of budgets won.",
             "This is a descriptive matched-seed study; it does not estimate uncertainty across independent seeds.",
         ]
@@ -523,12 +610,12 @@ def write_latex(
     lines = [
         f"{slash}begin{{table*}}[t]",
         f"{slash}centering",
-        f"{slash}caption{{Architecture ablation of MP-SAE on ImageNet. Effect is MP-SAE minus Matryoshka exact L2 1-NN top-1 accuracy in percentage points.}}",
-        f"{slash}label{{tab:mp-sae-architecture-ablation}}",
+        f"{slash}caption{{Architecture ablation of Matryoshka, CSR, and MP-SAE on ImageNet using exact L2 1-NN top-1 accuracy.}}",
+        f"{slash}label{{tab:three-method-architecture-ablation}}",
         f"{slash}small",
-        f"{slash}begin{{tabular}}{{lrrrrrr}}",
+        f"{slash}begin{{tabular}}{{lrrrrrrrrr}}",
         f"{slash}toprule",
-        f"Backbone & Feature dim & SAE dim & K & Matryoshka & MP-SAE & Effect {row_end}",
+        f"Backbone & Feature dim & SAE dim & K & Matryoshka & CSR & MP-SAE & CSR-M & MP-SAE-M & MP-SAE-CSR {row_end}",
         f"{slash}midrule",
     ]
     for backbone_index, name in enumerate(backbones):
@@ -538,14 +625,20 @@ def write_latex(
                 f"{row['backbone_display_name']} & {row['feature_dim']} & "
                 f"{row['sae_hidden_dim']} & {row['representation_budget']} & "
                 f"{format_metric(row['matryoshka_1nn_top1'])} & "
+                f"{format_metric(row['csr_1nn_top1'])} & "
                 f"{format_metric(row['mp_sae_1nn_top1'])} & "
-                f"{format_metric(row['method_effect_mp_sae_minus_matryoshka_pp'])} {row_end}"
+                f"{format_metric(row['method_effect_csr_minus_matryoshka_pp'])} & "
+                f"{format_metric(row['method_effect_mp_sae_minus_matryoshka_pp'])} & "
+                f"{format_metric(row['method_effect_mp_sae_minus_csr_pp'])} {row_end}"
             )
         lines.append(
             f"{slash}textbf{{{selected[0]['backbone_display_name']} mean}} & & & & "
             f"{format_metric(numeric_mean(selected, 'matryoshka_1nn_top1'))} & "
+            f"{format_metric(numeric_mean(selected, 'csr_1nn_top1'))} & "
             f"{format_metric(numeric_mean(selected, 'mp_sae_1nn_top1'))} & "
-            f"{format_metric(numeric_mean(selected, 'method_effect_mp_sae_minus_matryoshka_pp'))} {row_end}"
+            f"{format_metric(numeric_mean(selected, 'method_effect_csr_minus_matryoshka_pp'))} & "
+            f"{format_metric(numeric_mean(selected, 'method_effect_mp_sae_minus_matryoshka_pp'))} & "
+            f"{format_metric(numeric_mean(selected, 'method_effect_mp_sae_minus_csr_pp'))} {row_end}"
         )
         if backbone_index != len(backbones) - 1:
             lines.append(f"{slash}midrule")
@@ -592,12 +685,11 @@ def plot_comparison(
     import matplotlib.pyplot as plt
     from matplotlib.ticker import FixedLocator, ScalarFormatter
 
-    colors = {"resnet18": "#0072B2", "resnet50": "#009E73", "swin_t": "#D55E00"}
+    colors = {"resnet18": "#0072B2", "resnet50": "#009E73"}
     fig, axes = plt.subplots(1, 3, figsize=(10.5, 3.0), constrained_layout=True)
     all_budgets = sorted({int(row["representation_budget"]) for row in rows})
-    mean_effects: List[float] = []
-    minimum_effects: List[float] = []
-    maximum_effects: List[float] = []
+    mean_csr_effects: List[float] = []
+    mean_mp_effects: List[float] = []
     display_names: List[str] = []
 
     for name in backbones:
@@ -606,8 +698,12 @@ def plot_comparison(
         display_names.append(display_name)
         budgets = [int(row["representation_budget"]) for row in selected]
         mrl = [row["matryoshka_1nn_top1"] for row in selected]
+        csr = [row["csr_1nn_top1"] for row in selected]
         mp_sae = [row["mp_sae_1nn_top1"] for row in selected]
-        deltas = [
+        csr_deltas = [
+            row["method_effect_csr_minus_matryoshka_pp"] for row in selected
+        ]
+        mp_deltas = [
             row["method_effect_mp_sae_minus_matryoshka_pp"] for row in selected
         ]
         color = colors.get(name, "#333333")
@@ -622,49 +718,49 @@ def plot_comparison(
                 budgets, mp_sae, color=color, marker="s", linestyle="-",
                 label=f"{display_name} MP-SAE",
             )
-        if all(value is not None for value in deltas):
-            axes[1].plot(budgets, deltas, color=color, marker="o", label=display_name)
-            mean_effects.append(
-                float(numeric_mean(selected, "method_effect_mp_sae_minus_matryoshka_pp"))
+        if all(value is not None for value in csr):
+            axes[0].plot(
+                budgets, csr, color=color, marker="^", linestyle=":",
+                label=f"{display_name} CSR",
             )
-            minimum_effects.append(
-                float(numeric_min(selected, "method_effect_mp_sae_minus_matryoshka_pp"))
-            )
-            maximum_effects.append(
-                float(numeric_max(selected, "method_effect_mp_sae_minus_matryoshka_pp"))
-            )
-        else:
-            mean_effects.append(float("nan"))
-            minimum_effects.append(float("nan"))
-            maximum_effects.append(float("nan"))
+        axes[1].plot(
+            budgets, csr_deltas, color=color, marker="^", linestyle=":",
+            label=f"{display_name} CSR-M",
+        )
+        axes[1].plot(
+            budgets, mp_deltas, color=color, marker="s", linestyle="-",
+            label=f"{display_name} MP-SAE-M",
+        )
+        mean_csr_effects.append(
+            float(numeric_mean(selected, "method_effect_csr_minus_matryoshka_pp"))
+        )
+        mean_mp_effects.append(
+            float(numeric_mean(selected, "method_effect_mp_sae_minus_matryoshka_pp"))
+        )
 
     axes[0].set_title("(a) Matched accuracy curves", loc="left", fontweight="bold")
     axes[0].set_ylabel("ImageNet val. top-1 accuracy (%)")
     axes[0].legend(frameon=False, ncol=2, handlelength=2.2)
     axes[1].axhline(0.0, color="#333333", linewidth=0.8)
     axes[1].set_title("(b) Method effect by budget", loc="left", fontweight="bold")
-    axes[1].set_ylabel("MP-SAE - Matryoshka (pp)")
+    axes[1].set_ylabel("Method - Matryoshka (pp)")
     axes[1].legend(frameon=False)
 
     positions = list(range(len(backbones)))
     bar_colors = [colors.get(name, "#333333") for name in backbones]
-    axes[2].bar(positions, mean_effects, width=0.58, color=bar_colors, alpha=0.88)
-    axes[2].errorbar(
-        positions,
-        mean_effects,
-        yerr=[
-            [mean - minimum for mean, minimum in zip(mean_effects, minimum_effects)],
-            [maximum - mean for mean, maximum in zip(mean_effects, maximum_effects)],
-        ],
-        fmt="none",
-        ecolor="#222222",
-        elinewidth=0.9,
-        capsize=3,
+    axes[2].bar(
+        [position - 0.18 for position in positions], mean_csr_effects,
+        width=0.36, color=bar_colors, alpha=0.55, label="CSR - Matryoshka",
+    )
+    axes[2].bar(
+        [position + 0.18 for position in positions], mean_mp_effects,
+        width=0.36, color=bar_colors, alpha=0.95, label="MP-SAE - Matryoshka",
     )
     axes[2].axhline(0.0, color="#333333", linewidth=0.8)
     axes[2].set_xticks(positions, display_names, rotation=15, ha="right")
-    axes[2].set_title("(c) Mean effect and budget range", loc="left", fontweight="bold")
-    axes[2].set_ylabel("MP-SAE - Matryoshka (pp)")
+    axes[2].set_title("(c) Mean method effects", loc="left", fontweight="bold")
+    axes[2].set_ylabel("Method - Matryoshka (pp)")
+    axes[2].legend(frameon=False)
 
     for axis in axes[:2]:
         axis.set_xlabel("Representation budget K")
@@ -704,7 +800,7 @@ def result_artifacts(
             path = results_root / name / relative
             if path.is_file():
                 paths.append(path)
-        for path in (results_root / name).glob("csr_*"):
+        for path in (results_root / name).glob("ablation_*"):
             if path.is_file() and path.suffix.lower() in PORTABLE_SUFFIXES:
                 paths.append(path)
         log_dir = results_root / name / "logs"
@@ -727,7 +823,7 @@ def write_bundle(results_root: Path, artifacts: Sequence[Path], path: Path) -> N
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Create a controlled MP-SAE architecture ablation from "
+            "Create a controlled Matryoshka/CSR/MP-SAE architecture ablation from "
             "csr_vs_mmpot_imagenet.py outputs."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -814,7 +910,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "bundle": bundle_path.name,
             "bundle_bytes": bundle_path.stat().st_size,
             "bundle_sha256": sha256(bundle_path),
-            "study": "MP_SAE_architecture_ablation_ImageNet",
+            "study": "Matryoshka_CSR_MP_SAE_architecture_ablation_ImageNet",
             "primary_plot_png": "architecture_ablation_effect.png",
             "primary_plot_pdf": "architecture_ablation_effect.pdf",
             "per_budget_table": "architecture_ablation_per_budget.csv",
@@ -823,15 +919,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         completion_path,
     )
 
-    print("\nMP-SAE architecture-ablation effect (exact L2 1-NN top-1)")
-    print(f"{'backbone':<12} {'Matryoshka':>12} {'MP-SAE':>12} {'delta':>12}")
+    print("\nThree-method architecture ablation (exact L2 1-NN top-1)")
+    print(
+        f"{'backbone':<12} {'Matryoshka':>12} {'CSR':>12} "
+        f"{'MP-SAE':>12} {'MP-CSR':>12}"
+    )
     for name in args.backbones:
         entry = aggregate["backbones"][name]
         print(
             f"{entry['display_name']:<12} "
             f"{format_metric(entry['mean_matryoshka_1nn_top1']):>12} "
+            f"{format_metric(entry['mean_csr_1nn_top1']):>12} "
             f"{format_metric(entry['mean_mp_sae_1nn_top1']):>12} "
-            f"{format_metric(entry['mean_delta_mp_sae_minus_matryoshka']):>12}"
+            f"{format_metric(entry['mp_sae_vs_csr_effect']['mean_pp']):>12}"
         )
     print(f"\nResults bundle: {bundle_path}")
     print(f"Completion marker: {completion_path}")
