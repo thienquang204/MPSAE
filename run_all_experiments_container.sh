@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# One in-container setting: Matryoshka, CSR, and MP-SAE on ResNet-18/50.
+# Matryoshka plus CSR/MPSAE v1 and v2 on ResNet-18/50.
 DATA_ROOT="${DATA_ROOT:-/data/huggingface}"
 OUTPUT_MOUNT="${OUTPUT_MOUNT:-/output}"
 SUITE_ROOT="${SUITE_ROOT:-$OUTPUT_MOUNT/three_method_ablation}"
@@ -19,28 +19,32 @@ HOST_UID="${HOST_UID:-0}"
 HOST_GID="${HOST_GID:-0}"
 
 # The experiment matrix is intentionally fixed to both requested architectures
-# and all three methods. Normal resource/hyperparameter controls remain in .env.
+# and all five arms. Normal resource/hyperparameter controls remain in .env.
 BACKBONES="resnet18,resnet50"
 BASE_EPOCHS="${ABLATION_EPOCHS:-10}"
-MPSAE_EXTRA_EPOCHS="${MPSAE_EXTRA_EPOCHS:-4}"
+MPSAEV2_EXTRA_EPOCHS="${MPSAEV2_EXTRA_EPOCHS:-${MPSAE_EXTRA_EPOCHS:-4}}"
 BATCH_SIZE="${ABLATION_BATCH_SIZE:-1024}"
 FEATURE_BATCH_SIZE="${FEATURE_BATCH_SIZE:-512}"
 MAX_TRAIN="${MAX_TRAIN:-0}"
 MAX_VAL="${MAX_VAL:-0}"
-HIDDEN_DIM="${HIDDEN_DIM:-0}"
-TRAIN_K="${TRAIN_K:-32}"
-TOPK="${TOPK:-8,16,32,64,128,256}"
+HIDDEN_DIM="${HIDDEN_DIM:-8196}"
+TRAIN_K="${TRAIN_K:-2}"
+V1_TRAIN_K="${V1_TRAIN_K:-32}"
+ANNEAL_START_K="${ANNEAL_START_K:-64}"
+ANNEAL_FRACTION="${ANNEAL_FRACTION:-0.7}"
+SPARSE_EXTRA_TOPK="${SPARSE_EXTRA_TOPK:-1,2,4}"
+SPARSE_KNN_QUERY_BATCH="${SPARSE_KNN_QUERY_BATCH:-32}"
 MRL_CLASSIFICATION_WEIGHT="${MRL_CLASSIFICATION_WEIGHT:-1.0}"
-CSR_MAIN_RECON_WEIGHT="${CSR_MAIN_RECON_WEIGHT:-1.0}"
-CSR_MULTI_TOPK_RECON_WEIGHT="${CSR_MULTI_TOPK_RECON_WEIGHT:-0.125}"
-CSR_AUX_RECON_WEIGHT="${CSR_AUX_RECON_WEIGHT:-0.03125}"
-CSR_CONTRASTIVE_WEIGHT="${CSR_CONTRASTIVE_WEIGHT:-1.0}"
-MPSAE_MAIN_RECON_WEIGHT="${MPSAE_MAIN_RECON_WEIGHT:-1.0}"
-MPSAE_NESTED_RECON_WEIGHT="${MPSAE_NESTED_RECON_WEIGHT:-0.125}"
-MPSAE_AUX_RECON_WEIGHT="${MPSAE_AUX_RECON_WEIGHT:-0.03125}"
-MPSAE_MMPOT_WEIGHT="${MPSAE_MMPOT_WEIGHT:-1.3}"
-MPSAE_LR="${MPSAE_LR:-4e-5}"
-CSR_LR="${CSR_LR:-1e-4}"
+CSRV2_MAIN_RECON_WEIGHT="${CSRV2_MAIN_RECON_WEIGHT:-${CSR_MAIN_RECON_WEIGHT:-1.0}}"
+CSRV2_MULTI_TOPK_RECON_WEIGHT="${CSRV2_MULTI_TOPK_RECON_WEIGHT:-${CSR_MULTI_TOPK_RECON_WEIGHT:-0.125}}"
+CSRV2_AUX_RECON_WEIGHT="${CSRV2_AUX_RECON_WEIGHT:-${CSR_AUX_RECON_WEIGHT:-0.03125}}"
+CSRV2_CONTRASTIVE_WEIGHT="${CSRV2_CONTRASTIVE_WEIGHT:-${CSR_CONTRASTIVE_WEIGHT:-1.0}}"
+MPSAEV2_MAIN_RECON_WEIGHT="${MPSAEV2_MAIN_RECON_WEIGHT:-${MPSAE_MAIN_RECON_WEIGHT:-1.0}}"
+MPSAEV2_NESTED_RECON_WEIGHT="${MPSAEV2_NESTED_RECON_WEIGHT:-${MPSAE_NESTED_RECON_WEIGHT:-0.125}}"
+MPSAEV2_AUX_RECON_WEIGHT="${MPSAEV2_AUX_RECON_WEIGHT:-${MPSAE_AUX_RECON_WEIGHT:-0.03125}}"
+MPSAEV2_MMPOT_WEIGHT="${MPSAEV2_MMPOT_WEIGHT:-${MPSAE_MMPOT_WEIGHT:-1.3}}"
+MPSAEV2_LR="${MPSAEV2_LR:-${MPSAE_LR:-4e-5}}"
+CSRV2_LR="${CSRV2_LR:-${CSR_LR:-1e-4}}"
 MRL_LR="${MRL_LR:-1e-2}"
 MRL_MOMENTUM="${MRL_MOMENTUM:-0.9}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-1e-4}"
@@ -68,8 +72,8 @@ bool_flag() {
     esac
 }
 
-[[ "$MPSAE_EXTRA_EPOCHS" == "4" ]] \
-    || die "MPSAE_EXTRA_EPOCHS is fixed at 4 for this ablation"
+[[ "$MPSAEV2_EXTRA_EPOCHS" == "4" ]] \
+    || die "MPSAEV2_EXTRA_EPOCHS is fixed at 4 for this ablation"
 case "$SUITE_ROOT" in
     "$OUTPUT_MOUNT"|"$OUTPUT_MOUNT"/*) ;;
     *) die "SUITE_ROOT must be inside the persistent $OUTPUT_MOUNT mount" ;;
@@ -98,9 +102,8 @@ import faiss
 
 if not torch.cuda.is_available():
     raise SystemExit("CUDA is unavailable; start Docker with NVIDIA GPU access")
-if not hasattr(faiss, "StandardGpuResources"):
-    raise SystemExit("the image does not contain CUDA-enabled FAISS")
-print(f"CUDA ready: {torch.cuda.get_device_name(0)}")
+print(f"CUDA training ready: {torch.cuda.get_device_name(0)}")
+print("CPU FAISS retrieval ready")
 PY
 
 dataset_ready() {
@@ -156,21 +159,29 @@ esac
 dataset_ready || die "ImageNet preparation did not produce a valid manifest"
 
 {
-    echo "study=matryoshka_csr_mpsae_architecture_ablation"
+    echo "study=matryoshka_csr_mpsae_v1_v2_architecture_ablation"
     echo "started_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "backbones=$BACKBONES"
-    echo "methods=matryoshka,csr,mpsae"
+    echo "methods=matryoshka,csr,mpsae,csrv2,mpsaev2"
     echo "base_epochs=$BASE_EPOCHS"
-    echo "mpsae_extra_epochs=$MPSAE_EXTRA_EPOCHS"
+    echo "mpsaev2_extra_epochs=$MPSAEV2_EXTRA_EPOCHS"
+    echo "anneal_start_k=$ANNEAL_START_K"
+    echo "anneal_target_k=$TRAIN_K"
+    echo "v1_fixed_train_k=$V1_TRAIN_K"
+    echo "anneal_fraction=$ANNEAL_FRACTION"
+    echo "resnet18_evaluation_budgets=8,16,32,64,128,256,512"
+    echo "resnet50_evaluation_budgets=8,16,32,64,128,256,512,1024,2048"
+    echo "sparse_extra_evaluation_budgets=$SPARSE_EXTRA_TOPK"
+    echo "retrieval=unit_normalized_exact_l2"
     echo "mrl_classification_weight=$MRL_CLASSIFICATION_WEIGHT"
-    echo "csr_main_recon_weight=$CSR_MAIN_RECON_WEIGHT"
-    echo "csr_multi_topk_recon_weight=$CSR_MULTI_TOPK_RECON_WEIGHT"
-    echo "csr_aux_recon_weight=$CSR_AUX_RECON_WEIGHT"
-    echo "csr_contrastive_weight=$CSR_CONTRASTIVE_WEIGHT"
-    echo "mpsae_main_recon_weight=$MPSAE_MAIN_RECON_WEIGHT"
-    echo "mpsae_nested_recon_weight=$MPSAE_NESTED_RECON_WEIGHT"
-    echo "mpsae_aux_recon_weight=$MPSAE_AUX_RECON_WEIGHT"
-    echo "mpsae_mmpot_weight=$MPSAE_MMPOT_WEIGHT"
+    echo "csrv2_main_recon_weight=$CSRV2_MAIN_RECON_WEIGHT"
+    echo "csrv2_multi_topk_recon_weight=$CSRV2_MULTI_TOPK_RECON_WEIGHT"
+    echo "csrv2_aux_recon_weight=$CSRV2_AUX_RECON_WEIGHT"
+    echo "csrv2_contrastive_weight=$CSRV2_CONTRASTIVE_WEIGHT"
+    echo "mpsaev2_main_recon_weight=$MPSAEV2_MAIN_RECON_WEIGHT"
+    echo "mpsaev2_nested_recon_weight=$MPSAEV2_NESTED_RECON_WEIGHT"
+    echo "mpsaev2_aux_recon_weight=$MPSAEV2_AUX_RECON_WEIGHT"
+    echo "mpsaev2_mmpot_weight=$MPSAEV2_MMPOT_WEIGHT"
     echo "model_weights_saved=false"
     echo "dataset_root=$DATA_ROOT"
     echo "dataset_id=$HF_DATASET_ID"
@@ -188,14 +199,14 @@ CACHE_DIR="$FEATURE_CACHE" \
 OUTPUT_DIR="$SUITE_ROOT" \
 WEIGHTS_CACHE="$WEIGHTS_CACHE" \
 INSTALL_DEPS=0 \
-FAISS_GPU=1 \
+FAISS_GPU=0 \
 AGGREGATE_RESULTS=1 \
 /app/run_csr_vs_mmpot_imagenet.sh "$DATA_ROOT" \
     --hf-dataset-id "$HF_DATASET_ID" \
     --hf-revision "$HF_REVISION" \
     --method all \
     --epochs "$BASE_EPOCHS" \
-    --mpsae-extra-epochs "$MPSAE_EXTRA_EPOCHS" \
+    --mpsaev2-extra-epochs "$MPSAEV2_EXTRA_EPOCHS" \
     --batch-size "$BATCH_SIZE" \
     --feature-batch-size "$FEATURE_BATCH_SIZE" \
     --workers "$WORKERS" \
@@ -204,18 +215,22 @@ AGGREGATE_RESULTS=1 \
     --max-val "$MAX_VAL" \
     --hidden-dim "$HIDDEN_DIM" \
     --train-k "$TRAIN_K" \
-    --topk "$TOPK" \
+    --v1-train-k "$V1_TRAIN_K" \
+    --anneal-start-k "$ANNEAL_START_K" \
+    --anneal-fraction "$ANNEAL_FRACTION" \
+    --sparse-extra-topk "$SPARSE_EXTRA_TOPK" \
+    --sparse-knn-query-batch "$SPARSE_KNN_QUERY_BATCH" \
     --mrl-classification-weight "$MRL_CLASSIFICATION_WEIGHT" \
-    --csr-main-recon-weight "$CSR_MAIN_RECON_WEIGHT" \
-    --csr-multi-topk-recon-weight "$CSR_MULTI_TOPK_RECON_WEIGHT" \
-    --csr-aux-recon-weight "$CSR_AUX_RECON_WEIGHT" \
-    --csr-contrastive-weight "$CSR_CONTRASTIVE_WEIGHT" \
-    --mpsae-main-recon-weight "$MPSAE_MAIN_RECON_WEIGHT" \
-    --mpsae-nested-recon-weight "$MPSAE_NESTED_RECON_WEIGHT" \
-    --mpsae-aux-recon-weight "$MPSAE_AUX_RECON_WEIGHT" \
-    --mpsae-mmpot-weight "$MPSAE_MMPOT_WEIGHT" \
-    --lr "$MPSAE_LR" \
-    --csr-lr "$CSR_LR" \
+    --csrv2-main-recon-weight "$CSRV2_MAIN_RECON_WEIGHT" \
+    --csrv2-multi-topk-recon-weight "$CSRV2_MULTI_TOPK_RECON_WEIGHT" \
+    --csrv2-aux-recon-weight "$CSRV2_AUX_RECON_WEIGHT" \
+    --csrv2-contrastive-weight "$CSRV2_CONTRASTIVE_WEIGHT" \
+    --mpsaev2-main-recon-weight "$MPSAEV2_MAIN_RECON_WEIGHT" \
+    --mpsaev2-nested-recon-weight "$MPSAEV2_NESTED_RECON_WEIGHT" \
+    --mpsaev2-aux-recon-weight "$MPSAEV2_AUX_RECON_WEIGHT" \
+    --mpsaev2-mmpot-weight "$MPSAEV2_MMPOT_WEIGHT" \
+    --mpsaev2-lr "$MPSAEV2_LR" \
+    --csrv2-lr "$CSRV2_LR" \
     --mrl-lr "$MRL_LR" \
     --mrl-momentum "$MRL_MOMENTUM" \
     --weight-decay "$WEIGHT_DECAY" \
@@ -231,5 +246,5 @@ AGGREGATE_RESULTS=1 \
     ${rebuild_flag:+"$rebuild_flag"} \
     2>&1 | tee -a "$SUITE_ROOT/logs/three_method_ablation.log"
 
-echo "Three-method ablation complete: $SUITE_ROOT"
+echo "Five-arm ablation complete: $SUITE_ROOT"
 echo "Portable results: $SUITE_ROOT/imagenet_architecture_ablation_results.zip"

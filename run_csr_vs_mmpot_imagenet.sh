@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Controlled Matryoshka/CSR/MP-SAE architecture-ablation launcher.
+# Controlled Matryoshka/CSR/MPSAE v1/v2 architecture-ablation launcher.
+# The legacy filename is retained for command compatibility.
 #
 # Usage:
 #   ./run_csr_vs_mmpot_imagenet.sh /path/to/imagenet
@@ -38,7 +39,7 @@ CACHE_DIR="${CACHE_DIR:-$SCRIPT_DIR/runs/three_method_ablation/cache}"
 OUTPUT_DIR="${OUTPUT_DIR:-$SCRIPT_DIR/runs/three_method_ablation}"
 WEIGHTS_CACHE="${WEIGHTS_CACHE:-$SCRIPT_DIR/weights}"
 INSTALL_DEPS="${INSTALL_DEPS:-0}"
-FAISS_GPU="${FAISS_GPU:-1}"
+FAISS_GPU="${FAISS_GPU:-0}"
 AGGREGATE_RESULTS="${AGGREGATE_RESULTS:-1}"
 
 # Treat a forwarded --backbone as the single-backbone shorthand while keeping
@@ -119,7 +120,7 @@ case "$DATA_BACKEND" in
         ;;
 esac
 
-required_modules=(torch torchvision numpy faiss PIL matplotlib)
+required_modules=(torch torchvision numpy scipy faiss PIL matplotlib)
 if [[ "$DATA_BACKEND" == "hf" ]]; then
     required_modules+=(datasets huggingface_hub)
 fi
@@ -201,7 +202,7 @@ case "$AGGREGATE_RESULTS" in
         ;;
 esac
 
-echo "Running controlled Matryoshka vs CSR vs MP-SAE architecture ablation"
+echo "Running controlled Matryoshka vs CSR/MPSAE v1/v2 architecture ablation"
 echo "  backend: $DATA_BACKEND"
 echo "  data:    $DATA_ROOT"
 echo "  models:  ${backbone_list[*]}"

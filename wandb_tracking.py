@@ -10,7 +10,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 
 
 DEFAULT_ENTITY = "tdnthienquang-home"
-DEFAULT_PROJECT = "MPSAE"
+DEFAULT_PROJECT = "MPSAEv2"
 _active_run: Optional[Any] = None
 _defined_metric_namespaces: set[tuple[str, str]] = set()
 

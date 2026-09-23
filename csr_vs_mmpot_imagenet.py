@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""ImageNet ablation: Matryoshka, CSR, and MP-SAE representations.
+"""ImageNet ablation: Matryoshka and CSR/MPSAE v1/v2 representations.
 
-The controlled study runs all three techniques with ResNet-18 and ResNet-50.
+The controlled study runs all five arms with ResNet-18 and ResNet-50.
 Every arm starts from the matching ImageNet-1K V1 pretrained backbone recipe.
 
 Pipeline
@@ -11,22 +11,25 @@ Pipeline
 3. Fine-tune the backbone end-to-end with Matryoshka Representation Learning
    (MRL), using a classifier at every requested feature-prefix dimension and
    at the full representation dimension.
-4. Train a Top-K CSR sparse autoencoder on the same frozen features using
-   reconstruction and non-negative contrastive learning.
-5. Train a tied Top-K sparse autoencoder on frozen backbone features with the
-   multimarginal partial matching gap (M3PG). Every objective coefficient is
-   explicit and configurable while retaining paper-aligned defaults.
+4. Train fixed-K CSR v1 and MPSAE v1 sparse autoencoders on the same frozen
+   features.
+5. Train CSRv2 and MPSAEv2 with the corresponding objectives and progressive
+   cosine Top-K curricula. Every objective coefficient is explicit and
+   configurable while retaining paper-aligned defaults.
 6. Encode the train split as the gallery and validation split as queries.
-7. Evaluate exact L2 1-NN with FAISS ``IndexFlatL2`` at each representation
-   budget: MRL prefix dimension K versus K active CSR/MP-SAE latents.
-8. Save histories, JSON results, publication tables, and figures. Model weights
-   and optimizer checkpoints are deliberately not saved.
+7. Unit-normalize every evaluated embedding and run exact L2 1-NN: dense
+   Matryoshka prefixes use FAISS ``IndexFlatL2`` while all four sparse arms use
+   exact SciPy CSR products (equivalent to L2 ranking after normalization).
+8. Record search-only retrieval latency and save histories, JSON results,
+   publication tables, and figures. Model weights and optimizer checkpoints
+   are deliberately not saved.
 
-The proposed Multimarginal Presentation with Sparse Autoencoder (MP-SAE) arm
+The proposed Multimarginal Presentation with Sparse Autoencoder v2 (MPSAEv2) arm
 treats Top-K, Top-2K, and Top-4K codes of the same frozen image embedding as
 three aligned views.  Its multiway cost is the circular-variance cost of Piran
 et al. (2024), and its reference partial polymatching is ``s J``.  This is a
-research extension, not a claim that it appeared in either source paper.
+research extension: ``v2`` specifically denotes applying CSRv2's progressive
+Top-K annealing to the existing MPSAE objective.
 
 Expected ImageNet layout
 ------------------------
@@ -40,7 +43,7 @@ The complete two-backbone setting is launched by
 ``run_all_experiments_docker.sh``; this Python entry point executes one
 backbone unit within that fixed study.
 
-Dependencies: torch, torchvision, numpy, and a CUDA-enabled FAISS build.
+Dependencies: torch, torchvision, numpy, scipy, and FAISS.
 """
 
 from __future__ import annotations
@@ -76,11 +79,19 @@ from wandb_tracking import (
 
 
 MATRYOSHKA = "matryoshka"
-CSR = "csr"
-MP_SAE = "mpsae"
-METHODS = (MATRYOSHKA, CSR, MP_SAE)
+CSR_V1 = "csr"
+MP_SAE_V1 = "mpsae"
+CSR = "csrv2"
+MP_SAE = "mpsaev2"
+SPARSE_METHODS = (CSR_V1, MP_SAE_V1, CSR, MP_SAE)
+METHODS = (MATRYOSHKA, *SPARSE_METHODS)
 DEFAULT_MPSAE_MMPOT_WEIGHT = 1.3
 IMAGENET_CLASSES = 1000
+DEFAULT_EVALUATION_BUDGETS = {
+    "resnet18": (8, 16, 32, 64, 128, 256, 512),
+    "resnet50": (8, 16, 32, 64, 128, 256, 512, 1024, 2048),
+}
+DEFAULT_SPARSE_EXTRA_BUDGETS = (1, 2, 4)
 
 
 @dataclass(frozen=True)
@@ -126,8 +137,10 @@ BACKBONES = tuple(BACKBONE_SPECS)
 def method_labels(backbone: BackboneSpec) -> Dict[str, str]:
     return {
         MATRYOSHKA: f"Matryoshka {backbone.display_name}",
-        CSR: f"CSR ({backbone.display_name})",
-        MP_SAE: f"MP-SAE ({backbone.display_name})",
+        CSR_V1: f"CSR v1 ({backbone.display_name})",
+        MP_SAE_V1: f"MPSAE v1 ({backbone.display_name})",
+        CSR: f"CSRv2 ({backbone.display_name})",
+        MP_SAE: f"MPSAEv2 ({backbone.display_name})",
     }
 
 
@@ -154,9 +167,52 @@ def parse_ints(value: str) -> List[int]:
     return sorted(set(result))
 
 
+def cosine_annealed_k(
+    step: int,
+    total_steps: int,
+    start_k: int,
+    target_k: int,
+    anneal_fraction: float,
+) -> int:
+    """Half-cosine Top-K curriculum followed by a fixed target-K phase."""
+    if total_steps < 1:
+        raise ValueError("total_steps must be positive")
+    anneal_steps = max(1, math.ceil(total_steps * anneal_fraction))
+    if anneal_steps == 1 or step >= anneal_steps - 1:
+        return target_k
+    progress = step / (anneal_steps - 1)
+    cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
+    value = target_k + (start_k - target_k) * cosine_decay
+    return min(start_k, max(target_k, int(round(value))))
+
+
+def annealing_metadata(
+    args: argparse.Namespace, total_steps: int
+) -> Dict[str, Any]:
+    return {
+        "schedule": "half_cosine_then_hold",
+        "start_k": args.anneal_start_k,
+        "target_k": args.train_k,
+        "anneal_fraction": args.anneal_fraction,
+        "total_steps": total_steps,
+        "anneal_steps": max(1, math.ceil(total_steps * args.anneal_fraction)),
+    }
+
+
+def fixed_k_metadata(k: int, total_steps: int) -> Dict[str, Any]:
+    return {
+        "schedule": "fixed",
+        "start_k": k,
+        "target_k": k,
+        "anneal_fraction": 0.0,
+        "total_steps": total_steps,
+        "anneal_steps": 0,
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="ImageNet: matched Matryoshka, CSR, and MP-SAE representation ablation",
+        description="ImageNet: matched Matryoshka and CSR/MPSAE v1/v2 representation ablation",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     data = p.add_argument_group("ImageNet and feature cache")
@@ -164,7 +220,7 @@ def build_parser() -> argparse.ArgumentParser:
     data.add_argument("--data-backend", choices=("imagefolder", "hf"), default="imagefolder")
     data.add_argument(
         "--backbone", choices=BACKBONES, default="resnet18",
-        help="torchvision ImageNet backbone used by all three experiment arms",
+        help="torchvision ImageNet backbone used by all five experiment arms",
     )
     data.add_argument("--hf-dataset-id", default="ILSVRC/imagenet-1k")
     data.add_argument("--hf-revision", default="main")
@@ -180,11 +236,31 @@ def build_parser() -> argparse.ArgumentParser:
 
     model = p.add_argument_group("sparse representations")
     model.add_argument(
-        "--hidden-dim", type=int, default=0,
-        help="CSR/MP-SAE latent dimension; 0 selects the paper rule h=4d for each backbone",
+        "--hidden-dim", type=int, default=8196,
+        help="CSR/MPSAE v1/v2 latent dimension (default: 8196)",
     )
-    model.add_argument("--topk", type=parse_ints, default=[8, 16, 32, 64, 128, 256])
-    model.add_argument("--train-k", type=int, default=32)
+    model.add_argument(
+        "--topk", type=parse_ints, default=None,
+        help="matched budgets; defaults to 8..512 (ResNet-18) or 8..2048 (ResNet-50)",
+    )
+    model.add_argument(
+        "--sparse-extra-topk", type=parse_ints,
+        default=list(DEFAULT_SPARSE_EXTRA_BUDGETS),
+        help="additional lower budgets evaluated for every CSR/MPSAE sparse arm",
+    )
+    model.add_argument("--train-k", type=int, default=2)
+    model.add_argument(
+        "--v1-train-k", type=int, default=32,
+        help="fixed training support for CSR v1 and MPSAE v1",
+    )
+    model.add_argument(
+        "--anneal-start-k", type=int, default=64,
+        help="initial broad Top-K support for CSRv2 and MPSAEv2 training",
+    )
+    model.add_argument(
+        "--anneal-fraction", type=float, default=0.7,
+        help="fraction of each sparse method's optimization steps used for cosine K annealing",
+    )
     model.add_argument("--k-aux", type=int, default=512)
     model.add_argument("--dead-steps", type=int, default=1000)
 
@@ -194,48 +270,57 @@ def build_parser() -> argparse.ArgumentParser:
         help="weight on Matryoshka's summed nested classification loss",
     )
     loss.add_argument(
-        "--csr-main-recon-weight", type=float, default=1.0,
-        help="weight on CSR's Top-K reconstruction loss",
+        "--csrv2-main-recon-weight", "--csr-main-recon-weight",
+        dest="csr_main_recon_weight", type=float, default=1.0,
+        help="weight on CSRv2's annealed Top-K reconstruction loss",
     )
     loss.add_argument(
-        "--csr-multi-topk-recon-weight", type=float, default=1.0 / 8.0,
-        help="weight on CSR's Top-4K reconstruction loss",
+        "--csrv2-multi-topk-recon-weight", "--csr-multi-topk-recon-weight",
+        dest="csr_multi_topk_recon_weight", type=float, default=1.0 / 8.0,
+        help="weight on CSRv2's annealed Top-4K reconstruction loss",
     )
     loss.add_argument(
-        "--csr-aux-recon-weight", type=float, default=1.0 / 32.0,
-        help="weight on CSR's dead-latent auxiliary reconstruction loss",
+        "--csrv2-aux-recon-weight", "--csr-aux-recon-weight",
+        dest="csr_aux_recon_weight", type=float, default=1.0 / 32.0,
+        help="weight on CSRv2's dead-latent auxiliary reconstruction loss",
     )
     loss.add_argument(
-        "--csr-contrastive-weight", type=float, default=1.0,
-        help="gamma multiplying CSR's non-negative contrastive loss",
+        "--csrv2-contrastive-weight", "--csr-contrastive-weight",
+        dest="csr_contrastive_weight", type=float, default=1.0,
+        help="gamma multiplying CSRv2's non-negative contrastive loss",
     )
     loss.add_argument(
-        "--mpsae-main-recon-weight", type=float, default=1.0,
-        help="weight on MP-SAE's Top-K reconstruction loss",
+        "--mpsaev2-main-recon-weight", "--mpsae-main-recon-weight",
+        dest="mpsae_main_recon_weight", type=float, default=1.0,
+        help="weight on MPSAEv2's annealed Top-K reconstruction loss",
     )
     loss.add_argument(
-        "--mpsae-nested-recon-weight", type=float, default=1.0 / 8.0,
-        help="weight on MP-SAE's mean Top-2K/Top-4K reconstruction loss",
+        "--mpsaev2-nested-recon-weight", "--mpsae-nested-recon-weight",
+        dest="mpsae_nested_recon_weight", type=float, default=1.0 / 8.0,
+        help="weight on MPSAEv2's annealed mean Top-2K/Top-4K reconstruction loss",
     )
     loss.add_argument(
-        "--mpsae-aux-recon-weight", type=float, default=1.0 / 32.0,
-        help="weight on MP-SAE's dead-latent auxiliary reconstruction loss",
+        "--mpsaev2-aux-recon-weight", "--mpsae-aux-recon-weight",
+        dest="mpsae_aux_recon_weight", type=float, default=1.0 / 32.0,
+        help="weight on MPSAEv2's dead-latent auxiliary reconstruction loss",
     )
     loss.add_argument(
-        "--mpsae-mmpot-weight", type=float, default=DEFAULT_MPSAE_MMPOT_WEIGHT,
-        help="weight on MP-SAE's multimarginal partial-transport gap",
+        "--mpsaev2-mmpot-weight", "--mpsae-mmpot-weight",
+        dest="mpsae_mmpot_weight", type=float, default=DEFAULT_MPSAE_MMPOT_WEIGHT,
+        help="weight on MPSAEv2's multimarginal partial-transport gap",
     )
 
     train = p.add_argument_group("training")
     train.add_argument("--method", choices=(*METHODS, "all"), default="all")
     train.add_argument("--epochs", type=int, default=10)
     train.add_argument(
-        "--mpsae-extra-epochs", type=int, default=4,
-        help="additional MP-SAE epochs beyond the common epoch count; fixed to 4 for this study",
+        "--mpsaev2-extra-epochs", "--mpsae-extra-epochs",
+        dest="mpsae_extra_epochs", type=int, default=4,
+        help="additional MPSAE v1/v2 epochs beyond the common epoch count; fixed to 4 for this study",
     )
     train.add_argument("--batch-size", type=int, default=1024)
-    train.add_argument("--lr", type=float, default=4e-5)
-    train.add_argument("--csr-lr", type=float, default=1e-4)
+    train.add_argument("--mpsaev2-lr", "--lr", dest="lr", type=float, default=4e-5)
+    train.add_argument("--csrv2-lr", "--csr-lr", dest="csr_lr", type=float, default=1e-4)
     train.add_argument("--weight-decay", type=float, default=1e-4)
     train.add_argument("--mrl-lr", type=float, default=1e-2, help="backbone MRL fine-tuning learning rate")
     train.add_argument("--mrl-momentum", type=float, default=0.9)
@@ -252,13 +337,20 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--print-freq", type=int, default=50)
     train.add_argument("--output-dir", type=Path, default=Path("runs/three_method_ablation"))
 
-    knn = p.add_argument_group("exact FAISS 1-NN")
+    knn = p.add_argument_group("exact dense/sparse 1-NN")
     knn.add_argument("--knn-batch-size", type=int, default=4096)
     knn.add_argument("--knn-query-batch", type=int, default=4096)
-    knn.add_argument("--knn-normalize", action=argparse.BooleanOptionalAction, default=False)
     knn.add_argument(
-        "--faiss-gpu", action=argparse.BooleanOptionalAction, default=True,
-        help="use CUDA FAISS; pass --no-faiss-gpu for an explicit CPU fallback",
+        "--sparse-knn-query-batch", type=int, default=32,
+        help="query batch for exact SciPy CSR sparse retrieval",
+    )
+    knn.add_argument(
+        "--knn-normalize", action=argparse.BooleanOptionalAction, default=True,
+        help="unit-normalize gallery and query embeddings (required by this study)",
+    )
+    knn.add_argument(
+        "--faiss-gpu", action=argparse.BooleanOptionalAction, default=False,
+        help="optional CUDA FAISS override; CPU is the fair default beside SciPy CSR",
     )
     knn.add_argument("--faiss-gpu-device", type=int, default=None,
                      help="CUDA device for FAISS (defaults to the model CUDA device, otherwise 0)")
@@ -276,25 +368,34 @@ def validate_args(a: argparse.Namespace) -> None:
     elif not a.data_root.is_dir():
         raise FileNotFoundError(f"missing Hugging Face cache directory: {a.data_root}")
     backbone = BACKBONE_SPECS[a.backbone]
+    if a.topk is None:
+        a.topk = list(DEFAULT_EVALUATION_BUDGETS[a.backbone])
     if a.method in (MATRYOSHKA, "all") and max(a.topk) > backbone.output_dim:
         raise ValueError(
             f"Matryoshka prefix dimensions cannot exceed the {backbone.display_name} "
             f"feature dimension ({backbone.output_dim})"
         )
     if a.hidden_dim < 0:
-        raise ValueError("hidden-dim must be positive, or 0 to select 4x the backbone dimension")
-    if a.train_k < 1 or a.k_aux < 0 or a.dead_steps < 1:
-        raise ValueError("train-k/dead-steps must be positive and k-aux must be non-negative")
+        raise ValueError("hidden-dim must be positive, or 0 to select 8196")
+    if min(a.train_k, a.v1_train_k, a.anneal_start_k, a.dead_steps) < 1 or a.k_aux < 0:
+        raise ValueError(
+            "train-k/v1-train-k/anneal-start-k/dead-steps must be positive "
+            "and k-aux must be non-negative"
+        )
+    if a.anneal_start_k < a.train_k:
+        raise ValueError("anneal-start-k must be greater than or equal to train-k")
+    if not 0.0 < a.anneal_fraction <= 1.0:
+        raise ValueError("anneal-fraction must be in (0,1]")
     loss_weights = {
         "mrl-classification-weight": a.mrl_classification_weight,
-        "csr-main-recon-weight": a.csr_main_recon_weight,
-        "csr-multi-topk-recon-weight": a.csr_multi_topk_recon_weight,
-        "csr-aux-recon-weight": a.csr_aux_recon_weight,
-        "csr-contrastive-weight": a.csr_contrastive_weight,
-        "mpsae-main-recon-weight": a.mpsae_main_recon_weight,
-        "mpsae-nested-recon-weight": a.mpsae_nested_recon_weight,
-        "mpsae-aux-recon-weight": a.mpsae_aux_recon_weight,
-        "mpsae-mmpot-weight": a.mpsae_mmpot_weight,
+        "csrv2-main-recon-weight": a.csr_main_recon_weight,
+        "csrv2-multi-topk-recon-weight": a.csr_multi_topk_recon_weight,
+        "csrv2-aux-recon-weight": a.csr_aux_recon_weight,
+        "csrv2-contrastive-weight": a.csr_contrastive_weight,
+        "mpsaev2-main-recon-weight": a.mpsae_main_recon_weight,
+        "mpsaev2-nested-recon-weight": a.mpsae_nested_recon_weight,
+        "mpsaev2-aux-recon-weight": a.mpsae_aux_recon_weight,
+        "mpsaev2-mmpot-weight": a.mpsae_mmpot_weight,
     }
     invalid_loss_weights = [
         name for name, value in loss_weights.items()
@@ -314,7 +415,7 @@ def validate_args(a: argparse.Namespace) -> None:
         + a.csr_contrastive_weight
         == 0
     ):
-        raise ValueError("at least one CSR loss component weight must be positive")
+        raise ValueError("at least one CSR-family loss component weight must be positive")
     if (
         a.mpsae_main_recon_weight
         + a.mpsae_nested_recon_weight
@@ -322,11 +423,18 @@ def validate_args(a: argparse.Namespace) -> None:
         + a.mpsae_mmpot_weight
         == 0
     ):
-        raise ValueError("at least one MP-SAE loss component weight must be positive")
+        raise ValueError("at least one MPSAE-family loss component weight must be positive")
     if a.hidden_dim == 0:
-        a.hidden_dim = 4 * backbone.output_dim
-    if a.method in (MP_SAE, CSR, "all") and a.hidden_dim < max(max(a.topk), 4 * a.train_k):
-        raise ValueError("hidden-dim must be >= max(topk) and >= 4*train-k")
+        a.hidden_dim = 8196
+    if a.method in (*SPARSE_METHODS, "all") and a.hidden_dim < max(
+        max((*a.topk, *a.sparse_extra_topk)),
+        4 * a.anneal_start_k,
+        4 * a.v1_train_k,
+    ):
+        raise ValueError(
+            "hidden-dim must be >= every sparse evaluation budget, "
+            ">= 4*anneal-start-k, and >= 4*v1-train-k"
+        )
     if not 0.0 < a.ot_mass <= 1.0:
         raise ValueError("ot-mass must be in (0,1]")
     if a.ot_eta <= 0 or a.ot_iters < 1 or a.ot_tol <= 0:
@@ -334,9 +442,9 @@ def validate_args(a: argparse.Namespace) -> None:
     if min(a.epochs, a.batch_size, a.feature_batch_size, a.ot_microbatch, a.prefetch_factor) < 1:
         raise ValueError("epochs and batch sizes must be positive")
     if a.mpsae_extra_epochs != 4:
-        raise ValueError("mpsae-extra-epochs is fixed at 4 for this ablation")
+        raise ValueError("mpsaev2-extra-epochs is fixed at 4 for both MPSAE arms")
     if a.csr_lr <= 0:
-        raise ValueError("CSR lr must be positive")
+        raise ValueError("CSR-family lr must be positive")
     if a.ot_microbatch < 2:
         raise ValueError("ot-microbatch must be at least 2")
     if a.faiss_gpu_device is not None and a.faiss_gpu_device < 0:
@@ -346,9 +454,11 @@ def validate_args(a: argparse.Namespace) -> None:
     if a.mrl_lr <= 0 or not 0 <= a.mrl_momentum < 1:
         raise ValueError("mrl-lr must be positive and mrl-momentum must be in [0,1)")
     if a.lr <= 0 or a.weight_decay < 0:
-        raise ValueError("MP-SAE lr must be positive and weight-decay must be non-negative")
-    if a.knn_batch_size < 1 or a.knn_query_batch < 1:
+        raise ValueError("MPSAE-family lr must be positive and weight-decay must be non-negative")
+    if a.knn_batch_size < 1 or a.knn_query_batch < 1 or a.sparse_knn_query_batch < 1:
         raise ValueError("1-NN batch sizes must be positive")
+    if not a.knn_normalize:
+        raise ValueError("knn-normalize must remain enabled for the controlled experiment")
     if a.max_train < 0 or a.max_val < 0:
         raise ValueError("max-train/max-val must be non-negative")
     if a.prefetch_factor < 1 or a.workers < 0 or a.print_freq < 0:
@@ -732,7 +842,7 @@ def estimate_feature_mean(
     """Compute the SAE pre-bias without materializing a large float32 cache slice."""
     sample_count = min(len(features), maximum)
     if sample_count == 0:
-        raise RuntimeError("cannot initialize MP-SAE from an empty feature cache")
+        raise RuntimeError("cannot initialize MPSAEv2 from an empty feature cache")
     total = np.zeros(features.shape[1], dtype=np.float64)
     for start in range(0, sample_count, chunk_size):
         batch = np.asarray(
@@ -745,7 +855,7 @@ def estimate_feature_mean(
 class TopKSAE(nn.Module):
     """Tied Top-K sparse autoencoder with dead-latent auxiliary tracking."""
 
-    def __init__(self, input_dim: int, hidden_dim: int, dead_steps: int) -> None:
+    def __init__(self, input_dim: int, hidden_dim: int = 8196, dead_steps: int = 1000) -> None:
         super().__init__()
         decoder = torch.empty(hidden_dim, input_dim)
         nn.init.kaiming_uniform_(decoder, a=math.sqrt(5))
@@ -816,7 +926,7 @@ class TopKSAE(nn.Module):
         self, x: torch.Tensor, k: int, k_aux: int, main_weight: float,
         multi_weight: float, aux_weight: float,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], torch.Tensor]:
-        """Original CSR objective terms: L(k) + L(4k)/8 + beta L_aux."""
+        """CSR reconstruction terms evaluated at the current annealed K."""
         pre = self.preactivations(x)
         z = self.keep_topk(pre, k)
         z4 = self.keep_topk(pre, min(4 * k, self.decoder.shape[0]))
@@ -848,7 +958,7 @@ class TopKSAE(nn.Module):
 
 
 def nonnegative_contrastive_loss(representations: torch.Tensor) -> torch.Tensor:
-    """CSR NCL: identify each non-negative sparse code against batch negatives."""
+    """CSRv2 NCL: identify each non-negative sparse code against batch negatives."""
     similarities = representations.float() @ representations.float().T
     targets = torch.arange(similarities.shape[0], device=similarities.device)
     return F.cross_entropy(similarities, targets)
@@ -1005,6 +1115,9 @@ class EpochResult:
     samples: int
     seconds: float
     samples_per_second: float
+    annealed_k_start: int
+    annealed_k_end: int
+    annealed_k_mean: float
 
 
 def train_matryoshka_backbone(
@@ -1224,15 +1337,17 @@ def train_csr(
     dataset: CachedFeatures,
     device: torch.device,
     args: argparse.Namespace,
-) -> Tuple[TopKSAE, List[Dict[str, Any]]]:
-    """Train original CSR on frozen features with reconstruction plus NCL."""
+    method: str = CSR,
+    use_annealing: bool = True,
+) -> Tuple[TopKSAE, List[Dict[str, Any]], Dict[str, Any]]:
+    """Train fixed-K CSR v1 or cosine-annealed CSRv2."""
     input_dim = int(dataset.features.shape[1])
     model = TopKSAE(input_dim, args.hidden_dim, args.dead_steps).to(device)
     model.load_state_dict(initial_state)
     optimizer = torch.optim.Adam(
         model.parameters(), lr=args.csr_lr, weight_decay=args.weight_decay
     )
-    method_dir = args.output_dir / CSR
+    method_dir = args.output_dir / method
     history: List[Dict[str, Any]] = []
     generator = torch.Generator().manual_seed(args.seed)
     loader = DataLoader(
@@ -1242,12 +1357,19 @@ def train_csr(
         generator=generator,
         num_workers=args.workers,
         pin_memory=device.type == "cuda",
-        # Match MP-SAE's mini-batches exactly during the common epochs. MP-SAE
+        # Match MPSAEv2's mini-batches exactly during the common epochs. MPSAEv2
         # needs groups of at least two for the multi-marginal OT objective.
         drop_last=len(dataset) > args.batch_size,
         **loader_options(args.workers, args.prefetch_factor),
     )
     scaler = torch.amp.GradScaler("cuda", enabled=args.amp and device.type == "cuda")
+    total_steps = args.epochs * len(loader)
+    fixed_k = args.train_k if use_annealing else args.v1_train_k
+    schedule = (
+        annealing_metadata(args, total_steps)
+        if use_annealing
+        else fixed_k_metadata(fixed_k, total_steps)
+    )
 
     for epoch in range(args.epochs):
         model.train()
@@ -1261,7 +1383,17 @@ def train_csr(
             "dead": 0.0,
         }
         samples, started = 0, time.time()
+        epoch_k_values: List[int] = []
         for step, (features, _) in enumerate(loader):
+            global_step = epoch * len(loader) + step
+            current_k = (
+                cosine_annealed_k(
+                    global_step, total_steps, args.anneal_start_k,
+                    args.train_k, args.anneal_fraction,
+                )
+                if use_annealing else fixed_k
+            )
+            epoch_k_values.append(current_k)
             features = features.to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(
@@ -1269,7 +1401,7 @@ def train_csr(
             ):
                 reconstruction, reconstruction_stats, sparse_codes = model.csr_losses(
                     features,
-                    args.train_k,
+                    current_k,
                     args.k_aux,
                     args.csr_main_recon_weight,
                     args.csr_multi_topk_recon_weight,
@@ -1296,10 +1428,11 @@ def train_csr(
             sums["dead"] += float(reconstruction_stats["dead_fraction"]) * count
             if args.print_freq > 0 and step % args.print_freq == 0:
                 log_wandb_metrics(
-                    f"{CSR}/batch",
+                    f"{method}/batch",
                     {
                         "step": epoch * len(loader) + step,
                         "epoch": epoch + 1,
+                        "annealed_k": current_k,
                         "total": objective.detach(),
                         "reconstruction": reconstruction.detach(),
                         "reconstruction_main": reconstruction_stats["recon"].detach(),
@@ -1314,8 +1447,9 @@ def train_csr(
                     step_metric="step",
                 )
                 print(
-                    f"{CSR}/{args.backbone} epoch={epoch + 1} "
-                    f"step={step}/{len(loader)} loss={float(objective):.5f} "
+                    f"{method}/{args.backbone} epoch={epoch + 1} "
+                    f"step={step}/{len(loader)} k={current_k} "
+                    f"loss={float(objective):.5f} "
                     f"recon={float(reconstruction):.5f} ncl={float(contrastive):.5f}",
                     flush=True,
                 )
@@ -1345,13 +1479,17 @@ def train_csr(
             "samples": samples,
             "seconds": seconds,
             "samples_per_second": samples / max(seconds, 1e-12),
+            "annealed_k_start": epoch_k_values[0],
+            "annealed_k_end": epoch_k_values[-1],
+            "annealed_k_mean": float(np.mean(epoch_k_values)),
         }
         history.append(record)
-        log_wandb_metrics(CSR, record, step_metric="epoch")
+        log_wandb_metrics(method, record, step_metric="epoch")
         atomic_json(
             {
-                "method": CSR,
+                "method": method,
                 "backbone": args.backbone,
+                "topk_annealing": schedule,
                 "loss_weights": {
                     "main_reconstruction": args.csr_main_recon_weight,
                     "multi_topk_reconstruction": args.csr_multi_topk_recon_weight,
@@ -1362,7 +1500,7 @@ def train_csr(
             },
             method_dir / "history.json",
         )
-    return model, history
+    return model, history, schedule
 
 
 def train_mp_sae(
@@ -1370,12 +1508,14 @@ def train_mp_sae(
     dataset: CachedFeatures,
     device: torch.device,
     args: argparse.Namespace,
-) -> Tuple[TopKSAE, List[Dict[str, Any]]]:
+    method: str = MP_SAE,
+    use_annealing: bool = True,
+) -> Tuple[TopKSAE, List[Dict[str, Any]], Dict[str, Any]]:
     input_dim = int(dataset.features.shape[1])
     model = TopKSAE(input_dim, args.hidden_dim, args.dead_steps).to(device)
     model.load_state_dict(initial_state)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, eps=6.25e-10)
-    method_dir = args.output_dir / MP_SAE
+    method_dir = args.output_dir / method
     history: List[Dict[str, Any]] = []
 
     generator = torch.Generator().manual_seed(args.seed)
@@ -1391,6 +1531,13 @@ def train_mp_sae(
     )
     scaler = torch.amp.GradScaler("cuda", enabled=args.amp and device.type == "cuda")
     mpsae_epochs = args.epochs + args.mpsae_extra_epochs
+    total_steps = mpsae_epochs * len(loader)
+    fixed_k = args.train_k if use_annealing else args.v1_train_k
+    schedule = (
+        annealing_metadata(args, total_steps)
+        if use_annealing
+        else fixed_k_metadata(fixed_k, total_steps)
+    )
     for epoch in range(mpsae_epochs):
         model.train()
         sums = {
@@ -1407,13 +1554,23 @@ def train_mp_sae(
             "ot_iterations": 0.0,
         }
         samples, started = 0, time.time()
+        epoch_k_values: List[int] = []
         for step, (features, _) in enumerate(loader):
+            global_step = epoch * len(loader) + step
+            current_k = (
+                cosine_annealed_k(
+                    global_step, total_steps, args.anneal_start_k,
+                    args.train_k, args.anneal_fraction,
+                )
+                if use_annealing else fixed_k
+            )
+            epoch_k_values.append(current_k)
             features = features.to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type=device.type, enabled=args.amp and device.type == "cuda"):
                 recon_loss, recon_stats, views = model.reconstruction_losses(
                     features,
-                    args.train_k,
+                    current_k,
                     args.k_aux,
                     args.mpsae_main_recon_weight,
                     args.mpsae_nested_recon_weight,
@@ -1446,10 +1603,11 @@ def train_mp_sae(
             sums["ot_iterations"] += ot_diag["iterations"] * count
             if args.print_freq > 0 and step % args.print_freq == 0:
                 log_wandb_metrics(
-                    f"{MP_SAE}/batch",
+                    f"{method}/batch",
                     {
                         "step": epoch * len(loader) + step,
                         "epoch": epoch + 1,
+                        "annealed_k": current_k,
                         "total": objective.detach(),
                         "reconstruction": recon_loss.detach(),
                         "reconstruction_main": recon_stats["recon"].detach(),
@@ -1468,7 +1626,8 @@ def train_mp_sae(
                     step_metric="step",
                 )
                 print(
-                    f"{MP_SAE}/{args.backbone} epoch={epoch+1} step={step}/{len(loader)} "
+                    f"{method}/{args.backbone} epoch={epoch+1} step={step}/{len(loader)} "
+                    f"k={current_k} "
                     f"loss={float(objective):.5f} recon={float(recon_loss):.5f} repr={float(repr_loss):.5f}",
                     flush=True,
                 )
@@ -1501,15 +1660,19 @@ def train_mp_sae(
             samples=samples,
             seconds=seconds,
             samples_per_second=samples / max(seconds, 1e-12),
+            annealed_k_start=epoch_k_values[0],
+            annealed_k_end=epoch_k_values[-1],
+            annealed_k_mean=float(np.mean(epoch_k_values)),
         )
         epoch_record = {"epoch": epoch + 1, **asdict(result)}
         history.append(epoch_record)
-        log_wandb_metrics(MP_SAE, epoch_record, step_metric="epoch")
+        log_wandb_metrics(method, epoch_record, step_metric="epoch")
         atomic_json(
             {
-                "method": MP_SAE,
+                "method": method,
                 "backbone": args.backbone,
                 "training_epochs": mpsae_epochs,
+                "topk_annealing": schedule,
                 "loss_weights": {
                     "main_reconstruction": args.mpsae_main_recon_weight,
                     "nested_reconstruction": args.mpsae_nested_recon_weight,
@@ -1520,7 +1683,7 @@ def train_mp_sae(
             },
             method_dir / "history.json",
         )
-    return model, history
+    return model, history, schedule
 
 
 @torch.inference_mode()
@@ -1539,6 +1702,23 @@ def encode_for_benchmark(
     return model.encode(features, k).float()
 
 
+def unit_normalize_embeddings(embeddings: torch.Tensor, method: str, k: int) -> torch.Tensor:
+    """Normalize every row and fail loudly if a learned code is all zero."""
+    norms = torch.linalg.vector_norm(embeddings, ord=2, dim=1, keepdim=True)
+    zero_rows = norms.squeeze(1) <= torch.finfo(embeddings.dtype).eps
+    if zero_rows.any():
+        raise RuntimeError(
+            f"cannot unit-normalize {int(zero_rows.sum().item())} zero {method} "
+            f"embedding(s) at K={k}"
+        )
+    return embeddings / norms
+
+
+def synchronize_device(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+
+
 @torch.inference_mode()
 def add_gallery_to_faiss(
     index: Any, method: str, model: Optional[TopKSAE], dataset: CachedFeatures,
@@ -1551,7 +1731,7 @@ def add_gallery_to_faiss(
     for features, target in cached_feature_batches(dataset, batch_size):
         z = encode_for_benchmark(method, model, features, k, model_device)
         if normalize:
-            z = F.normalize(z, dim=1)
+            z = unit_normalize_embeddings(z, method, k)
         index.add(z.to(index_device).contiguous())
         labels.append(target)
     return torch.cat(labels).to(index_device)
@@ -1569,21 +1749,173 @@ def search_queries(
     model_device: torch.device,
     index_device: torch.device,
     normalize: bool,
-) -> Tuple[float, float, int]:
+) -> Tuple[float, float, int, float, int]:
     correct, total, distance_sum = 0, 0, 0.0
+    retrieval_seconds, retrieval_batches = 0.0, 0
     if model is not None:
         model.eval()
     for features, target in cached_feature_batches(dataset, batch_size):
         z = encode_for_benchmark(method, model, features, k, model_device)
         if normalize:
-            z = F.normalize(z, dim=1)
-        distances, indices = index.search(z.to(index_device).contiguous(), 1)
+            z = unit_normalize_embeddings(z, method, k)
+        query = z.to(index_device).contiguous()
+        synchronize_device(index_device)
+        started = time.perf_counter()
+        distances, indices = index.search(query, 1)
+        synchronize_device(index_device)
+        retrieval_seconds += time.perf_counter() - started
+        retrieval_batches += 1
         predictions = gallery_labels[indices[:, 0]]
         truth = target.to(index_device, non_blocking=True)
         correct += int((predictions == truth).sum().item())
         total += truth.numel()
         distance_sum += float(distances[:, 0].sum().item())
-    return 100.0 * correct / total, distance_sum / total, total
+    return (
+        100.0 * correct / total,
+        distance_sum / total,
+        total,
+        retrieval_seconds,
+        retrieval_batches,
+    )
+
+
+def scipy_sparse_module() -> Any:
+    try:
+        from scipy import sparse
+    except ImportError as exc:
+        raise RuntimeError(
+            "SciPy is required for exact sparse CSR retrieval; install requirements.txt"
+        ) from exc
+    return sparse
+
+
+def dense_codes_to_csr(codes: torch.Tensor) -> Any:
+    """Convert a normalized Top-K batch to CSR without densifying it again."""
+    sparse = scipy_sparse_module()
+    codes = codes.detach().to("cpu")
+    nonzero = codes.ne(0)
+    counts = nonzero.sum(dim=1).numpy().astype(np.int64, copy=False)
+    coordinates = nonzero.nonzero(as_tuple=False)
+    indices = coordinates[:, 1].numpy().astype(np.int64, copy=False)
+    data = codes[nonzero].numpy().astype(np.float32, copy=False)
+    indptr = np.empty(codes.shape[0] + 1, dtype=np.int64)
+    indptr[0] = 0
+    np.cumsum(counts, out=indptr[1:])
+    return sparse.csr_matrix(
+        (data, indices, indptr), shape=tuple(codes.shape), dtype=np.float32
+    )
+
+
+@torch.inference_mode()
+def encode_sparse_gallery(
+    method: str,
+    model: TopKSAE,
+    dataset: CachedFeatures,
+    k: int,
+    batch_size: int,
+    device: torch.device,
+) -> Tuple[Any, np.ndarray, float]:
+    """Encode the gallery directly into CSR storage with at most K entries per row."""
+    sparse = scipy_sparse_module()
+    model.eval()
+    rows = len(dataset)
+    width = int(model.decoder.shape[0])
+    capacity = rows * min(k, width)
+    data = np.empty(capacity, dtype=np.float32)
+    # Full ImageNet at K=2048 can exceed the 32-bit CSR nonzero limit.
+    indices = np.empty(capacity, dtype=np.int64)
+    indptr = np.empty(rows + 1, dtype=np.int64)
+    labels = np.empty(rows, dtype=np.int64)
+    indptr[0] = 0
+    cursor, row_offset = 0, 0
+
+    for features, target in cached_feature_batches(dataset, batch_size):
+        codes = encode_for_benchmark(method, model, features, k, device)
+        codes = unit_normalize_embeddings(codes, method, k).to("cpu")
+        nonzero = codes.ne(0)
+        counts = nonzero.sum(dim=1).numpy().astype(np.int64, copy=False)
+        coordinates = nonzero.nonzero(as_tuple=False)
+        batch_nnz = int(coordinates.shape[0])
+        data[cursor:cursor + batch_nnz] = codes[nonzero].numpy()
+        indices[cursor:cursor + batch_nnz] = coordinates[:, 1].numpy()
+        batch_rows = int(codes.shape[0])
+        indptr[row_offset + 1:row_offset + batch_rows + 1] = (
+            cursor + np.cumsum(counts, dtype=np.int64)
+        )
+        labels[row_offset:row_offset + batch_rows] = target.numpy()
+        cursor += batch_nnz
+        row_offset += batch_rows
+
+    data.resize(cursor, refcheck=False)
+    indices.resize(cursor, refcheck=False)
+    gallery = sparse.csr_matrix(
+        (data, indices, indptr), shape=(rows, width), dtype=np.float32
+    )
+    return gallery, labels, cursor / rows
+
+
+def sparse_row_argmax(similarities: Any) -> Tuple[np.ndarray, np.ndarray]:
+    """Return exact row maxima, treating implicit sparse entries as zero."""
+    similarities = similarities.tocsr()
+    row_count = similarities.shape[0]
+    best_indices = np.zeros(row_count, dtype=np.int64)
+    best_scores = np.zeros(row_count, dtype=np.float32)
+    for row in range(row_count):
+        start, end = similarities.indptr[row:row + 2]
+        if start == end:
+            continue
+        values = similarities.data[start:end]
+        maximum = float(values.max())
+        if maximum <= 0.0:
+            continue
+        columns = similarities.indices[start:end]
+        best_indices[row] = int(columns[values == maximum].min())
+        best_scores[row] = maximum
+    return best_indices, best_scores
+
+
+@torch.inference_mode()
+def search_sparse_queries(
+    gallery: Any,
+    gallery_labels: np.ndarray,
+    method: str,
+    model: TopKSAE,
+    dataset: CachedFeatures,
+    k: int,
+    batch_size: int,
+    device: torch.device,
+) -> Tuple[float, float, int, float, int, float]:
+    """Exact sparse 1-NN using unit-vector dot products as L2 rankings."""
+    model.eval()
+    gallery_transpose = gallery.transpose().tocsc(copy=False)
+    correct, total, distance_sum = 0, 0, 0.0
+    retrieval_seconds, retrieval_batches, query_nnz = 0.0, 0, 0
+
+    for features, target in cached_feature_batches(dataset, batch_size):
+        codes = encode_for_benchmark(method, model, features, k, device)
+        codes = unit_normalize_embeddings(codes, method, k)
+        queries = dense_codes_to_csr(codes)
+        query_nnz += int(queries.nnz)
+
+        started = time.perf_counter()
+        similarities = queries @ gallery_transpose
+        indices, scores = sparse_row_argmax(similarities)
+        retrieval_seconds += time.perf_counter() - started
+        retrieval_batches += 1
+
+        truth = target.numpy()
+        correct += int((gallery_labels[indices] == truth).sum())
+        total += int(truth.size)
+        distance_sum += float(np.maximum(0.0, 2.0 - 2.0 * scores).sum())
+
+    return (
+        100.0 * correct / total,
+        distance_sum / total,
+        total,
+        retrieval_seconds,
+        retrieval_batches,
+        query_nnz / total,
+    )
 
 
 def make_faiss_index(
@@ -1622,37 +1954,79 @@ def benchmark_method(
     if faiss_device is None:
         faiss_device = device.index if device.type == "cuda" and device.index is not None else 0
     index_device = torch.device(f"cuda:{faiss_device}") if args.faiss_gpu else torch.device("cpu")
-    for k in args.topk:
-        print(f"FAISS exact L2: method={method} k={k} device={index_device}", flush=True)
-        representation_dim = k if method == MATRYOSHKA else args.hidden_dim
-        index, gpu_resources = make_faiss_index(
-            representation_dim, args.faiss_gpu, faiss_device, args.faiss_temp_memory_mib
-        )
-        gallery_labels = add_gallery_to_faiss(
-            index, method, model, train_data, k, args.knn_batch_size,
-            device, index_device, args.knn_normalize
-        )
-        accuracy, mean_distance, queries = search_queries(
-            index, gallery_labels, method, model, val_data, k, args.knn_query_batch,
-            device, index_device, args.knn_normalize
-        )
+    budgets = (
+        list(args.topk)
+        if method == MATRYOSHKA
+        else sorted(set((*args.sparse_extra_topk, *args.topk)))
+    )
+    backend = "faiss_index_flat_l2" if method == MATRYOSHKA else "scipy_csr_exact_l2"
+
+    for k in budgets:
+        if method == MATRYOSHKA:
+            print(f"FAISS exact L2: method={method} k={k} device={index_device}", flush=True)
+            index, gpu_resources = make_faiss_index(
+                k, args.faiss_gpu, faiss_device, args.faiss_temp_memory_mib
+            )
+            gallery_labels = add_gallery_to_faiss(
+                index, method, model, train_data, k, args.knn_batch_size,
+                device, index_device, args.knn_normalize
+            )
+            accuracy, mean_distance, queries, retrieval_seconds, retrieval_batches = (
+                search_queries(
+                    index, gallery_labels, method, model, val_data, k,
+                    args.knn_query_batch, device, index_device, args.knn_normalize
+                )
+            )
+            average_gallery_nnz = float(k)
+            average_query_nnz = float(k)
+            gallery_samples = len(gallery_labels)
+            del index, gpu_resources, gallery_labels
+        else:
+            if model is None:
+                raise ValueError(f"{method} sparse retrieval requires a trained model")
+            print(f"SciPy CSR exact L2: method={method} k={k} device=cpu", flush=True)
+            gallery, gallery_labels, average_gallery_nnz = encode_sparse_gallery(
+                method, model, train_data, k, args.knn_batch_size, device
+            )
+            (
+                accuracy,
+                mean_distance,
+                queries,
+                retrieval_seconds,
+                retrieval_batches,
+                average_query_nnz,
+            ) = search_sparse_queries(
+                gallery, gallery_labels, method, model, val_data, k,
+                args.sparse_knn_query_batch, device
+            )
+            gallery_samples = len(gallery_labels)
+            del gallery, gallery_labels
+
         results[str(k)] = {
             "top1": accuracy,
             "mean_neighbor_l2_squared": mean_distance,
-            "gallery_samples": len(gallery_labels),
+            "gallery_samples": gallery_samples,
             "query_samples": queries,
+            "retrieval_search_seconds": retrieval_seconds,
+            "retrieval_query_batches": retrieval_batches,
+            "mean_retrieval_seconds_per_query": retrieval_seconds / queries,
+            "mean_retrieval_milliseconds_per_query": 1000.0 * retrieval_seconds / queries,
+            "average_gallery_nonzero_coordinates": average_gallery_nnz,
+            "average_query_nonzero_coordinates": average_query_nnz,
+            "retrieval_backend": backend,
         }
         log_wandb_metrics(
             f"{method}/knn",
             {"budget": k, **results[str(k)]},
             step_metric="budget",
         )
-        del index, gpu_resources, gallery_labels
     return {
-        "protocol": "FAISS_IndexFlatL2_train_gallery_validation_queries_1NN",
-        "device": str(index_device),
+        "protocol": "unit_normalized_exact_L2_train_gallery_validation_queries_1NN",
+        "retrieval_backend": backend,
+        "device": str(index_device) if method == MATRYOSHKA else "cpu",
         "normalized": args.knn_normalize,
         "representation": "prefix_dimension" if method == MATRYOSHKA else "topk_sparse_latents",
+        "timing_scope": "search_only_excludes_encoding_normalization_and_index_construction",
         "per_topk": results,
     }
 
@@ -1666,6 +2040,8 @@ def comparison_rows(results: Mapping[str, Any]) -> List[Dict[str, Any]]:
     mrl_weights = results[MATRYOSHKA].get("loss_weights", {})
     csr_weights = results[CSR].get("loss_weights", {})
     mpsae_weights = results[MP_SAE].get("loss_weights", {})
+    csr_annealing = results[CSR].get("topk_annealing", {})
+    mpsae_annealing = results[MP_SAE].get("topk_annealing", {})
     rows: List[Dict[str, Any]] = []
     for k in sorted(int(value) for value in baseline):
         mrl_metrics = baseline[str(k)]
@@ -1675,32 +2051,47 @@ def comparison_rows(results: Mapping[str, Any]) -> List[Dict[str, Any]]:
             "backbone": results[MATRYOSHKA].get("backbone", "unknown"),
             "representation_budget": k,
             "matryoshka_prefix_dim": k,
-            "csr_active_latents": k,
-            "mp_sae_active_latents": k,
+            "csrv2_active_latents": k,
+            "mpsaev2_active_latents": k,
             "matryoshka_1nn_top1": mrl_metrics["top1"],
-            "csr_1nn_top1": csr_metrics["top1"],
-            "mp_sae_1nn_top1": mp_sae_metrics["top1"],
-            "delta_csr_minus_matryoshka": csr_metrics["top1"] - mrl_metrics["top1"],
-            "delta_mp_sae_minus_matryoshka": mp_sae_metrics["top1"] - mrl_metrics["top1"],
-            "delta_mp_sae_minus_csr": mp_sae_metrics["top1"] - csr_metrics["top1"],
+            "csrv2_1nn_top1": csr_metrics["top1"],
+            "mpsaev2_1nn_top1": mp_sae_metrics["top1"],
+            "delta_csrv2_minus_matryoshka": csr_metrics["top1"] - mrl_metrics["top1"],
+            "delta_mpsaev2_minus_matryoshka": mp_sae_metrics["top1"] - mrl_metrics["top1"],
+            "delta_mpsaev2_minus_csrv2": mp_sae_metrics["top1"] - csr_metrics["top1"],
             "matryoshka_mean_neighbor_l2_squared": mrl_metrics["mean_neighbor_l2_squared"],
-            "csr_mean_neighbor_l2_squared": csr_metrics["mean_neighbor_l2_squared"],
-            "mp_sae_mean_neighbor_l2_squared": mp_sae_metrics["mean_neighbor_l2_squared"],
+            "csrv2_mean_neighbor_l2_squared": csr_metrics["mean_neighbor_l2_squared"],
+            "mpsaev2_mean_neighbor_l2_squared": mp_sae_metrics["mean_neighbor_l2_squared"],
+            "matryoshka_mean_retrieval_ms_per_query": mrl_metrics[
+                "mean_retrieval_milliseconds_per_query"
+            ],
+            "csrv2_mean_retrieval_ms_per_query": csr_metrics[
+                "mean_retrieval_milliseconds_per_query"
+            ],
+            "mpsaev2_mean_retrieval_ms_per_query": mp_sae_metrics[
+                "mean_retrieval_milliseconds_per_query"
+            ],
             "mrl_classification_weight": mrl_weights.get("classification"),
-            "csr_main_recon_weight": csr_weights.get("main_reconstruction"),
-            "csr_multi_topk_recon_weight": csr_weights.get(
+            "annealing_schedule": csr_annealing.get("schedule"),
+            "anneal_start_k": csr_annealing.get("start_k"),
+            "anneal_target_k": csr_annealing.get("target_k"),
+            "anneal_fraction": csr_annealing.get("anneal_fraction"),
+            "csrv2_anneal_steps": csr_annealing.get("anneal_steps"),
+            "mpsaev2_anneal_steps": mpsae_annealing.get("anneal_steps"),
+            "csrv2_main_recon_weight": csr_weights.get("main_reconstruction"),
+            "csrv2_multi_topk_recon_weight": csr_weights.get(
                 "multi_topk_reconstruction"
             ),
-            "csr_aux_recon_weight": csr_weights.get("auxiliary_reconstruction"),
-            "csr_contrastive_weight": csr_weights.get("nonnegative_contrastive"),
-            "mpsae_main_recon_weight": mpsae_weights.get("main_reconstruction"),
-            "mpsae_nested_recon_weight": mpsae_weights.get(
+            "csrv2_aux_recon_weight": csr_weights.get("auxiliary_reconstruction"),
+            "csrv2_contrastive_weight": csr_weights.get("nonnegative_contrastive"),
+            "mpsaev2_main_recon_weight": mpsae_weights.get("main_reconstruction"),
+            "mpsaev2_nested_recon_weight": mpsae_weights.get(
                 "nested_reconstruction"
             ),
-            "mpsae_aux_recon_weight": mpsae_weights.get(
+            "mpsaev2_aux_recon_weight": mpsae_weights.get(
                 "auxiliary_reconstruction"
             ),
-            "mpsae_mmpot_weight": mpsae_weights.get("mmpot_regularizer"),
+            "mpsaev2_mmpot_weight": mpsae_weights.get("mmpot_regularizer"),
         })
     return rows
 
@@ -1728,20 +2119,20 @@ def write_markdown_table(
     if not rows:
         return
     lines = [
-        f"| Budget K | Matryoshka {backbone.display_name} | CSR | MP-SAE | CSR - Matryoshka | MP-SAE - Matryoshka | MP-SAE - CSR |",
+        f"| Budget K | Matryoshka {backbone.display_name} | CSRv2 | MPSAEv2 | CSRv2 - Matryoshka | MPSAEv2 - Matryoshka | MPSAEv2 - CSRv2 |",
         "|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in rows:
         lines.append(
             f"| {row['representation_budget']} | {row['matryoshka_1nn_top1']:.2f} | "
-            f"{row['csr_1nn_top1']:.2f} | {row['mp_sae_1nn_top1']:.2f} | "
-            f"{row['delta_csr_minus_matryoshka']:+.2f} | "
-            f"{row['delta_mp_sae_minus_matryoshka']:+.2f} | "
-            f"{row['delta_mp_sae_minus_csr']:+.2f} |"
+            f"{row['csrv2_1nn_top1']:.2f} | {row['mpsaev2_1nn_top1']:.2f} | "
+            f"{row['delta_csrv2_minus_matryoshka']:+.2f} | "
+            f"{row['delta_mpsaev2_minus_matryoshka']:+.2f} | "
+            f"{row['delta_mpsaev2_minus_csrv2']:+.2f} |"
         )
     mrl_mean = float(np.mean([row["matryoshka_1nn_top1"] for row in rows]))
-    csr_mean = float(np.mean([row["csr_1nn_top1"] for row in rows]))
-    mp_sae_mean = float(np.mean([row["mp_sae_1nn_top1"] for row in rows]))
+    csr_mean = float(np.mean([row["csrv2_1nn_top1"] for row in rows]))
+    mp_sae_mean = float(np.mean([row["mpsaev2_1nn_top1"] for row in rows]))
     lines.append(
         f"| **Mean** | **{mrl_mean:.2f}** | **{csr_mean:.2f}** | "
         f"**{mp_sae_mean:.2f}** | **{csr_mean - mrl_mean:+.2f}** | "
@@ -1749,8 +2140,9 @@ def write_markdown_table(
     )
     lines.extend([
         "",
-        "Values are ImageNet validation exact L2 1-NN top-1 accuracy (%). ",
-        "K denotes prefix dimension for Matryoshka and active latents for CSR and MP-SAE; configured loss weights are recorded in comparison.csv and summary.json.",
+        "Values are ImageNet validation unit-normalized exact L2 1-NN top-1 accuracy (%).",
+        "This matched table starts at K=8; sparse-only K=1,2,4 results remain in summary.json and the plots.",
+        "K denotes prefix dimension for Matryoshka and active latents for CSRv2 and MPSAEv2; configured loss weights and annealing settings are recorded in comparison.csv and summary.json.",
     ])
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -1769,20 +2161,20 @@ def write_latex_table(
     lines = [
         f"{command}begin{{table}}[t]",
         f"{command}centering",
-        f"{command}caption{{ImageNet validation exact L2 1-NN top-1 accuracy ({command}%). "
+        f"{command}caption{{ImageNet validation unit-normalized exact L2 1-NN top-1 accuracy ({command}%). "
         f"The budget K is the {backbone.display_name} prefix dimension for Matryoshka and the number "
-        "of active sparse latents for CSR and MP-SAE. Configured loss weights are recorded with the results.}",
-        f"{command}label{{tab:{backbone.name}-matryoshka-csr-mp-sae}}",
+        "of active sparse latents for CSRv2 and MPSAEv2. Configured loss weights and annealing settings are recorded with the results.}",
+        f"{command}label{{tab:{backbone.name}-matryoshka-csrv2-mpsaev2}}",
         f"{command}small",
         f"{command}begin{{tabular}}{{rrrrrrr}}",
         f"{command}toprule",
-        f"K & Matryoshka & CSR & MP-SAE & CSR-M & MP-SAE-M & MP-SAE-CSR {row_end}",
+        f"K & Matryoshka & CSRv2 & MPSAEv2 & CSRv2-M & MPSAEv2-M & MPSAEv2-CSRv2 {row_end}",
         f"{command}midrule",
     ]
     for row in rows:
         mrl = float(row["matryoshka_1nn_top1"])
-        csr = float(row["csr_1nn_top1"])
-        mp_sae = float(row["mp_sae_1nn_top1"])
+        csr = float(row["csrv2_1nn_top1"])
+        mp_sae = float(row["mpsaev2_1nn_top1"])
         best = max(mrl, csr, mp_sae)
         lines.append(
             f"{row['representation_budget']} & {emphasized(mrl, best)} & "
@@ -1790,8 +2182,8 @@ def write_latex_table(
             f"{csr - mrl:+.2f} & {mp_sae - mrl:+.2f} & {mp_sae - csr:+.2f} {row_end}"
         )
     mrl_mean = float(np.mean([row["matryoshka_1nn_top1"] for row in rows]))
-    csr_mean = float(np.mean([row["csr_1nn_top1"] for row in rows]))
-    mp_sae_mean = float(np.mean([row["mp_sae_1nn_top1"] for row in rows]))
+    csr_mean = float(np.mean([row["csrv2_1nn_top1"] for row in rows]))
+    mp_sae_mean = float(np.mean([row["mpsaev2_1nn_top1"] for row in rows]))
     best_mean = max(mrl_mean, csr_mean, mp_sae_mean)
     lines.extend([
         f"{command}midrule",
@@ -1835,30 +2227,52 @@ def plot_publication_comparison(results: Mapping[str, Any], output_dir: Path) ->
     import matplotlib.pyplot as plt
     from matplotlib.ticker import FixedLocator, ScalarFormatter
 
-    budgets = [row["representation_budget"] for row in rows]
-    mrl = [row["matryoshka_1nn_top1"] for row in rows]
-    csr = [row["csr_1nn_top1"] for row in rows]
-    mp_sae = [row["mp_sae_1nn_top1"] for row in rows]
-    csr_delta = [row["delta_csr_minus_matryoshka"] for row in rows]
-    mp_delta = [row["delta_mp_sae_minus_matryoshka"] for row in rows]
+    common_budgets = [row["representation_budget"] for row in rows]
+    per_method = {
+        method: results[method]["knn"]["per_topk"] for method in METHODS
+    }
+    method_budgets = {
+        method: sorted(int(value) for value in metrics)
+        for method, metrics in per_method.items()
+    }
+    all_budgets = sorted(
+        {budget for budgets in method_budgets.values() for budget in budgets}
+    )
+    mrl = [per_method[MATRYOSHKA][str(k)]["top1"] for k in method_budgets[MATRYOSHKA]]
+    csr = [per_method[CSR][str(k)]["top1"] for k in method_budgets[CSR]]
+    mp_sae = [per_method[MP_SAE][str(k)]["top1"] for k in method_budgets[MP_SAE]]
+    csr_delta = [row["delta_csrv2_minus_matryoshka"] for row in rows]
+    mp_delta = [row["delta_mpsaev2_minus_matryoshka"] for row in rows]
     blue, green, orange = "#0072B2", "#009E73", "#D55E00"
     fig, axes = plt.subplots(1, 2, figsize=(7.0, 2.75), constrained_layout=True)
 
     axes[0].plot(
-        budgets, mrl, color=blue, marker="o",
+        method_budgets[MATRYOSHKA], mrl, color=blue, marker="o",
         label=results[MATRYOSHKA]["display_name"],
     )
-    axes[0].plot(budgets, csr, color=green, marker="^", label="CSR")
-    axes[0].plot(budgets, mp_sae, color=orange, marker="s", label="MP-SAE")
+    axes[0].plot(
+        method_budgets[CSR_V1],
+        [per_method[CSR_V1][str(k)]["top1"] for k in method_budgets[CSR_V1]],
+        color="#56B4E9", marker="^", linestyle="--", label="CSR v1",
+    )
+    axes[0].plot(method_budgets[CSR], csr, color=green, marker="^", label="CSRv2")
+    axes[0].plot(
+        method_budgets[MP_SAE_V1],
+        [per_method[MP_SAE_V1][str(k)]["top1"] for k in method_budgets[MP_SAE_V1]],
+        color="#E69F00", marker="s", linestyle="--", label="MPSAE v1",
+    )
+    axes[0].plot(
+        method_budgets[MP_SAE], mp_sae, color=orange, marker="s", label="MPSAEv2"
+    )
     axes[0].set_title("(a) Exact 1-NN accuracy", loc="left", fontweight="bold")
     axes[0].set_ylabel("ImageNet val. top-1 accuracy (%)")
     axes[0].legend(frameon=False, handlelength=2.2)
 
     axes[1].plot(
-        budgets, csr_delta, color=green, marker="^", label="CSR - Matryoshka"
+        common_budgets, csr_delta, color=green, marker="^", label="CSRv2 - Matryoshka"
     )
     axes[1].plot(
-        budgets, mp_delta, color=orange, marker="s", label="MP-SAE - Matryoshka"
+        common_budgets, mp_delta, color=orange, marker="s", label="MPSAEv2 - Matryoshka"
     )
     axes[1].axhline(0.0, color="#333333", linewidth=0.8)
     axes[1].set_title("(b) Effect relative to Matryoshka", loc="left", fontweight="bold")
@@ -1868,8 +2282,9 @@ def plot_publication_comparison(results: Mapping[str, Any], output_dir: Path) ->
     for axis in axes:
         axis.set_xlabel("Representation budget K")
         axis.set_xscale("log", base=2)
-        axis.xaxis.set_major_locator(FixedLocator(budgets))
+        axis.xaxis.set_major_locator(FixedLocator(all_budgets))
         axis.xaxis.set_major_formatter(ScalarFormatter())
+        axis.tick_params(axis="x", labelrotation=45)
         axis.grid(axis="y", color="#B8B8B8", linestyle=(0, (2, 2)), linewidth=0.55, alpha=0.65)
         axis.set_axisbelow(True)
         axis.spines["top"].set_visible(False)
@@ -1880,6 +2295,85 @@ def plot_publication_comparison(results: Mapping[str, Any], output_dir: Path) ->
     )
     save_figure_formats(
         fig, output_dir, f"ablation_{backbone_name}_representation_accuracy_comparison"
+    )
+    plt.close(fig)
+
+
+def plot_retrieval_time(results: Mapping[str, Any], output_dir: Path) -> None:
+    """Plot search-only mean retrieval time for each backbone-specific run."""
+    if not all(method in results for method in METHODS):
+        return
+    configure_publication_style()
+    import matplotlib.pyplot as plt
+    from matplotlib.ticker import FixedLocator, ScalarFormatter
+
+    colors = {
+        MATRYOSHKA: "#0072B2", CSR_V1: "#56B4E9", CSR: "#009E73",
+        MP_SAE_V1: "#E69F00", MP_SAE: "#D55E00",
+    }
+    markers = {
+        MATRYOSHKA: "o", CSR_V1: "v", CSR: "^", MP_SAE_V1: "D", MP_SAE: "s"
+    }
+    labels = {
+        MATRYOSHKA: "Matryoshka", CSR_V1: "CSR v1", CSR: "CSRv2",
+        MP_SAE_V1: "MPSAE v1", MP_SAE: "MPSAEv2",
+    }
+    fig, axes = plt.subplots(1, 2, figsize=(7.0, 2.75), constrained_layout=True)
+    averages: List[float] = []
+    all_budgets: set[int] = set()
+    common_budgets = sorted(
+        set.intersection(
+            *[
+                {int(value) for value in results[method]["knn"]["per_topk"]}
+                for method in METHODS
+            ]
+        )
+    )
+
+    for method in METHODS:
+        metrics = results[method]["knn"]["per_topk"]
+        budgets = sorted(int(value) for value in metrics)
+        milliseconds = [
+            metrics[str(k)]["mean_retrieval_milliseconds_per_query"] for k in budgets
+        ]
+        all_budgets.update(budgets)
+        averages.append(
+            float(np.mean([
+                metrics[str(k)]["mean_retrieval_milliseconds_per_query"]
+                for k in common_budgets
+            ]))
+        )
+        axes[0].plot(
+            budgets, milliseconds, color=colors[method], marker=markers[method],
+            label=labels[method],
+        )
+
+    axes[0].set_xscale("log", base=2)
+    axes[0].set_yscale("log")
+    axes[0].xaxis.set_major_locator(FixedLocator(sorted(all_budgets)))
+    axes[0].xaxis.set_major_formatter(ScalarFormatter())
+    axes[0].tick_params(axis="x", labelrotation=45)
+    axes[0].set_xlabel("Representation budget K")
+    axes[0].set_ylabel("Mean search time per query (ms)")
+    axes[0].set_title("(a) Retrieval time by budget", loc="left", fontweight="bold")
+    axes[0].legend(frameon=False)
+
+    positions = np.arange(len(METHODS))
+    axes[1].bar(positions, averages, color=[colors[method] for method in METHODS])
+    axes[1].set_xticks(positions, [labels[method] for method in METHODS], rotation=15)
+    axes[1].set_yscale("log")
+    axes[1].set_ylabel("Mean search time per query (ms)")
+    axes[1].set_title("(b) Average across matched K", loc="left", fontweight="bold")
+
+    for axis in axes:
+        axis.grid(axis="y", color="#B8B8B8", linestyle=(0, (2, 2)), linewidth=0.55, alpha=0.65)
+        axis.set_axisbelow(True)
+        axis.spines["top"].set_visible(False)
+        axis.spines["right"].set_visible(False)
+
+    backbone_name = results[MATRYOSHKA].get("backbone", "backbone")
+    save_figure_formats(
+        fig, output_dir, f"ablation_{backbone_name}_retrieval_time_comparison"
     )
     plt.close(fig)
 
@@ -1916,7 +2410,7 @@ def plot_training_diagnostics(results: Mapping[str, Any], output_dir: Path) -> N
         csr_epochs, [row["weighted_contrastive"] for row in csr_history],
         color="#CC79A7", marker="s", linestyle=":", label="NCL",
     )
-    axes[1].set_title("(b) CSR", loc="left", fontweight="bold")
+    axes[1].set_title("(b) CSRv2", loc="left", fontweight="bold")
     axes[1].set_ylabel("Training loss")
     axes[1].legend(frameon=False)
 
@@ -1930,7 +2424,7 @@ def plot_training_diagnostics(results: Mapping[str, Any], output_dir: Path) -> N
         epochs, [row["weighted_mmpot_regularizer"] for row in mp_sae_history],
         color="#CC79A7", marker="^", linestyle=":", label="Weighted MMPOT",
     )
-    axes[2].set_title("(c) MP-SAE", loc="left", fontweight="bold")
+    axes[2].set_title("(c) MPSAEv2", loc="left", fontweight="bold")
     axes[2].set_ylabel("Training loss")
     axes[2].legend(frameon=False)
 
@@ -1944,6 +2438,46 @@ def plot_training_diagnostics(results: Mapping[str, Any], output_dir: Path) -> N
         "backbone", results[MP_SAE].get("backbone", "backbone")
     )
     save_figure_formats(fig, output_dir, f"ablation_{backbone_name}_training_loss_curves")
+    plt.close(fig)
+
+
+def plot_topk_annealing(
+    results: Mapping[str, Any], output_dir: Path, backbone: BackboneSpec
+) -> None:
+    """Plot fixed v1 and annealed v2 training supports for all sparse methods."""
+    histories = {
+        method: results.get(method, {}).get("history", [])
+        for method in SPARSE_METHODS
+        if results.get(method, {}).get("history")
+    }
+    if not histories:
+        return
+    configure_publication_style()
+    import matplotlib.pyplot as plt
+
+    colors = {
+        CSR_V1: "#56B4E9", MP_SAE_V1: "#E69F00",
+        CSR: "#009E73", MP_SAE: "#D55E00",
+    }
+    fig, axis = plt.subplots(figsize=(4.8, 3.0), constrained_layout=True)
+    for method, history in histories.items():
+        epochs = [row["epoch"] for row in history]
+        starts = [row["annealed_k_start"] for row in history]
+        ends = [row["annealed_k_end"] for row in history]
+        means = [row["annealed_k_mean"] for row in history]
+        label = results[method]["display_name"]
+        axis.plot(epochs, means, color=colors[method], marker="o", label=label)
+        axis.fill_between(epochs, ends, starts, color=colors[method], alpha=0.14)
+    axis.set_title("Fixed v1 and annealed v2 Top-K training", loc="left", fontweight="bold")
+    axis.set_xlabel("Epoch")
+    axis.set_ylabel("Active training K")
+    axis.grid(axis="y", color="#B8B8B8", linestyle=(0, (2, 2)), linewidth=0.55, alpha=0.65)
+    axis.legend(frameon=False)
+    axis.spines["top"].set_visible(False)
+    axis.spines["right"].set_visible(False)
+    save_figure_formats(
+        fig, output_dir, f"ablation_{backbone.name}_topk_annealing_schedule"
+    )
     plt.close(fig)
 
 
@@ -1976,7 +2510,7 @@ def training_loss_records(
                         per_dimension.items(), key=lambda item: int(item[0])
                     )
                 )
-            elif method == CSR:
+            elif method in (CSR_V1, CSR):
                 components.extend(
                     [
                         (
@@ -2072,6 +2606,9 @@ def training_loss_records(
                         "ot_capacity_violation": row.get("ot_capacity_violation"),
                         "ot_constraint_error": row.get("ot_constraint_error"),
                         "mean_ot_iterations": row.get("ot_iterations"),
+                        "annealed_k_start": row.get("annealed_k_start"),
+                        "annealed_k_end": row.get("annealed_k_end"),
+                        "annealed_k_mean": row.get("annealed_k_mean"),
                     }
                 )
 
@@ -2174,7 +2711,10 @@ def plot_training_procedure(
     import matplotlib.pyplot as plt
 
     prefix = f"ablation_{backbone.name}"
-    colors = {MATRYOSHKA: "#0072B2", CSR: "#009E73", MP_SAE: "#D55E00"}
+    colors = {
+        MATRYOSHKA: "#0072B2", CSR_V1: "#56B4E9", CSR: "#009E73",
+        MP_SAE_V1: "#E69F00", MP_SAE: "#D55E00",
+    }
     fig, axes = plt.subplots(2, 2, figsize=(8.4, 5.8), constrained_layout=True)
     for method, history in histories.items():
         epochs = [row["epoch"] for row in history]
@@ -2211,12 +2751,13 @@ def plot_training_procedure(
                     linewidth=1.0,
                     label=f"MRL CE dim {dimension}",
                 )
-        elif method == CSR:
+        elif method in (CSR_V1, CSR):
+            method_name = "CSR v1" if method == CSR_V1 else "CSRv2"
             component_specs = (
-                ("weighted_main_reconstruction", "CSR weighted main reconstruction", "#009E73"),
-                ("weighted_multi_topk_reconstruction", "CSR weighted 4K reconstruction", "#56B4E9"),
-                ("weighted_auxiliary_reconstruction", "CSR weighted auxiliary", "#E69F00"),
-                ("weighted_contrastive", "CSR weighted NCL", "#CC79A7"),
+                ("weighted_main_reconstruction", f"{method_name} weighted main reconstruction", "#009E73"),
+                ("weighted_multi_topk_reconstruction", f"{method_name} weighted 4K reconstruction", "#56B4E9"),
+                ("weighted_auxiliary_reconstruction", f"{method_name} weighted auxiliary", "#E69F00"),
+                ("weighted_contrastive", f"{method_name} weighted NCL", "#CC79A7"),
             )
             for key, label_name, color in component_specs:
                 axes[0, 1].plot(
@@ -2292,7 +2833,26 @@ def plot_training_procedure(
 
 
 def serializable_args(args: argparse.Namespace) -> Dict[str, Any]:
-    return {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()}
+    payload = {
+        key: str(value) if isinstance(value, Path) else value
+        for key, value in vars(args).items()
+    }
+    public_names = {
+        "csr_main_recon_weight": "csrv2_main_recon_weight",
+        "csr_multi_topk_recon_weight": "csrv2_multi_topk_recon_weight",
+        "csr_aux_recon_weight": "csrv2_aux_recon_weight",
+        "csr_contrastive_weight": "csrv2_contrastive_weight",
+        "mpsae_main_recon_weight": "mpsaev2_main_recon_weight",
+        "mpsae_nested_recon_weight": "mpsaev2_nested_recon_weight",
+        "mpsae_aux_recon_weight": "mpsaev2_aux_recon_weight",
+        "mpsae_mmpot_weight": "mpsaev2_mmpot_weight",
+        "mpsae_extra_epochs": "mpsaev2_extra_epochs",
+        "lr": "mpsaev2_lr",
+        "csr_lr": "csrv2_lr",
+    }
+    for internal_name, public_name in public_names.items():
+        payload[public_name] = payload.pop(internal_name)
+    return payload
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -2312,14 +2872,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     configure_runtime(args, device)
     init_wandb(
         args,
-        default_name=f"three-method-{backbone.name}-{args.method}",
-        default_group="three-method-architecture-ablation",
+        default_name=f"five-method-{backbone.name}-{args.method}",
+        default_group="five-method-architecture-ablation",
         extra_config={
-            "experiment_family": "matryoshka_csr_mpsae",
+            "experiment_family": "matryoshka_csr_v1_v2_mpsae_v1_v2",
             "backbone_display_name": backbone.display_name,
             "backbone_weights": backbone.weights_id,
+            "public_experiment_config": serializable_args(args),
         },
-        tags=("matryoshka", "csr", "mpsae", args.backbone, args.method),
+        tags=(
+            "matryoshka", "csr", "mpsae", "csrv2", "mpsaev2",
+            "topk-annealing", args.backbone, args.method,
+        ),
     )
     print(
         f"backbone={backbone.name} feature_dim={backbone.output_dim} "
@@ -2372,7 +2936,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if device.type == "cuda":
             torch.cuda.empty_cache()
 
-    if args.method in (CSR, MP_SAE, "all"):
+    if args.method in (*SPARSE_METHODS, "all"):
         frozen_backbone = FrozenBackbone(args.weights_cache, backbone).to(device)
         if args.channels_last:
             frozen_backbone = frozen_backbone.to(memory_format=torch.channels_last)
@@ -2409,27 +2973,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         initial_state = {key: value.clone() for key, value in template.state_dict().items()}
         del template
 
-        if args.method in (CSR, "all"):
+        for method, use_annealing in ((CSR_V1, False), (CSR, True)):
+            if args.method not in (method, "all"):
+                continue
             seed_all(args.seed)
-            csr_model, csr_history = train_csr(
-                initial_state, train_data, device, args
+            csr_model, csr_history, csr_schedule = train_csr(
+                initial_state, train_data, device, args, method, use_annealing
             )
             csr_knn = benchmark_method(
-                CSR, csr_model, train_data, val_data, device, args
+                method, csr_model, train_data, val_data, device, args
             )
-            results[CSR] = {
-                "display_name": labels[CSR],
+            schedule_name = "cosine_annealed" if use_annealing else "fixed_k"
+            results[method] = {
+                "display_name": labels[method],
                 "backbone": backbone.name,
                 "feature_dim": backbone.output_dim,
                 "trainable_parameters": sum(
-                    parameter.numel()
-                    for parameter in csr_model.parameters()
+                    parameter.numel() for parameter in csr_model.parameters()
                     if parameter.requires_grad
                 ),
                 "training_protocol": (
-                    f"frozen_{backbone.name}_topk_sae_reconstruction_plus_ncl"
+                    f"frozen_{backbone.name}_{schedule_name}_topk_sae_reconstruction_plus_ncl"
                 ),
                 "training_epochs": args.epochs,
+                "topk_annealing": csr_schedule,
                 "loss_weights": {
                     "main_reconstruction": args.csr_main_recon_weight,
                     "multi_topk_reconstruction": args.csr_multi_topk_recon_weight,
@@ -2439,33 +3006,38 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "history": csr_history,
                 "knn": csr_knn,
             }
-            dataset_metadata[CSR] = {
+            dataset_metadata[method] = {
                 "train": frozen_train_meta, "validation": frozen_val_meta
             }
-            atomic_json(results[CSR], args.output_dir / CSR / "results.json")
+            atomic_json(results[method], args.output_dir / method / "results.json")
             del csr_model
             if device.type == "cuda":
                 torch.cuda.empty_cache()
 
-        if args.method in (MP_SAE, "all"):
+        for method, use_annealing in ((MP_SAE_V1, False), (MP_SAE, True)):
+            if args.method not in (method, "all"):
+                continue
             seed_all(args.seed)
-            mp_model, mp_history = train_mp_sae(
-                initial_state, train_data, device, args
+            mp_model, mp_history, mp_schedule = train_mp_sae(
+                initial_state, train_data, device, args, method, use_annealing
             )
             mp_knn = benchmark_method(
-                MP_SAE, mp_model, train_data, val_data, device, args
+                method, mp_model, train_data, val_data, device, args
             )
-            results[MP_SAE] = {
-                "display_name": labels[MP_SAE],
+            schedule_name = "cosine_annealed" if use_annealing else "fixed_k"
+            results[method] = {
+                "display_name": labels[method],
                 "backbone": backbone.name,
                 "feature_dim": backbone.output_dim,
                 "trainable_parameters": sum(
-                    parameter.numel()
-                    for parameter in mp_model.parameters()
+                    parameter.numel() for parameter in mp_model.parameters()
                     if parameter.requires_grad
                 ),
-                "training_protocol": f"frozen_{backbone.name}_topk_sae_plus_mmpot",
+                "training_protocol": (
+                    f"frozen_{backbone.name}_{schedule_name}_topk_sae_plus_mmpot"
+                ),
                 "training_epochs": args.epochs + args.mpsae_extra_epochs,
+                "topk_annealing": mp_schedule,
                 "loss_weights": {
                     "main_reconstruction": args.mpsae_main_recon_weight,
                     "nested_reconstruction": args.mpsae_nested_recon_weight,
@@ -2475,19 +3047,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "history": mp_history,
                 "knn": mp_knn,
             }
-            dataset_metadata[MP_SAE] = {
+            dataset_metadata[method] = {
                 "train": frozen_train_meta, "validation": frozen_val_meta
             }
-            atomic_json(
-                results[MP_SAE], args.output_dir / MP_SAE / "results.json"
-            )
+            atomic_json(results[method], args.output_dir / method / "results.json")
             del mp_model
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
         del train_data, val_data, initial_state
         if device.type == "cuda":
             torch.cuda.empty_cache()
 
     summary = {
-        "experiment": f"Matryoshka_vs_CSR_vs_MP_SAE_{backbone.name}",
+        "experiment": f"Matryoshka_vs_CSR_v1_v2_vs_MPSAE_v1_v2_{backbone.name}",
         "study_role": "architecture_ablation_backbone_unit",
         "ablation_variable": "backbone",
         "backbone": {
@@ -2499,35 +3071,64 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "method_labels": labels,
         "comparison_protocol": {
             "dataset": "ImageNet-1K",
-            "metric": "exact_L2_1NN_top1",
+            "metric": "unit_normalized_exact_L2_1NN_top1",
             "gallery": "training_split",
             "queries": "validation_split",
+            "unit_normalized": True,
+            "retrieval_timing_scope": (
+                "search_only_excludes_encoding_normalization_and_index_construction"
+            ),
+            "retrieval_backends": {
+                MATRYOSHKA: "FAISS IndexFlatL2 dense exact search",
+                **{method: "SciPy CSR sparse exact search" for method in SPARSE_METHODS},
+            },
+            "evaluation_budgets": {
+                MATRYOSHKA: list(args.topk),
+                **{
+                    method: sorted(set((*args.sparse_extra_topk, *args.topk)))
+                    for method in SPARSE_METHODS
+                },
+            },
             "budget_definition": {
                 MATRYOSHKA: f"{backbone.display_name} feature-prefix dimension",
-                CSR: "number of active Top-K sparse latents",
-                MP_SAE: "number of active Top-K sparse latents",
+                **{
+                    method: "number of retained Top-K sparse latents at evaluation"
+                    for method in SPARSE_METHODS
+                },
             },
             "training_epochs": {
                 MATRYOSHKA: args.epochs,
+                CSR_V1: args.epochs,
                 CSR: args.epochs,
+                MP_SAE_V1: args.epochs + args.mpsae_extra_epochs,
                 MP_SAE: args.epochs + args.mpsae_extra_epochs,
+            },
+            "topk_annealing": {
+                method: results.get(method, {}).get("topk_annealing")
+                for method in SPARSE_METHODS
             },
             "model_weights_saved": False,
             "loss_weights": {
                 MATRYOSHKA: {
                     "classification": args.mrl_classification_weight,
                 },
-                CSR: {
-                    "main_reconstruction": args.csr_main_recon_weight,
-                    "multi_topk_reconstruction": args.csr_multi_topk_recon_weight,
-                    "auxiliary_reconstruction": args.csr_aux_recon_weight,
-                    "nonnegative_contrastive": args.csr_contrastive_weight,
+                **{
+                    method: {
+                        "main_reconstruction": args.csr_main_recon_weight,
+                        "multi_topk_reconstruction": args.csr_multi_topk_recon_weight,
+                        "auxiliary_reconstruction": args.csr_aux_recon_weight,
+                        "nonnegative_contrastive": args.csr_contrastive_weight,
+                    }
+                    for method in (CSR_V1, CSR)
                 },
-                MP_SAE: {
-                    "main_reconstruction": args.mpsae_main_recon_weight,
-                    "nested_reconstruction": args.mpsae_nested_recon_weight,
-                    "auxiliary_reconstruction": args.mpsae_aux_recon_weight,
-                    "mmpot_regularizer": args.mpsae_mmpot_weight,
+                **{
+                    method: {
+                        "main_reconstruction": args.mpsae_main_recon_weight,
+                        "nested_reconstruction": args.mpsae_nested_recon_weight,
+                        "auxiliary_reconstruction": args.mpsae_aux_recon_weight,
+                        "mmpot_regularizer": args.mpsae_mmpot_weight,
+                    }
+                    for method in (MP_SAE_V1, MP_SAE)
                 },
             },
         },
@@ -2540,7 +3141,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     write_markdown_table(rows, args.output_dir / "comparison_table.md", backbone)
     write_latex_table(rows, args.output_dir / "comparison_table.tex", backbone)
     plot_publication_comparison(results, args.output_dir)
+    plot_retrieval_time(results, args.output_dir)
     plot_training_diagnostics(results, args.output_dir)
+    plot_topk_annealing(results, args.output_dir, backbone)
     loss_records, loss_impacts = write_training_loss_analysis(
         results, args, args.output_dir, backbone
     )
@@ -2565,6 +3168,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             f"{artifact_prefix}_training_procedure_overview.pdf",
             f"{artifact_prefix}_loss_component_impact.png",
             f"{artifact_prefix}_loss_component_impact.pdf",
+            f"{artifact_prefix}_topk_annealing_schedule.png",
+            f"{artifact_prefix}_topk_annealing_schedule.pdf",
+        ],
+    }
+    summary["retrieval_analysis"] = {
+        "timing_scope": "search_only_excludes_encoding_normalization_and_index_construction",
+        "unit_normalized": True,
+        "accuracy_plots": [
+            f"{artifact_prefix}_representation_accuracy_comparison.png",
+            f"{artifact_prefix}_representation_accuracy_comparison.pdf",
+        ],
+        "timing_plots": [
+            f"{artifact_prefix}_retrieval_time_comparison.png",
+            f"{artifact_prefix}_retrieval_time_comparison.pdf",
         ],
     }
     summary["runtime"] = runtime_metadata(

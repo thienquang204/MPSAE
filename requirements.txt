@@ -7,6 +7,7 @@ huggingface-hub==1.27.0
 Pillow==12.3.0
 tqdm==4.67.1
 numpy>=1.26,<3
+scipy>=1.13,<2
 
 # CUDA FAISS. PyPI GPU wheels are Linux x86-64 only. The Dockerfile builds
 # FAISS from source for Linux ARM64 (GX10/GB10); do not install faiss-cpu there

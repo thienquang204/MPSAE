@@ -60,7 +60,7 @@ PIPELINE_LOG="$HOST_SUITE_ROOT/three_method_ablation_docker.log"
 exec > >(tee -a "$PIPELINE_LOG") 2>&1
 
 echo "============================================================"
-echo "Graduate thesis: Matryoshka / CSR / MP-SAE ablation"
+echo "Graduate thesis: Matryoshka / CSRv2 / MPSAEv2 ablation"
 echo "Image:        $IMAGE_NAME"
 echo "Dockerfile:   $DOCKERFILE"
 echo "Data volume:  $DATA_VOLUME"

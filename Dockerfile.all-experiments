@@ -1,9 +1,9 @@
 # syntax=docker/dockerfile:1
-# Single image for the Matryoshka/CSR/MP-SAE architecture ablation.
+# Single image for the Matryoshka/CSRv2/MPSAEv2 architecture ablation.
 FROM nvidia/cuda:13.0.2-devel-ubuntu24.04
 
 LABEL org.opencontainers.image.title="Graduate thesis three-method ablation runner"
-LABEL org.opencontainers.image.description="Matryoshka, CSR, and MP-SAE on ImageNet with ResNet-18 and ResNet-50"
+LABEL org.opencontainers.image.description="Matryoshka, CSRv2, and MPSAEv2 on ImageNet with ResNet-18 and ResNet-50"
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
