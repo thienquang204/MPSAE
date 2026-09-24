@@ -19,7 +19,7 @@ Pipeline
 6. Encode the train split as the gallery and validation split as queries.
 7. Unit-normalize every evaluated embedding and run exact L2 1-NN: dense
    Matryoshka prefixes use FAISS ``IndexFlatL2`` while all four sparse arms use
-   exact SciPy CSR products (equivalent to L2 ranking after normalization).
+   exact chunked SciPy CSR products (equivalent to L2 ranking after normalization).
 8. Record search-only retrieval latency and save histories, JSON results,
    publication tables, and figures. Model weights and optimizer checkpoints
    are deliberately not saved.
@@ -342,7 +342,7 @@ def build_parser() -> argparse.ArgumentParser:
     knn.add_argument("--knn-query-batch", type=int, default=4096)
     knn.add_argument(
         "--sparse-knn-query-batch", type=int, default=32,
-        help="query batch for exact SciPy CSR sparse retrieval",
+        help="query batch for exact chunked SciPy CSR sparse retrieval",
     )
     knn.add_argument(
         "--knn-normalize", action=argparse.BooleanOptionalAction, default=True,
@@ -350,7 +350,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     knn.add_argument(
         "--faiss-gpu", action=argparse.BooleanOptionalAction, default=False,
-        help="optional CUDA FAISS override; CPU is the fair default beside SciPy CSR",
+        help="optional CUDA FAISS override; CPU is the fair default beside chunked SciPy CSR",
     )
     knn.add_argument("--faiss-gpu-device", type=int, default=None,
                      help="CUDA device for FAISS (defaults to the model CUDA device, otherwise 0)")
@@ -1792,17 +1792,17 @@ def scipy_sparse_module() -> Any:
 def dense_codes_to_csr(codes: torch.Tensor) -> Any:
     """Convert a normalized Top-K batch to CSR without densifying it again."""
     sparse = scipy_sparse_module()
-    codes = codes.detach().to("cpu")
-    nonzero = codes.ne(0)
-    counts = nonzero.sum(dim=1).numpy().astype(np.int64, copy=False)
+    codes_cpu = codes.detach().to(device="cpu", dtype=torch.float32).contiguous()
+    nonzero = codes_cpu.ne(0)
+    counts = nonzero.sum(dim=1).numpy().astype(np.int32, copy=False)
     coordinates = nonzero.nonzero(as_tuple=False)
-    indices = coordinates[:, 1].numpy().astype(np.int64, copy=False)
-    data = codes[nonzero].numpy().astype(np.float32, copy=False)
-    indptr = np.empty(codes.shape[0] + 1, dtype=np.int64)
+    indices = coordinates[:, 1].numpy().astype(np.int32, copy=False)
+    data = codes_cpu[nonzero].numpy()
+    indptr = np.empty(codes_cpu.shape[0] + 1, dtype=np.int32)
     indptr[0] = 0
     np.cumsum(counts, out=indptr[1:])
     return sparse.csr_matrix(
-        (data, indices, indptr), shape=tuple(codes.shape), dtype=np.float32
+        (data, indices, indptr), shape=tuple(codes_cpu.shape), dtype=np.float32
     )
 
 
@@ -1814,44 +1814,28 @@ def encode_sparse_gallery(
     k: int,
     batch_size: int,
     device: torch.device,
-) -> Tuple[Any, np.ndarray, float]:
-    """Encode the gallery directly into CSR storage with at most K entries per row."""
-    sparse = scipy_sparse_module()
+) -> Tuple[Tuple[Any, ...], np.ndarray, float]:
+    """Encode the gallery as bounded CSR chunks with at most K entries per row."""
     model.eval()
-    rows = len(dataset)
-    width = int(model.decoder.shape[0])
-    capacity = rows * min(k, width)
-    data = np.empty(capacity, dtype=np.float32)
-    # Full ImageNet at K=2048 can exceed the 32-bit CSR nonzero limit.
-    indices = np.empty(capacity, dtype=np.int64)
-    indptr = np.empty(rows + 1, dtype=np.int64)
-    labels = np.empty(rows, dtype=np.int64)
-    indptr[0] = 0
-    cursor, row_offset = 0, 0
+    gallery_chunks: List[Any] = []
+    label_chunks: List[np.ndarray] = []
+    total_nnz = 0
+    active_width = max(1, min(k, int(model.decoder.shape[0])))
+    max_chunk_rows = max(1, np.iinfo(np.int32).max // active_width)
+    csr_batch_size = min(batch_size, max_chunk_rows)
 
-    for features, target in cached_feature_batches(dataset, batch_size):
+    for features, target in cached_feature_batches(dataset, csr_batch_size):
         codes = encode_for_benchmark(method, model, features, k, device)
-        codes = unit_normalize_embeddings(codes, method, k).to("cpu")
-        nonzero = codes.ne(0)
-        counts = nonzero.sum(dim=1).numpy().astype(np.int64, copy=False)
-        coordinates = nonzero.nonzero(as_tuple=False)
-        batch_nnz = int(coordinates.shape[0])
-        data[cursor:cursor + batch_nnz] = codes[nonzero].numpy()
-        indices[cursor:cursor + batch_nnz] = coordinates[:, 1].numpy()
-        batch_rows = int(codes.shape[0])
-        indptr[row_offset + 1:row_offset + batch_rows + 1] = (
-            cursor + np.cumsum(counts, dtype=np.int64)
+        codes = unit_normalize_embeddings(codes, method, k)
+        gallery_chunk = dense_codes_to_csr(codes)
+        gallery_chunks.append(gallery_chunk)
+        label_chunks.append(
+            target.detach().to(device="cpu", dtype=torch.long).contiguous().numpy()
         )
-        labels[row_offset:row_offset + batch_rows] = target.numpy()
-        cursor += batch_nnz
-        row_offset += batch_rows
+        total_nnz += int(gallery_chunk.nnz)
 
-    data.resize(cursor, refcheck=False)
-    indices.resize(cursor, refcheck=False)
-    gallery = sparse.csr_matrix(
-        (data, indices, indptr), shape=(rows, width), dtype=np.float32
-    )
-    return gallery, labels, cursor / rows
+    labels = np.concatenate(label_chunks)
+    return tuple(gallery_chunks), labels, total_nnz / len(labels)
 
 
 def sparse_row_argmax(similarities: Any) -> Tuple[np.ndarray, np.ndarray]:
@@ -1876,7 +1860,7 @@ def sparse_row_argmax(similarities: Any) -> Tuple[np.ndarray, np.ndarray]:
 
 @torch.inference_mode()
 def search_sparse_queries(
-    gallery: Any,
+    gallery_chunks: Sequence[Any],
     gallery_labels: np.ndarray,
     method: str,
     model: TopKSAE,
@@ -1887,7 +1871,10 @@ def search_sparse_queries(
 ) -> Tuple[float, float, int, float, int, float]:
     """Exact sparse 1-NN using unit-vector dot products as L2 rankings."""
     model.eval()
-    gallery_transpose = gallery.transpose().tocsc(copy=False)
+    gallery_transposes = tuple(
+        gallery_chunk.transpose().tocsc(copy=False)
+        for gallery_chunk in gallery_chunks
+    )
     correct, total, distance_sum = 0, 0, 0.0
     retrieval_seconds, retrieval_batches, query_nnz = 0.0, 0, 0
 
@@ -1898,12 +1885,27 @@ def search_sparse_queries(
         query_nnz += int(queries.nnz)
 
         started = time.perf_counter()
-        similarities = queries @ gallery_transpose
-        indices, scores = sparse_row_argmax(similarities)
+        indices = np.zeros(queries.shape[0], dtype=np.int64)
+        scores = np.zeros(queries.shape[0], dtype=np.float32)
+        gallery_offset = 0
+        for gallery_chunk, gallery_transpose in zip(
+            gallery_chunks, gallery_transposes
+        ):
+            similarities = queries @ gallery_transpose
+            chunk_indices, chunk_scores = sparse_row_argmax(similarities)
+            update = chunk_scores > scores
+            indices[update] = gallery_offset + chunk_indices[update]
+            scores[update] = chunk_scores[update]
+            gallery_offset += gallery_chunk.shape[0]
         retrieval_seconds += time.perf_counter() - started
         retrieval_batches += 1
 
-        truth = target.numpy()
+        truth = (
+            target.detach()
+            .to(device="cpu", dtype=torch.long)
+            .contiguous()
+            .numpy()
+        )
         correct += int((gallery_labels[indices] == truth).sum())
         total += int(truth.size)
         distance_sum += float(np.maximum(0.0, 2.0 - 2.0 * scores).sum())
@@ -1959,7 +1961,11 @@ def benchmark_method(
         if method == MATRYOSHKA
         else sorted(set((*args.sparse_extra_topk, *args.topk)))
     )
-    backend = "faiss_index_flat_l2" if method == MATRYOSHKA else "scipy_csr_exact_l2"
+    backend = (
+        "faiss_index_flat_l2"
+        if method == MATRYOSHKA
+        else "scipy_chunked_csr_exact_l2"
+    )
 
     for k in budgets:
         if method == MATRYOSHKA:
@@ -1984,9 +1990,14 @@ def benchmark_method(
         else:
             if model is None:
                 raise ValueError(f"{method} sparse retrieval requires a trained model")
-            print(f"SciPy CSR exact L2: method={method} k={k} device=cpu", flush=True)
-            gallery, gallery_labels, average_gallery_nnz = encode_sparse_gallery(
-                method, model, train_data, k, args.knn_batch_size, device
+            print(
+                f"SciPy chunked CSR exact L2: method={method} k={k} device=cpu",
+                flush=True,
+            )
+            gallery_chunks, gallery_labels, average_gallery_nnz = (
+                encode_sparse_gallery(
+                    method, model, train_data, k, args.knn_batch_size, device
+                )
             )
             (
                 accuracy,
@@ -1996,11 +2007,11 @@ def benchmark_method(
                 retrieval_batches,
                 average_query_nnz,
             ) = search_sparse_queries(
-                gallery, gallery_labels, method, model, val_data, k,
+                gallery_chunks, gallery_labels, method, model, val_data, k,
                 args.sparse_knn_query_batch, device
             )
             gallery_samples = len(gallery_labels)
-            del gallery, gallery_labels
+            del gallery_chunks, gallery_labels
 
         results[str(k)] = {
             "top1": accuracy,
@@ -3080,7 +3091,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             ),
             "retrieval_backends": {
                 MATRYOSHKA: "FAISS IndexFlatL2 dense exact search",
-                **{method: "SciPy CSR sparse exact search" for method in SPARSE_METHODS},
+                **{
+                    method: "SciPy chunked CSR sparse exact search"
+                    for method in SPARSE_METHODS
+                },
             },
             "evaluation_budgets": {
                 MATRYOSHKA: list(args.topk),

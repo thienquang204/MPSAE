@@ -111,7 +111,8 @@ K. Evaluation is not annealed: each reported point uses its requested fixed K.
 ## Retrieval and timing
 
 Matryoshka prefixes use dense exact CPU FAISS `IndexFlatL2`. CSR/MPSAE v1/v2
-codes remain in CPU SciPy CSR form and use exact sparse matrix products. Because
+codes remain in bounded CPU SciPy CSR chunks and use exact sparse matrix
+products. Because
 all vectors are unit normalized and sparse codes are non-negative, maximizing
 the sparse dot product is exactly equivalent to minimizing squared L2 distance.
 The benchmark times only the neighbor-search computation; encoding,

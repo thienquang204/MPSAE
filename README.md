@@ -28,7 +28,8 @@ All five arms are evaluated at `K=8,16,32,64,128,256,512` for ResNet-18 and
 at `K=8,16,32,64,128,256,512,1024,2048` for ResNet-50. All four CSR/MPSAE
 sparse arms are also evaluated at `K=1,2,4`. Gallery and query embeddings are
 unit normalized before exact L2 1-nearest-neighbour search. Matryoshka uses
-dense CPU FAISS search; the four sparse arms use exact CPU SciPy CSR products.
+dense CPU FAISS search; the four sparse arms use exact chunked CPU SciPy CSR
+products.
 Search-only mean latency per query is recorded and plotted separately for each
 backbone. Both backbones use torchvision's ImageNet-1K V1 weight recipe.
 
