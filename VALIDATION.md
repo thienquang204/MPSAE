@@ -1,5 +1,16 @@
 # Validation status for MMRSAE and the repair research profile
 
+The Docker Compose addition was checked with Docker Compose v2.38.1 using
+`docker compose config --format json`. The check supplied the Compose manifest
+through standard input, substituting only its private `.env` file path with
+the public `.env.example` and using dummy credential values. It verified
+configuration parsing, online W&B, unchanged seeds and development workload,
+ImageNet-only routing, selected GPU, persistent bind mounts, custom paths with
+spaces, and actionable errors for missing credentials. No real credentials
+were read, and no image build, container launch, download, CUDA check or
+training run was performed. These checks validate Compose configuration,
+not GPU/runtime compatibility or experiment results.
+
 The server convenience update also used source inspection and editing only.
 It adds `run_imagenet.sh` initialization, planning, execution and log commands;
 optional host data-directory mounting and GPU selection; Python executable

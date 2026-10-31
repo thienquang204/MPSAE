@@ -1,5 +1,51 @@
 # MMRSAE: ImageNet sparse retrieval experiments
 
+**Docker Compose: configure once, then run.** On a Linux GPU server with Docker
+Compose, an NVIDIA driver compatible with CUDA 13.0.2, and NVIDIA Container
+Toolkit already installed:
+
+```bash
+cp .env.example .env
+# Edit .env: set HF_TOKEN, WANDB_API_KEY, and your WANDB_ENTITY.
+docker compose up
+```
+
+Use a Hugging Face token whose account has accepted the
+[ImageNet access conditions](https://huggingface.co/datasets/ILSVRC/imagenet-1k).
+W&B is online by default; both API tokens must be nonempty before Compose
+builds. Credentials stay in the ignored `.env` file. The Compose service uses
+`.env`, independently of the shell wrapper's `imagenet.env`.
+
+Compose builds the existing image, checks GPU retrieval, prepares/downloads
+data, fits ResNet-50 then ResNet-18, and evaluates the configured experiment.
+It runs the current MMRSAE ImageNet workflow. The experiment defaults remain
+K=8, seeds 1227/42, 500 updates per backbone, 128,000 fitting/gallery rows and
+10,000 training-derived development queries. To explicitly request full-data,
+ten-epoch official evaluation, set `MMRSAE_MAX_STEPS=0`, `MMRSAE_TRAIN_SIZE=0`,
+`MMRSAE_EPOCHS=10`, and `MMRSAE_EVALUATION=official` before starting.
+
+`GPU_DEVICE_ID=0` selects physical GPU 0, exposed as `cuda:0` inside the service.
+Data/cache files persist in `./data`; results and checkpoints persist in
+`./runs/mmrsae`. Compose creates those directories. Change `DATA_HOST_DIR` and
+`OUTPUT_ROOT` in `.env` to use another disk. ResNet-18 prepares the full raw
+ImageNet training split even when fitting uses a subset. Container files are
+root-owned by default; optional `HOST_UID`/`HOST_GID` settings hand results back
+to those numeric IDs when the existing launcher exits.
+
+For a background run that survives an SSH disconnect:
+
+```bash
+docker compose up -d
+docker compose logs -f imagenet
+```
+
+The console prints the W&B run URLs. `docker compose stop` stops the job;
+`docker compose up` resumes compatible saved checkpoints with the same settings
+and data. A completed job exits normally. The Compose launch rebuilds changed
+source using Docker's layer cache, so keep the code unchanged for a resume.
+This setup still requires GPU access from the host; containers cannot install
+the host driver or Docker daemon.
+
 **Simple server entry point.** Use [run_imagenet.sh](run_imagenet.sh) for short
 commands. It defaults to the controlled ImageNet study in
 `full_theory_detail.md` and accepts only the `repair` and `mmrsae` workflows.

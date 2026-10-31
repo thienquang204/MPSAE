@@ -1,0 +1,50 @@
+# Configure .env once, then run: docker compose up
+services:
+  imagenet:
+    image: "${IMAGE_NAME:-graduate-thesis-mmrsae:latest}"
+    build:
+      context: .
+      dockerfile: Dockerfile.all-experiments
+    # Build this checkout on up; Docker reuses unchanged build layers.
+    pull_policy: build
+    env_file:
+      - .env
+    environment:
+      # This service runs the current ImageNet workflow end to end.
+      EXPERIMENT_SCOPE: mmrsae
+      OUTPUT_MOUNT: /output
+      SUITE_ROOT: "/output/${SUITE_DIR:-mmrsae}"
+      MMRSAE_OUTPUT: "/output/${SUITE_DIR:-mmrsae}"
+      MMRSAE_DEVICE: cuda:0
+      HF_TOKEN: "${HF_TOKEN:?Set HF_TOKEN in .env to a token with ImageNet access}"
+      WANDB_API_KEY: "${WANDB_API_KEY:?Set WANDB_API_KEY in .env for monitoring}"
+      WANDB_MODE: "${WANDB_MODE:-online}"
+      WANDB_ENTITY: "${WANDB_ENTITY:-}"
+      WANDB_PROJECT: "${WANDB_PROJECT:-MMRSAE}"
+      # Optional ownership handoff uses the existing container launcher.
+      HOST_UID: "${HOST_UID:-0}"
+      HOST_GID: "${HOST_GID:-0}"
+      # Deliver stop signals to the launcher and its training subprocesses.
+      TINI_KILL_PROCESS_GROUP: "1"
+    shm_size: "${SHM_SIZE:-16g}"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${GPU_DEVICE_ID:-0}"]
+              capabilities: [gpu]
+    volumes:
+      - type: bind
+        source: "${DATA_HOST_DIR:-./data}"
+        target: /data
+        bind:
+          create_host_path: true
+      - type: bind
+        source: "${OUTPUT_ROOT:-./runs}"
+        target: /output
+        bind:
+          create_host_path: true
+    # A completed experiment exits instead of starting another training job.
+    restart: "no"
+    stop_grace_period: 60s

@@ -1,5 +1,15 @@
 **Experiment details and benchmark reference: MMRSAE and historical MRL/CSR/MPSAE studies**
 
+**One-command Docker Compose execution.** Copy `.env.example` to `.env`, set
+`HF_TOKEN`, `WANDB_API_KEY`, and `WANDB_ENTITY`, then run `docker compose up`.
+The service builds the image and runs GPU checks, data preparation, configured
+MMRSAE fitting and retrieval evaluation. W&B is online by default. Data and
+results persist in `./data` and `./runs/mmrsae`; `docker compose up -d` runs in
+the background and `docker compose logs -f imagenet` follows progress. This
+uses the current ImageNet-only defaults described below, including their
+500-update cap, and reads `.env` rather than `imagenet.env`. See the
+[Compose quickstart](README.md) for host prerequisites and full-data settings.
+
 **Current workflow: MMRSAE ImageNet only.** The new method family is exposed
 through [mmrsae.py](mmrsae.py) and [mmrsae_imagenet.py](mmrsae_imagenet.py).
 The default Docker scope is `mmrsae`: one manually configured variant/K/seed
