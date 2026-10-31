@@ -1,7 +1,13 @@
 __pycache__/
 *.txt
 !requirements.txt
+!mrl_csr_rcnn_experiment_setting.txt
+!mrl_csr_classical_task_extensions.txt
 *.png
 *.html
 .env
+*.env
 runs/*
+data/
+.repair-test-venv/
+.repair-uv-cache/

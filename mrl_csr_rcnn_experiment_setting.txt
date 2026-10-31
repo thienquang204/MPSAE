@@ -1,0 +1,838 @@
+EXPERIMENT SETTING
+R-CNN-style object detection from Matryoshka and contrastive sparse embeddings
+Backbones: ResNet18 and ResNet50
+Version 1.0 | 19 October 2026
+
+Status: a proposed, source-checked experimental protocol. No detection results,
+checkpoint loading, or runtime measurements are claimed in this document.
+
+Parameter provenance used below:
+  PAPER   = explicitly reported in a cited paper.
+  RELEASE = recorded in an author's checkpoint, configuration, or official code.
+  NEW     = a fixed choice for this downstream benchmark.
+
+References [1]-[16], including exact source locations, are at the end.
+
+
+1. OBJECTIVE AND MAIN COMPARISON
+==============================
+
+We evaluate whether compact global image representations retain information
+needed for multi-object recognition and localization. Each candidate region is
+cropped from the source image and independently passed through the complete image
+encoder. Its final global embedding is then shortened by MRL or encoded by CSR.
+A small classifier and a box regressor receive the same compact representation.
+This follows the crop-based feature interface of R-CNN [3], while the specific
+training and evaluation settings below are a new benchmark.
+
+The main experiment is STRICT FROZEN TRANSFER. MRL and CSR are learned before
+VOC evaluation; their encoders and compression operations remain fixed throughout
+VOC training. Only detector readouts learn from VOC annotations. In particular,
+the main CSR compressor is fitted on ImageNet training embeddings, not VOC crops.
+
+Use two widely used and practical ResNet backbones:
+  - ResNet18: a smaller encoder with a 512-dimensional global representation.
+  - ResNet50: a larger reference with a 2048-dimensional global representation.
+
+This pair has direct support in CSR's backbone experiment, and native MRL
+checkpoints are available for both [1,2,5]. It provides a useful first comparison
+across backbone sizes. Both are CNNs; this experiment alone does not establish
+transfer across CNN and transformer architecture families.
+
+Three questions guide the evaluation:
+  Q1. Does compression preserve the ability to identify and rank object regions?
+  Q2. Does it preserve information needed to correct an imperfect proposed box?
+  Q3. Do conclusions hold at equal active count, equal stored bytes, and across
+      both backbones?
+
+Region-fitted CSR and CSR fitted to an MRL parent are separately defined in
+Section 11. These are additional experiments, not entries to mix into the strict
+frozen-transfer table.
+
+
+2. BACKBONES, FEATURES, AND CHECKPOINTS
+=====================================
+
+2.1 Main backbone/parent assignments
+
+Architecture  MRL parent                          CSR parent from [2], Table 9
+------------  ----------------------------------  ----------------------------
+ResNet18      Author's native MRL ResNet18         timm/resnet18.a1_in1k
+ResNet50      Author's native MRL ResNet50         timm/resnet50.a1_in1k
+
+The CSR parents are the checkpoints identified in the paper's two-ResNet study.
+The MRL parents are the authors' released MRL models. These are different learned
+encoders, even within the same nominal ResNet architecture. Report the complete
+systems' absolute AP and each compact representation's change from its own full
+parent. Do not interpret an absolute AP difference as a pure compression effect.
+
+For MRL, use repository aniketr/mrl-resnet50 at release revision:
+  72b128ce966ea468f85905a81602e46a60106e25
+
+MRL ResNet18:
+  Path: resnet-family/resnet18_mrl/final_weights.pt
+  Full feature dimension: 512
+  SHA256: 7941c08ebef2210d74703cce7e23737e5cd9ba3c8a6e78eb93d7c440745c8784
+
+MRL ResNet50:
+  Path: mrl/Imagenet1k_R50_mrl/final_weights.pt
+  Full feature dimension: 2048
+  SHA256: 6e7a4ad6d7af1991e7d6b093925b1d032dbe385f111beb99700a9f1fec306e83
+
+The checkpoint listings, hashes, and configurations are source-verified [5].
+Their binary loading and numerical reproduction remain implementation work.
+Resolve and record the timm model-file revisions and hashes when implementing
+the experiment; do not substitute another ResNet checkpoint with the same width.
+
+2.2 Feature extraction interface
+
+Extract the global post-average-pooling vector before the ImageNet classifier.
+For the MRL releases, preserve the author's BlurPool architecture modifications
+and loading procedure [6]. Freeze parameters and batch-normalization statistics.
+Use evaluation mode during all feature extraction.
+
+Use ordinary MRL, not MRL-E. Discard the ImageNet classification heads after
+loading. New VOC heads are fitted independently at each representation budget.
+
+For the timm CSR parents, use the pooled pre-logit descriptor, for example the
+documented forward_features followed by forward_head(..., pre_logits=True).
+Do not use ImageNet logits as the representation.
+
+No patch-token descriptors, RoI pooling from a shared whole-image feature map,
+pool5 features, full-vector skip connection, or other image descriptor may enter
+either detector head. Each head receives the prescribed compact global vector
+from its independently encoded crop. In particular, original
+R-CNN's pool5 box-regression branch is replaced by a readout of the compact global
+code [3]. Coordinates are retained only for matching, box decoding, and NMS.
+
+
+3. MRL PARAMETERS AND THEIR PROVENANCE
+====================================
+
+3.1 Method settings
+
+For a full global vector v = f_MRL(x), evaluate u_m = v[0:m].
+
+ResNet18 native nesting set:
+  M18 = {8, 16, 32, 64, 128, 256, 512}.
+
+ResNet50 native nesting set:
+  M50 = {8, 16, 32, 64, 128, 256, 512, 1024, 2048}.
+
+Use all native sizes in the main MRL curve. The full-size point is also the
+MRL-parent reference. RN18 nesting is verified in the released training log;
+RN50 nesting and the objective are specified in the paper [1,5].
+
+MRL pretraining objective, stated for provenance:
+
+  L_MRL = mean_i sum_{m in M} c_m CE(W_m v_i[0:m] + b_m, y_i),
+  c_m = 1 for every m.
+
+Ordinary MRL uses separate linear heads at the selected prefixes. The loss is
+summed over prefix sizes, not divided by the number of prefixes [1,6]. The main
+benchmark loads these representations and performs no MRL backbone retraining.
+
+3.2 Published training recipe versus released model metadata
+
+The ResNet50 recipe in MRL Appendix C states [1]:
+  PAPER: ImageNet-1K; 40 epochs; SGD; momentum 0.9; weight decay 1e-4;
+         cyclic learning rate with peak 0.475; 256 images/GPU on two GPUs
+         (stated total batch 512); FFCV ImageNet training recipe.
+
+The selected public MRL checkpoint configurations instead record [5]:
+
+Saved field                  ResNet18 MRL             ResNet50 MRL
+--------------------------   ---------------------   ---------------------
+Learning rate                0.5                     0.425
+Optimizer                    SGD                     SGD
+Momentum                     0.9                     0.9
+Weight decay                 5e-5                    1e-4
+Epochs                       40                      40
+Scheduler / peak epoch       cyclic / 2              cyclic / 2
+Label smoothing              0.1                     0.1
+training.batch_size          1024                    512
+distributed / world_size     0 / 1                   1 / 2
+BlurPool                     enabled                 enabled
+Training resolution range    160 to 192              160 to 192
+Resolution ramp epochs       29 to 34                29 to 34
+Native validation            256, horizontal flip    256, horizontal flip
+
+These are RELEASE metadata, not detector training parameters. Keep the paper's
+0.475 and the selected RN50 release's 0.425 as distinct provenance values. The
+literal batch_size and world_size fields are retained without asserting an
+unverified historical effective global batch for the released artifact.
+
+The RN18 MRL config contains an inactive/default fixed_feature=2048 field; the
+architecture and nested-head log establish the actual full output as 512.
+
+For a new from-scratch reproduction, the paper recipe would need an explicitly
+defined training run. That expensive reproduction is outside this protocol.
+
+
+4. CSR PARAMETERS: THE PUBLISHED TWO-RESNET SETTING
+================================================
+
+4.1 Primary configuration
+
+Use Appendix E.1, Table 9 of CSR [2] for BOTH architectures. Do not assemble a
+hybrid from Table 3, generic defaults, and current command-line examples.
+
+Parameter                    ResNet18                ResNet50
+--------------------------   ---------------------   ---------------------
+PAPER: parent                resnet18.a1_in1k        resnet50.a1_in1k
+PAPER: dense dimension d     512                     2048
+PAPER: sparse width h        8192                    8192
+PAPER: sparsity grid K        {8,16,64,256}           {8,16,64,256}
+PAPER: epochs                10                      10
+PAPER: actual batch size     1024                    1024
+PAPER: optimizer             Adam                    Adam
+PAPER: learning rate         4e-5                    4e-5
+PAPER: weight decay          1e-4                    1e-4
+PAPER: Adam epsilon          6.25e-10                6.25e-10
+PAPER: auxiliary k           512                     512
+PAPER: auxiliary beta        1/32                    1/32
+PAPER: contrastive gamma     1.0                     1.0
+PAPER: number of seeds       3                       3
+
+The resulting expansion is 16*d for RN18 and 4*d for RN50. In particular,
+h=2048 for RN18 is NOT the selected published Table 9 configuration. It can be
+an additional resource ablation, but must receive a different experiment label.
+
+Use one separately fitted CSR module for each training k and each seed. The main
+result evaluates a checkpoint at its own training k. A runtime sweep of k within
+one checkpoint is a distinct adaptation experiment and is not silently combined
+with this curve.
+
+4.2 Sparse encoder and objective
+
+For the frozen parent's raw vector v:
+
+  a       = W_enc (v - b_pre) + b_enc
+  z_k     = ReLU(TopK(a, k))
+  vhat_k  = W_dec z_k + b_pre
+
+TopK retains coordinate identities and zeroes all other coordinates. ReLU can
+make the actual number of nonzero entries smaller than k. Record both nominal k
+and the measured number of nonzeros.
+
+The paper's objective is:
+
+  L_CSR = L_rec(k) + (1/8) L_rec(4k)
+          + beta L_aux + gamma_CL L_CL.
+
+Here beta=1/32 controls dead-latent auxiliary reconstruction, gamma_CL=1 controls
+the contrastive term, and 1/8 weights reconstruction at 4k [2]. These are three
+different coefficients.
+
+4.3 Executable details taken from official code
+
+Pin the CSR source to:
+  b284898cc5c6ea6776772ca2c460a53badc6fe65
+
+Additional RELEASE settings, not values invented from the paper [7]:
+  - Tied decoder: W_dec = transpose(W_enc).
+  - Learned pre-bias and latent bias, initialized to zero.
+  - No L2 normalization of the dense input v before the sparse encoder.
+  - FP32 CSR fitting; ordinary mean MSE for main reconstruction terms.
+  - Adam betas = (0.9, 0.999).
+  - Constant learning rate; the code's StepLR(step_size=10, gamma=1) makes
+    no decay. No warmup.
+  - L2-normalize z inside the contrastive objective; temperature = 0.2.
+  - The contrastive positive is a duplicate of the same cached sample's code.
+    Other samples are negatives. There is no CSR dropout or independently
+    augmented second image view during compressor fitting.
+  - Dead threshold = 30; activation >1e-5 counts as active. The official counter
+    advances per top_k call, including repeated calls within one training step.
+
+Reuse the pinned reconstruction, auxiliary, and contrastive implementations.
+The code uses a variance-normalized auxiliary MSE, whereas the paper displays an
+unnormalized residual loss. Preserve the code's auxiliary normalization and
+detach behavior and record this implementation convention. Do not replace it by
+a newly written raw residual loss while calling it the same executable recipe.
+
+Explicitly override command-line defaults. The inspected code defaults to
+learning rate 4e-4, weight decay 0, batch 4096, and contrastive coefficient 0.1;
+these do not match the selected Table 9 configuration. Also pass hidden_size=8192
+explicitly, because an automatic 4*d default would change RN18.
+
+An actual batch of 1024 supplies the contrastive negative set. Ordinary gradient
+accumulation with a smaller batch does not preserve that negative set. If a lower
+batch is required, label it as a resource variant rather than a reproduction.
+
+4.4 Global compressor fitting data
+
+Fit CSR on the ImageNet-1K TRAINING split only. Freeze the timm parent. Ignore
+class labels in the CSR loss. Do not fit or select the compressor using VOC,
+ImageNet validation, or any test descriptors.
+
+Use a single cached feature view per ImageNet training image:
+  NEW: RGB; random resized crop to 224 x 224, scale [0.08,1.0], aspect ratio
+       [3/4,4/3]; horizontal flip probability 0.5; bilinear antialiased resize;
+       fixed extraction seed 42; keep every training image.
+  NEW: channel mean (0.485,0.456,0.406), std (0.229,0.224,0.225), consistent
+       with the designated timm parent configuration [8].
+  NEW: cache raw full vectors in FP32; reuse this cache for every k and seed.
+
+These are explicit cache-construction choices. The paper refers to MRL/FFCV
+preprocessing; current CSR extraction code has different defaults, including
+mean/std 0.5. The region benchmark must not silently equate those pipelines.
+The optimizer and loss settings above are transferred from the paper, while
+this document supplies an unambiguous preprocessing convention.
+
+NEW batching/checkpoint convention: for each CSR seed, shuffle the cached
+training vectors at every epoch; use full batches of 1024 and drop the final
+incomplete batch. The pinned training loader normally retains that last batch;
+dropping it here keeps the contrastive batch size fixed and is an explicit
+implementation deviation. Use the checkpoint after epoch 10; no VOC-based
+compressor selection. Record the number of updates and the actual cache size.
+
+Released CSR image weights may only be reused after checking their exact parent
+and configuration. The visible FF2048/RN50d artifacts are not established as
+Table 9 resnet50.a1_in1k artifacts. No matching released RN18 CSR checkpoint was
+verified. A new CSR fit is therefore part of the primary executable plan.
+
+
+5. VOC DATA, PROPOSALS, AND REGION CROPS
+======================================
+
+5.1 Dataset and split policy
+
+Use PASCAL VOC2007 object detection, all 20 classes [9,10].
+  Development: train = 2501 images; validation = 2510 images.
+  Final fit: trainval = 5011 images.
+  Final evaluation: test = 4952 images.
+
+The same predefined image lists apply to every architecture and method. All
+regions of a source image stay in its split. During development, detector
+fitting and all fitted normalization use train only. Fix the protocol using val.
+Then initialize fresh heads, fit on trainval, and evaluate test once. Main CSR
+compressors remain unchanged at this final refit because they were fitted on
+ImageNet, independently of VOC.
+
+5.2 Proposal generation
+
+NEW: Use OpenCV-contrib EdgeBoxes with the fixed structured-edge model linked
+in [12]. Use OpenCV 4.13.x API behavior and record the exact installed version,
+model source revision, and model-file hash. Generate proposals at the image's
+original resolution. Edge detection receives RGB float pixels in [0,1].
+
+Use the documented edge orientation computation followed by edge NMS with
+r=2, s=0, m=1. EdgeBoxes parameters [11,12]:
+
+  alpha=0.65             beta=0.75              eta=1.0
+  minScore=0.01          maxBoxes=512           edgeMinMag=0.1
+  edgeMergeThr=0.5       clusterMinMag=0.5      maxAspectRatio=3.0
+  minBoxArea=1000        gamma=2.0              kappa=1.5
+
+These EdgeBoxes beta/gamma symbols are unrelated to CSR loss coefficients.
+Cache the returned proposals once, stable-sort by decreasing objectness score,
+and break ties by original returned index. Remove invalid/duplicate boxes
+deterministically. Use the first P boxes, or all returned boxes if fewer exist.
+
+Main proposal budget: P=256. Diagnostic budgets: 128 and 512. Keep the main
+budget fixed across methods. Before encoding crops, report validation proposal
+recall at IoU 0.5 and 0.75 for all three budgets, plus the number returned.
+
+P=256 is a resource choice, not a claim of high proposal recall. If its recall
+is inadequate for a useful full-vector detector, choose a documented protocol
+revision, such as P=512, before inspecting compact-method rankings. Apply that
+revision to all methods and label it in the output table.
+
+5.3 Coordinate convention
+
+Use zero-based half-open boxes [x1,y1,x2,y2] internally. Convert VOC annotations
+[xmin,ymin,xmax,ymax] to [xmin-1,ymin-1,xmax,ymax]. Convert OpenCV [x,y,w,h] to
+[x,y,x+w,y+h]. Convert predictions back consistently for official VOC scoring.
+
+5.4 Crop transformation
+
+NEW: For each original proposal r:
+  1. Expand width and height by factor 1.2 about its center: 10% context on
+     each side. Labels and regression coordinates still refer to original r.
+  2. Floor left/top and ceil right/bottom for pixel extraction.
+  3. Pad outside-image pixels with the channel mean color.
+  4. Warp the entire expanded rectangle to 224 x 224 by bilinear antialiased
+     resizing. Apply the ImageNet mean/std listed in Section 4.4.
+  5. Do not add a validation center crop, random augmentation, flip TTA,
+     multiscale evaluation, or another encoder-specific geometric transform.
+
+This is the shared downstream preprocessing convention, not reproduction of
+the MRL release's recorded 256-pixel validation with flip TTA. Preserve native
+encoder architectures while standardizing the crop geometry.
+
+Extract and cache full FP32 parent vectors with frozen evaluation-mode encoders.
+The crop extraction microbatch may be 64 and can be lowered without changing the
+CSR contrastive batch or detector batch. Log the extraction microbatch and time.
+
+
+6. REPRESENTATION INTERFACE AND BASELINES
+=======================================
+
+For each architecture, include:
+  MRL-full:  f_MRL(T(I,r)).
+  MRL-m:     first m coordinates of MRL-full.
+  CSR-full:  f_CSRparent(T(I,r)).
+  CSR-k:     the corresponding globally trained CSR module on CSR-full.
+  PCA-m:     optional inexpensive compressor of CSR-full, fitted without labels
+             on the same ImageNet training-feature cache, centered, no whitening.
+
+MRL-full and CSR-full are both mandatory. PCA is a supporting control, not a
+substitute for either parent. Use PCA at m in {8,16,32,64,128,256,512}, with
+m <= d; do not fit PCA on evaluation-region features in the strict track.
+
+Never truncate an ordinary timm feature vector and label it MRL. Never load a CSR
+module learned on another parent because the vectors happen to have the same d.
+
+For CSR, keep each nonzero value and its original latent-coordinate index. A
+first layer A can be computed as sum_{j in support(z)} A[:,j] * z[j]. Passing only
+sorted top-k values to a k-input head would remove part of the representation.
+
+NEW: For readout optimization, rescale each method/budget by ONE training-set
+scalar s = max(sqrt(mean_i ||u_i||_2^2), 1e-12), computed over its accepted VOC
+training candidate pool. Feed u/s to the heads. Freeze s for validation/test.
+This invertible constant scaling preserves relative vector norms. It does not
+L2-normalize each example and does not change CSR's input during compressor
+fitting. Save s with the head. Recompute it on trainval for final head refitting.
+
+CSR reconstruction is used for compressor training only. Do not reconstruct the
+teacher vector as a hidden alternate input to the primary detector.
+
+
+7. DETECTOR LABELS, HEADS, AND OPTIMIZATION
+========================================
+
+All values in this section are NEW downstream benchmark choices. They are not
+MRL/CSR pretraining parameters or an exact reproduction of historical R-CNN.
+
+7.1 Labels and matched objects
+
+Append non-difficult ground-truth boxes to the training candidate pool only,
+deduplicating identical boxes. No ground-truth proposals are added at validation
+or test inference.
+
+For each candidate, compute maximum IoU with non-difficult objects, defining it
+as zero when none exist in the image. Assign:
+  - Foreground when maximum IoU >= 0.5; use the best-matching object's class.
+  - Otherwise ignore if IoU >= 0.5 with any difficult object.
+  - Otherwise background when maximum non-difficult IoU < 0.3, including zero.
+  - Otherwise ignore (the remaining 0.3 <= IoU < 0.5 candidates).
+
+Break matching ties by annotation order. Never delete difficult annotations
+before background assignment, which could create incorrect negative examples.
+Regression uses foreground examples only and the same matched non-difficult GT.
+
+Report foreground/background/ignored counts and the fraction of positives
+supplied by exact GT boxes. Count non-difficult objects without a positive
+proposal BEFORE appending GT boxes, so this coverage diagnostic is meaningful.
+GT boxes have zero correction targets; they cannot replace a useful pool of
+imperfect positive proposals for evaluating box refinement.
+
+7.2 Head families
+
+H0 -- inexpensive primary detector:
+  Classifier: affine map u/s -> 21 logits, softmax including background.
+  Regressor:  independent affine map u/s -> 4 class-agnostic box offsets.
+
+H1 -- nonlinear readout control:
+  Classifier: Linear(q,128) -> ReLU -> Linear(128,21).
+  Regressor:  Linear(q,128) -> ReLU -> Linear(128,4).
+  No shared hidden layer, dropout, batch norm, or additional feature inputs.
+
+Here q=m for an MRL prefix, q=d for a full vector, and q=h for CSR. Use a sparse
+first-layer implementation for CSR when measuring sparse execution; dense
+materialization is allowed as a correctness reference, not as a sparse speed
+claim.
+
+Run H0 on the entire budget grid. Run H1 at both full-parent points and at CSR
+k in {16,64} versus MRL m in {16,32,64,128}. This covers equal-active and equal-byte
+comparisons without requiring a full nonlinear-head sweep initially. State which
+head family accompanies every result; do not combine them in one curve.
+
+Although H0 is affine, the evaluated task is scored multi-instance detection
+with geometric prediction. H1 additionally tests whether a loss of performance
+reflects limited linear accessibility rather than a broader readout failure.
+
+7.3 Box targets and loss
+
+For original proposal r=(rx,ry,rw,rh) and matched GT g=(gx,gy,gw,gh), in
+center/width/height coordinates:
+
+  tx=(gx-rx)/rw,  ty=(gy-ry)/rh,
+  tw=log(gw/rw),  th=log(gh/rh).
+
+These use the original proposal, not the expanded context crop [3,4].
+Compute each target coordinate's mean and standard deviation on the foreground
+training pool. Floor each standard deviation at 1e-3, and standardize the targets.
+Store and invert this transformation during inference.
+
+Classification loss: mean cross-entropy over the full sampled batch.
+Regression loss: mean over positives of the SUM of four SmoothL1 coordinate
+losses, with SmoothL1 beta=1.0 on standardized targets.
+Total loss: L_cls + L_box, coefficient 1.0.
+
+The two heads have disjoint parameters. Evaluate the same trained classifier
+with original and refined boxes, so the no-refinement ablation changes box
+geometry rather than retraining the classifier.
+
+7.4 Fixed training settings
+
+  Optimizer: AdamW.
+  Learning rate: 1e-3, constant; no warmup or early stopping.
+  Weight decay: 1e-4 on weight matrices only; zero on biases.
+  AdamW betas: (0.9,0.999); epsilon: 1e-8.
+  Updates: 5000 per head configuration.
+  Batch: 512 = 128 foreground + 384 background, sampled with replacement.
+  Initialization: every affine weight Normal(0,0.01); every bias zero.
+  Precision: FP32 for the reference accuracy run.
+  Seeds: {0,1,2} for head fitting.
+
+Pre-generate foreground/background sampling indices for each seed and share them
+across all parents, methods, budgets, and head families. Proposals and labels are
+identical. Use fresh heads and optimizer states at every configuration.
+
+For CSR, also fit one compressor per seed in {0,1,2}. Pair compressor seed s with
+head seed s instead of taking a nine-way Cartesian product. Thus MRL variation
+comes from the head; CSR variation includes compressor plus head fitting. State
+this distinction. None of these repeats includes new backbone pretraining.
+
+Run the full-parent development baselines before the compact sweep. If their
+losses clearly have not converged, revise the locked head schedule using the
+full-parent train/val results, document the revision, and apply it to every
+method. Do not adjust training duration selectively after seeing method rankings.
+
+
+8. INFERENCE AND EVALUATION
+==========================
+
+8.1 Main detector
+
+Use the foreground softmax probabilities as class scores. Invert the target
+standardization and decode the predicted offsets relative to original r.
+For width/height exponentiation, clamp predicted tw and th to [-5,5] before exp;
+this is a fixed numerical safeguard. Clip decoded boxes to image boundaries.
+Discard boxes with non-finite coordinates or non-positive width/height.
+
+NEW postprocessing:
+  Score threshold: 0.001.
+  Class-specific NMS: IoU threshold 0.3.
+  Keep at most 100 detections per image across foreground classes.
+  Break score ties by class index and original proposal index.
+  No objectness-score multiplication or class-dependent postprocessing tuning.
+
+8.2 Required results
+
+  (a) VOC2007 11-point AP at IoU 0.5, mean over 20 classes: main metric.
+  (b) AP at IoU 0.75 with the SAME 11-point calculation: additional stricter
+      VOC-style diagnostic, not COCO AP.
+  (c) Both metrics with original proposal boxes and the same class scores:
+      no-box-refinement ablation.
+  (d) Conditional mean IoU improvement after regression on the identical set
+      of non-difficult-GT-matched positive proposals for every method.
+  (e) Proposal recall at IoU 0.5/0.75, before any learned scoring/refinement.
+
+Use official VOC handling of difficult objects and duplicate detections [10].
+Do not accidentally use the later integral-AP rule and call it VOC2007 AP.
+For (d), select original proposals with IoU >=0.5 to non-difficult GT according
+to Section 7.1. Keep that original GT match fixed after regression; do not rematch
+to another object. Apply the same clipping as the detector. Assign an invalid
+refined box IoU zero rather than excluding it. Use GT only for this evaluation
+diagnostic, never the method's confidence, and do not add GT proposals.
+
+Report each per-seed result plus mean and sample standard deviation. Express
+compact-minus-full differences in AP percentage points relative to the correct
+parent with the same head family and paired head seed. Keep MRL and CSR's
+different pretrained parents visible in result tables.
+
+Optional diagnostic: predict matched box IoU from the same compact code, inspired
+by IoU-Net [13]. This is not required in the initial run matrix.
+
+
+9. REPRESENTATION BUDGETS AND COST ACCOUNTING
+===========================================
+
+9.1 Main precision and byte convention
+
+The primary accuracy calculation uses FP32 values. For storage comparisons,
+serialize sparse CSR codes with FP32 values and uint32 coordinate indices:
+
+  Dense payload per region: 4*m bytes.
+  Sparse payload per region: 8*nnz bytes, plus row metadata.
+
+Use an explicit per-region nonzero count/row pointer and include its bytes in
+measured totals. Nominal equal-byte pairs, ignoring that small overhead, are:
+
+  CSR k=8    versus MRL m=16    : 64-byte payload.
+  CSR k=16   versus MRL m=32    : 128-byte payload.
+  CSR k=64   versus MRL m=128   : 512-byte payload.
+  CSR k=256  versus MRL m=512   : 2048-byte payload.
+
+Report equal-active comparisons separately at m=k in {8,16,64,256}.
+The largest equal-byte RN18 comparison reaches its full 512-dimensional MRL
+vector. This is a valid point, not evidence of equal compression ratios.
+
+An implementation may require int64 indices in RAM or on the GPU even when the
+file stores uint32. Measure runtime memory separately. Optional packed uint16
+indices or FP16 values are additional storage/precision variants; report their
+actual bytes and accuracy rather than silently using a different byte formula.
+
+9.2 Head size and CSR overhead
+
+For H0, total head parameters are 25*q+25. For H1, with two independent width-128
+hidden layers, they are 256*q+3481. CSR q is h=8192, irrespective of k.
+For example, H0 has 204825 parameters for CSR, whereas MRL at m=128 has 3225.
+Record these differences; equal active count does not equal head capacity.
+
+The CSR projection contains d*h weights: 4,194,304 for RN18 and 16,777,216 for
+RN50 under the chosen h=8192 setting, before biases. The decoder is tied.
+Its dense projection and top-k selection are additional per-crop inference work.
+Producing k nonzeros does not make that feature-generation cost O(k).
+
+Measure only the code-producing path for compressor inference; reconstruction
+and auxiliary training outputs are unnecessary for the detector. Verify that
+an optimized path produces the same code as the reference implementation.
+
+9.3 Extraction and caching
+
+For N images and P proposals, one parent requires approximately N*P image
+encoder forwards, plus any extra training GT crops. The four parent encoders
+in the main comparison therefore require four independent feature extractions.
+All budgets of one parent reuse its full-vector cache.
+
+At VOC2007 trainval size and P=256:
+  5011*256 = 1,282,816 proposal encodings per parent.
+  One FP32 RN18 full-vector cache: approximately 2.63 GB.
+  One FP32 RN50 full-vector cache: approximately 10.51 GB.
+
+These are decimal-GB arithmetic estimates, before metadata and GT crops, not
+measured requirements or timings. Test extraction is additional. ImageNet
+feature caching for initial CSR fitting is another cost and must be included.
+
+Process one parent and one CSR configuration at a time; use memory-mapped caches
+and reuse extracted vectors. A 64-crop extraction microbatch and cached-head
+training avoid backpropagation through the image encoders. An optional FP16
+feature cache reduces disk requirements, but it introduces a numerical variant
+and must be applied consistently and reported.
+
+Record separately: proposal time; image-encoder time; compressor fitting time;
+compressor inference time; head fitting time; end-to-end detector latency;
+serialized feature bytes; head/model parameters; peak CPU/GPU memory.
+Do not claim end-to-end acceleration from feature bytes or active k alone.
+
+
+10. RUN MATRIX AND EXECUTION ORDER
+=================================
+
+Stage 1 -- inexpensive implementation pilot (not a final method ranking):
+  1. Verify both parent loaders and output dimensions on a few fixed crops.
+  2. Generate the shared proposal caches and measure recall without encoders.
+  3. Run the RN18 full-parent detector baselines on train -> val.
+  4. Validate one CSR configuration, k=16, and the MRL m=16/m=32 readouts.
+  A reduced ImageNet fit or reduced VOC subset may debug the implementation, but
+  its results must be labeled pilot and kept out of the paper-parameter table.
+
+Stage 2 -- primary published-parameter experiment:
+  - Two architectures: RN18 and RN50.
+  - CSR K={8,16,64,256}, three seeds each: 24 compressor fits in total.
+  - One shared frozen ImageNet feature cache per CSR parent.
+  - H0 detector at all MRL native sizes and all four CSR k values.
+  - Both full parents, three head seeds, for each architecture.
+  - H1 subset from Section 7.2, three paired seeds.
+  - Optional PCA controls without additional backbone extraction.
+
+Stage 3 -- final evaluation:
+  Lock the development configuration. Refit detector heads and their scalar/
+  target normalization on trainval; keep ImageNet-trained compressors frozen.
+  Evaluate test, original/refined boxes, costs, and per-class results.
+
+Minimum output row fields:
+  protocol_id, architecture, parent_checkpoint_hash, method, representation_fit,
+  compressor_seed, head_seed, k_train, k_eval, m, d, h, head_family,
+  proposal_budget, crop_transform_id, precision, stored_bytes_per_region,
+  runtime_memory, head_parameters, AP50, AP75, AP50_no_refinement,
+  AP75_no_refinement, conditional_IoU_gain, delta_AP50_from_parent,
+  encoder_time, compressor_time, head_time.
+
+Use representation_fit='ImageNet-global' in the primary table. Store proposal
+recall and sample counts in a shared dataset/proposal report.
+
+
+11. SEPARATE ADAPTATION EXPERIMENTS
+==================================
+
+11.1 Region-fitted CSR (cheaper if ImageNet feature fitting is unavailable)
+
+Keep each parent encoder frozen. Replace CSR's fitting data with the embeddings
+of annotation-independent proposals from VOC TRAIN images only. Use the same
+Table 9 optimization settings, including h=8192 and actual batch 1024. This is
+CSR with regional adaptation, not strict transfer of a globally trained code.
+
+NEW fitting subset: choose 64 proposals per training image uniformly without
+replacement from the common first-256 pool, seed 42; use all if fewer exist.
+Do not include added GT boxes or select foreground using IoU labels.
+
+NEW sampler to reduce correlated within-image negatives: in each training step,
+sample 1024 distinct eligible source images uniformly, then one cached proposal
+uniformly from each selected image. An image is eligible when at least one
+proposal was cached; report excluded images and require at least 1024 eligible
+images. A smaller debugging subset needs a labeled smaller-batch variant.
+Sampling is with replacement across steps. Define an epoch as
+ceil(number_of_cached_training_regions / 1024) steps and run 10 epochs.
+This sampler and epoch convention are explicit regional-adaptation choices.
+
+For the final trainval -> test experiment, refit this compressor on trainval
+regions and then refit its heads. Its target-data exposure differs from the
+main globally trained compressor; use representation_fit='VOC-regions'.
+
+11.2 Common-parent compression control
+
+For each architecture, freeze the FULL MRL encoder and compare its prefixes with
+a new CSR fitted to the same full MRL vectors. Use the parameters in Section 4.
+This removes the parent-feature difference. It evaluates CSR as a post-training
+compressor of MRL representations and must be named 'CSR-on-MRL'.
+
+For a strict common-parent control, fit CSR-on-MRL on ImageNet training vectors.
+For a low-cost regional control, fit it on the subset and sampler in 11.1, label
+it 'CSR-on-MRL, VOC-regions', and acknowledge its extra target-data adaptation.
+These variants need a new CSR fit; ordinary FF/timm CSR weights are incompatible.
+
+If resources permit only one initial adaptation study, the regional common-parent
+RN18 experiment is a useful start: full MRL-512, its native prefixes, CSR-on-MRL,
+and PCA on the same cached region vectors. Preserve the label 'regional' and do
+not present this as the primary frozen-transfer result.
+
+11.3 RN50 main-vision reference from CSR Table 3
+
+An optional paper-reference arm uses the EXACT FF2048 parent from the MRL release
+or the paper's RN50d parent, with Table 3 settings: d=2048, h=8192, batch=4096,
+gamma_CL=0.1, K={8,16,32,64,128,256,512,1024,2048}; the other listed Adam/epoch/
+auxiliary settings match Section 4 [2]. Released image CSR weights may help here
+after parent/parameter verification. Keep this arm distinct from Table 9.
+
+
+12. INTERPRETATION AND REPORTING
+================================
+
+A useful result compares recognition and geometry as the representation budget
+changes. For example, stable AP with original proposals but weaker box-refinement
+gains would indicate that the compact representation retains region recognition
+better than information accessible for localization under the chosen readout.
+This is a hypothesis, not an expected ordering of MRL and CSR.
+
+If proposal recall is low, all methods may be limited by candidate generation.
+If full vectors cannot support box refinement, that shared limitation cannot be
+attributed to compression. If H1 materially changes the ranking, report that
+readout expressiveness matters. A small code can sometimes outperform its full
+parent under a finite trained head; compact-minus-parent AP need not be negative.
+
+Keep claims specific to independently encoded global region crops. This design
+does not test native patch tokens, dense feature maps, boundary generation, or a
+single whole-image vector's ability to recover every object. A subsequent mask-
+proposal segmentation study is possible but is outside this first run matrix.
+
+Report the primary frozen-transfer table, optional regional-adaptation table,
+and optional common-parent control separately. Report source/checkpoint/code
+differences as provenance rather than silently presenting them as one exact
+reproduction. The choices marked NEW are fixed starting parameters, not values
+shown by the original papers to be optimal for detection.
+
+
+13. SOURCES AND IMPLEMENTATION REFERENCES
+========================================
+
+[1] Kusupati et al. Matryoshka Representation Learning. NeurIPS 2022.
+    Version inspected: arXiv:2205.13147v4.
+    Section 3: objective and nested representations.
+    Appendix A: summed prefix loss; Appendix C: ResNet50 training recipe.
+    https://arxiv.org/html/2205.13147v4
+    https://arxiv.org/pdf/2205.13147v4
+
+[2] Wen et al. Beyond Matryoshka: Revisiting Sparse Coding for Adaptive
+    Representation. ICML 2025. Version inspected: arXiv:2503.01776v5.
+    Equations 2-7: sparse encoder and objective.
+    Appendix E.1, Table 9: the primary two-ResNet settings used here.
+    Appendix B.3, Table 3: the separately named RN50 main-vision reference.
+    https://arxiv.org/html/2503.01776v5
+    https://arxiv.org/pdf/2503.01776v5
+
+[3] Girshick et al. Rich Feature Hierarchies for Accurate Object Detection and
+    Semantic Segmentation. CVPR 2014.
+    Section 2: independent region crops; Appendix C: box regression from pool5.
+    https://arxiv.org/pdf/1311.2524
+    https://github.com/rbgirshick/rcnn
+
+[4] Girshick. Fast R-CNN. ICCV 2015.
+    Reference for class/box readouts and SmoothL1-style detector training.
+    Its shared-image ROI feature extraction is not used in this experiment.
+    https://arxiv.org/pdf/1504.08083
+
+[5] Author MRL checkpoint repository, pinned release, and selected parameters.
+    https://huggingface.co/aniketr/mrl-resnet50
+    https://huggingface.co/aniketr/mrl-resnet50/commit/72b128ce966ea468f85905a81602e46a60106e25
+    https://huggingface.co/aniketr/mrl-resnet50/blob/main/resnet-family/resnet18_mrl/params.json
+    https://huggingface.co/aniketr/mrl-resnet50/blob/main/resnet-family/resnet18_mrl/log
+    https://huggingface.co/aniketr/mrl-resnet50/blob/main/mrl/Imagenet1k_R50_mrl/params.json
+    RN50 parameters and weight pointer were verified in the pinned commit when
+    the individual file page was intermittently unavailable.
+
+[6] Official MRL code and upstream FFCV recipe.
+    https://github.com/RAIVNLab/MRL
+    https://github.com/RAIVNLab/MRL/blob/main/MRL.py
+    https://github.com/RAIVNLab/MRL/blob/main/utils.py
+    https://github.com/libffcv/ffcv-imagenet/blob/main/train_imagenet.py
+    Current upstream recipe details are not proof that every historical release
+    used an identical upstream revision; selected checkpoint metadata is retained.
+
+[7] Official CSR implementation, pinned revision.
+    https://github.com/neilwen987/CSR_Adaptive_Rep
+    https://github.com/neilwen987/CSR_Adaptive_Rep/blob/b284898cc5c6ea6776772ca2c460a53badc6fe65/Vision/main_visual.py
+    https://github.com/neilwen987/CSR_Adaptive_Rep/blob/b284898cc5c6ea6776772ca2c460a53badc6fe65/Vision/model_zoo.py
+    https://github.com/neilwen987/CSR_Adaptive_Rep/blob/b284898cc5c6ea6776772ca2c460a53badc6fe65/Vision/pretrained_embeddings.py
+    https://github.com/neilwen987/CSR_Adaptive_Rep/blob/b284898cc5c6ea6776772ca2c460a53badc6fe65/Vision/utils.py
+
+[8] Exact Table 9 CSR parent model cards/configurations.
+    https://huggingface.co/timm/resnet18.a1_in1k
+    https://huggingface.co/timm/resnet18.a1_in1k/blob/main/config.json
+    https://huggingface.co/timm/resnet50.a1_in1k
+    https://huggingface.co/timm/resnet50.a1_in1k/blob/main/config.json
+
+[9] Official VOC2007 dataset and split statistics.
+    https://www.robots.ox.ac.uk/~vgg/projects/pascal/VOC/voc2007/index.html
+    https://www.robots.ox.ac.uk/~vgg/projects/pascal/VOC/voc2007/dbstats.html
+
+[10] Official VOC evaluation documentation. The later documentation explicitly
+     explains the pre-2010 11-point AP convention and its subsequent change.
+     https://www.robots.ox.ac.uk/~vgg/projects/pascal/VOC/voc2007/htmldoc/index.html
+     https://www.robots.ox.ac.uk/~vgg/projects/pascal/VOC/voc2012/htmldoc/index.html
+
+[11] Zitnick and Dollar. Edge Boxes: Locating Object Proposals from Edges.
+     ECCV 2014, with the original authors' implementation.
+     https://pdollar.github.io/files/papers/ZitnickDollarECCV14edgeBoxes.pdf
+     https://github.com/pdollar/edges/blob/master/edgeBoxes.m
+
+[12] Official OpenCV EdgeBoxes, structured-edge APIs, and model source.
+     https://docs.opencv.org/4.13.0/d4/d0d/group__ximgproc__edgeboxes.html
+     https://docs.opencv.org/4.13.0/d8/d54/classcv_1_1ximgproc_1_1StructuredEdgeDetection.html
+     https://github.com/opencv/opencv_extra/blob/master/testdata/cv/ximgproc/model.yml.gz
+
+[13] Jiang et al. Acquisition of Localization Confidence for Accurate Object
+     Detection (IoU-Net). ECCV 2018.
+     https://arxiv.org/abs/1807.11590
+
+[14] Author documentation identifying released CSR feature parents.
+     https://huggingface.co/datasets/W1nd-navigator/CSR-precompute-embeds
+     FF2048-based image CSR folder:
+     https://drive.google.com/drive/folders/1yKH3Hb0OepHitEN0hZtco4mTVw84P_gW
+     RN50d-based image CSR folder:
+     https://drive.google.com/drive/folders/1rUH2vnJJCryqvakfMU3IoumDFBgGSiqU
+
+[15] Full-feature author ResNet checkpoints for optional reference variants.
+     These are not the primary Table 9 timm parents.
+     https://huggingface.co/aniketr/mrl-resnet50/blob/main/resnet-family/resnet18-ff512/final_weights.pt
+     https://huggingface.co/aniketr/mrl-resnet50/blob/main/fixed-feature/Imagenet1k_R50_ff2048/final_weights.pt
+
+[16] He et al. Spatial Pyramid Pooling in Deep Convolutional Networks for Visual
+     Recognition. ECCV 2014. Section 4 distinguishes image-crop features from
+     pooling regions of a shared feature map.
+     https://arxiv.org/pdf/1406.4729
+
+END OF SPECIFICATION

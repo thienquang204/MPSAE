@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Build a controlled Matryoshka and CSR/MPSAE v1/v2 architecture ablation.
+"""Aggregate FF2048, the paper-matched ResNet-18 study, or legacy ablations.
 
 The input directory must contain one subdirectory per requested backbone, each
-with the ``summary.json`` written by ``csr_vs_mmpot_imagenet.py``. The output
-files validate all five arms; the aggregate effect tables compare the three
-primary Matryoshka/CSRv2/MPSAEv2 arms at every representation budget and across
-backbones. A compact ZIP excludes feature caches for convenient transfer.
+with the ``summary.json`` written by ``csr_vs_mmpot_imagenet.py``. In the
+paper_ff2048 protocol, fixed-K CSR and MPSAE are the primary locally trained
+methods; annealed v2 arms remain secondary artifacts. The older
+torchvision_ablation protocol retains its architecture-effect reports. The
+paper_rn18_study protocol aggregates the three-seed Appendix E.1 CSR study and
+the matched MPSAE extension without inventing an MRL baseline. A compact ZIP
+excludes feature caches for convenient transfer.
 """
 
 from __future__ import annotations
@@ -24,7 +27,10 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 SUPPORTED_BACKBONES = ("resnet18", "resnet50")
 DEFAULT_ABLATION_BACKBONES = ("resnet18", "resnet50")
+PAPER_FF2048_PROTOCOL = "paper_ff2048"
+PAPER_RN18_STUDY_PROTOCOL = "paper_rn18_study"
 MATRYOSHKA = "matryoshka"
+DENSE = "dense"
 CSR_V1 = "csr"
 MP_SAE_V1 = "mpsae"
 CSR = "csrv2"
@@ -32,7 +38,11 @@ MP_SAE = "mpsaev2"
 METHODS = (MATRYOSHKA, CSR, MP_SAE)
 ALL_METHODS = (MATRYOSHKA, CSR_V1, MP_SAE_V1, CSR, MP_SAE)
 CONTROLLED_CONFIG_KEYS = (
+    "protocol",
+    "paper_strict",
     "data_root",
+    "ff2048_train_embeddings",
+    "ff2048_val_embeddings",
     "data_backend",
     "hf_dataset_id",
     "hf_revision",
@@ -63,6 +73,8 @@ CONTROLLED_CONFIG_KEYS = (
     "mpsaev2_lr",
     "csrv2_lr",
     "weight_decay",
+    "adam_eps",
+    "contrastive_temperature",
     "mrl_lr",
     "mrl_momentum",
     "ot_mass",
@@ -75,18 +87,47 @@ CONTROLLED_CONFIG_KEYS = (
     "tf32",
     "device",
     "seed",
+    "study_seeds",
     "knn_batch_size",
     "knn_query_batch",
     "sparse_knn_query_batch",
+    "sparse_gallery_chunk",
+    "retrieval_warmup",
+    "retrieval_repeats",
+    "sparse_score_buffer_mib",
+    "sparse_gpu_memory_fraction",
     "knn_normalize",
     "faiss_gpu",
     "faiss_gpu_device",
+    "faiss_temp_memory_mib",
+)
+CONTROLLED_RETRIEVAL_FIELDS = (
+    "version",
+    "device_name",
+    "device_capability",
+    "torch_version",
+    "torch_cuda_version",
+    "precision",
+    "query_batch_size",
+    "timing_scope",
+    "timing_statistic",
 )
 METHOD_RESULT_FILES = (
     "summary.json",
     "comparison.csv",
     "comparison_table.md",
     "comparison_table.tex",
+    "retrieval_timing.csv",
+    "retrieval_timing.md",
+    "paper_ff2048_reproduction.csv",
+    "paper_ff2048_reproduction.md",
+    "paper_ff2048_reproduction_comparison.png",
+    "paper_ff2048_reproduction_comparison.pdf",
+    "paper_rn18_study.csv",
+    "paper_rn18_study.md",
+    "paper_rn18_study_comparison.png",
+    "paper_rn18_study_comparison.pdf",
+    "dense/results.json",
     "matryoshka/results.json",
     "matryoshka/history.json",
     "csr/results.json",
@@ -150,13 +191,146 @@ def load_backbone_summary(results_root: Path, backbone: str) -> Dict[str, Any]:
     results = summary.get("results")
     if not isinstance(results, dict):
         raise RuntimeError(f"{path} contains no benchmark results")
-    missing_methods = [method for method in ALL_METHODS if method not in results]
+    protocol = summary.get("protocol", summary.get("config", {}).get("protocol"))
+    required_methods = (
+        (DENSE, CSR_V1, MP_SAE_V1)
+        if protocol == PAPER_RN18_STUDY_PROTOCOL
+        else ALL_METHODS
+    )
+    missing_methods = [
+        method for method in required_methods if method not in results
+    ]
     if missing_methods:
         raise RuntimeError(
-            f"{path} is incomplete for an architecture ablation; missing "
+            f"{path} is incomplete for the requested aggregate; missing "
             f"{', '.join(missing_methods)} (run with --method all)"
         )
     return summary
+
+
+def require_strict_paper_summary(
+    summary: Mapping[str, Any], protocol: str
+) -> None:
+    config = summary.get("config", {})
+    if config.get("protocol") != protocol:
+        raise RuntimeError(
+            f"summary protocol is {config.get('protocol')!r}, expected {protocol!r}"
+        )
+    if config.get("paper_strict") is not True:
+        raise RuntimeError(
+            f"{protocol} primary aggregation requires paper_strict=true; "
+            "keep non-strict ablations outside the paper-labelled bundle"
+        )
+
+
+def validate_retrieval_configuration(
+    backbones: Sequence[str], summaries: Mapping[str, Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """Check measured hardware/software without comparing K-dependent layouts."""
+    records: Dict[str, List[Dict[str, Any]]] = {}
+    methods_by_backbone: Dict[str, set[str]] = {name: set() for name in backbones}
+    for name in backbones:
+        summary = summaries[name]
+        sources = {
+            method: result.get("knn", {})
+            for method, result in summary.get("results", {}).items()
+            if isinstance(result, Mapping)
+        }
+        integrity = summary.get("dataset", {}).get("ff2048_integrity_check", {})
+        if isinstance(integrity.get("knn"), Mapping):
+            sources["ff2048_integrity_reference"] = integrity["knn"]
+        for method, knn in sources.items():
+            for budget, metric in knn.get("per_topk", {}).items():
+                if not any(
+                    isinstance(metric.get(field), (int, float))
+                    and not isinstance(metric.get(field), bool)
+                    and metric[field] >= 0.0
+                    for field in (
+                        "mean_retrieval_milliseconds_per_query",
+                        "mean_retrieval_wall_milliseconds_per_query",
+                    )
+                ):
+                    continue
+                methods_by_backbone[name].add(method)
+                records.setdefault(method, []).append({
+                    "source": f"{name}/{method}/K={budget}",
+                    "config": metric.get("retrieval_config"),
+                })
+
+    observations = [item for items in records.values() for item in items]
+    configured = [
+        item for item in observations
+        if isinstance(item["config"], Mapping) and item["config"]
+    ]
+    metadata: Dict[str, Any] = {
+        "checked_fields": list(CONTROLLED_RETRIEVAL_FIELDS),
+        "matched_across_backbones": False,
+        "matched_methods": [],
+        "configuration_by_method": {},
+        "warnings": [],
+    }
+    if not observations:
+        metadata["status"] = "no_local_timing_measurements"
+        return metadata
+    if not configured:
+        metadata["status"] = "unverified_legacy_timing_metadata"
+        metadata["warnings"].append(
+            "Actual GPU/software and timing configuration were not recorded; "
+            "matching CLI arguments does not establish controlled retrieval timings."
+        )
+        return metadata
+    if len(configured) != len(observations):
+        missing = [
+            item["source"] for item in observations
+            if not isinstance(item["config"], Mapping) or not item["config"]
+        ]
+        raise RuntimeError(
+            "cannot mix measured retrieval configurations with legacy timings "
+            "that lack retrieval_config: " + ", ".join(missing)
+        )
+
+    for method, items in records.items():
+        reference = items[0]
+        for item in items:
+            absent = [
+                key for key in CONTROLLED_RETRIEVAL_FIELDS
+                if item["config"].get(key) is None
+            ]
+            if absent:
+                raise RuntimeError(
+                    f"incomplete retrieval_config in {item['source']}: "
+                    + ", ".join(absent)
+                )
+            differing = [
+                key for key in CONTROLLED_RETRIEVAL_FIELDS
+                if item["config"][key] != reference["config"][key]
+            ]
+            if differing:
+                raise RuntimeError(
+                    "measured retrieval environments are not matched: "
+                    + "; ".join(
+                        f"{key}: {reference['source']}={reference['config'][key]!r}, "
+                        f"{item['source']}={item['config'][key]!r}"
+                        for key in differing
+                    )
+                )
+        metadata["configuration_by_method"][method] = {
+            key: reference["config"][key] for key in CONTROLLED_RETRIEVAL_FIELDS
+        }
+    common_methods = set.intersection(*methods_by_backbone.values())
+    metadata["matched_methods"] = sorted(common_methods) if len(backbones) > 1 else []
+    metadata["matched_across_backbones"] = len(backbones) > 1 and bool(common_methods)
+    metadata["status"] = (
+        "verified_common_measured_methods"
+        if metadata["matched_across_backbones"] else "recorded_no_cross_backbone_comparison"
+    )
+    unshared = sorted(set(records) - common_methods)
+    if unshared:
+        metadata["warnings"].append(
+            "These methods lack local timings in at least one backbone and "
+            "are excluded from the cross-backbone timing check: " + ", ".join(unshared)
+        )
+    return metadata
 
 
 def validate_controlled_protocol(
@@ -167,8 +341,8 @@ def validate_controlled_protocol(
     reference = summaries[reference_name].get("config", {})
     if reference.get("method") != "all":
         raise RuntimeError(
-            f"{reference_name} was not run with --method all; architecture "
-            "ablation requires all five comparison arms"
+            f"{reference_name} was not run with --method all; aggregation "
+            "requires every arm applicable to the selected protocol"
         )
     mismatches: List[str] = []
     for name in backbones[1:]:
@@ -186,9 +360,13 @@ def validate_controlled_protocol(
         raise RuntimeError(
             "architecture ablation configurations are not matched: " + details
         )
-    weight_recipes = {
-        str(summaries[name].get("backbone", {}).get("weights", "")).rsplit(".", 1)[-1]
+    recorded_weights = [
+        str(summaries[name].get("backbone", {}).get("weights", ""))
         for name in backbones
+    ]
+    weight_recipes = {
+        value if ":" in value else value.rsplit(".", 1)[-1]
+        for value in recorded_weights
     }
     if len(weight_recipes) != 1 or "" in weight_recipes:
         raise RuntimeError(
@@ -224,9 +402,14 @@ def validate_controlled_protocol(
         name: summaries[name].get("config", {}).get("topk") for name in backbones
     }
     protocol["pretrained_weight_recipe"] = next(iter(weight_recipes))
+    protocol["sae_hidden_dim"] = hidden_dims[0] if all_same_hidden_dim else None
     protocol["sae_width_multiplier"] = (
-        next(iter(width_multipliers.values())) if not all_same_hidden_dim else float(hidden_dims[0])
+        next(iter(width_multipliers.values()))
+        if max(width_multipliers.values()) - min(width_multipliers.values()) <= 1e-12
+        else None
     )
+    protocol["sae_width_multiplier_by_backbone"] = width_multipliers
+    protocol["retrieval_environment"] = validate_retrieval_configuration(backbones, summaries)
     return protocol
 
 
@@ -237,6 +420,34 @@ def method_metrics(summary: Mapping[str, Any], method: str) -> Mapping[str, Any]
         .get("knn", {})
         .get("per_topk", {})
     )
+
+
+def retrieval_summary(summary: Mapping[str, Any]) -> Dict[str, Any]:
+    """Preserve search configuration, raw repeats, and seed-level timing records.
+
+    Accuracy-table rows contain only a few legacy timing columns. Keeping each
+    original 1-NN result here prevents aggregation from discarding CUDA-event
+    measurements, residency/precision metadata, and the actual measured batch
+    sizes. Published reference results retain their absent timings.
+    """
+    return {
+        "timing_interpretation": (
+            "Per-query search times are amortized over the recorded query "
+            "batches; they are not isolated single-query latencies. Means "
+            "across K weight each reported budget equally. CUDA-event and "
+            "synchronized wall-clock measurements remain distinct."
+        ),
+        "runtime": summary.get("runtime", {}),
+        "analysis": summary.get("retrieval_analysis", {}),
+        "ff2048_integrity_reference": (
+            summary.get("dataset", {}).get("ff2048_integrity_check", {}).get("knn")
+        ),
+        "methods": {
+            method: result["knn"]
+            for method, result in summary.get("results", {}).items()
+            if isinstance(result, Mapping) and isinstance(result.get("knn"), Mapping)
+        },
+    }
 
 
 def metric_value(metrics: Mapping[str, Any], budget: int, name: str) -> Optional[float]:
@@ -431,6 +642,7 @@ def build_aggregate(
             **summary["backbone"],
             "source_summary": str(Path(name) / "summary.json"),
             "configuration": summary.get("config", {}),
+            "retrieval": retrieval_summary(summary),
             "topk_annealing": {
                 CSR: summary["results"][CSR].get("topk_annealing"),
                 MP_SAE: summary["results"][MP_SAE].get("topk_annealing"),
@@ -720,6 +932,430 @@ def write_latex(
     atomic_text("\n".join(lines) + "\n", path)
 
 
+PAPER_FF2048_BUDGETS = (8, 16, 32, 64, 128, 256, 512, 1024, 2048)
+
+
+def extract_paper_ff2048_rows(
+    backbones: Sequence[str], summaries: Mapping[str, Mapping[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Extract the fixed-K paper table without promoting annealed extensions."""
+    if list(backbones) != ["resnet50"]:
+        raise RuntimeError(
+            "paper_ff2048 aggregation requires exactly the ResNet-50 result"
+        )
+    summary = summaries["resnet50"]
+    payload = summary.get("paper_ff2048_reproduction", {})
+    raw_rows = payload.get("rows")
+    if not isinstance(raw_rows, list) or not raw_rows:
+        raise RuntimeError(
+            "ResNet-50 summary has no paper_ff2048_reproduction rows; "
+            "run all fixed-K comparison arms"
+        )
+    required = {
+        "active_dimension",
+        "published_mrl_1nn_top1",
+        "published_csr_1nn_top1",
+        "reproduced_csr_1nn_top1",
+        "csr_reproduction_gap_pp",
+        "mpsae_1nn_top1",
+        "mpsae_minus_published_mrl_pp",
+        "mpsae_minus_reproduced_csr_pp",
+    }
+    rows: List[Dict[str, Any]] = []
+    for raw in raw_rows:
+        if not isinstance(raw, dict):
+            raise RuntimeError("paper reproduction rows must be JSON objects")
+        missing = sorted(required.difference(raw))
+        if missing:
+            raise RuntimeError(
+                "paper reproduction row is missing: " + ", ".join(missing)
+            )
+        row = {"backbone": "resnet50", **raw}
+        for key in required:
+            if not isinstance(row[key], (int, float)):
+                raise RuntimeError(
+                    f"paper reproduction row has non-numeric {key}: {row[key]!r}"
+                )
+        rows.append(row)
+    rows.sort(key=lambda row: int(row["active_dimension"]))
+    budgets = tuple(int(row["active_dimension"]) for row in rows)
+    if budgets != PAPER_FF2048_BUDGETS:
+        raise RuntimeError(
+            f"paper reproduction budgets are {budgets}, expected "
+            f"{PAPER_FF2048_BUDGETS}"
+        )
+    return rows
+
+
+def write_paper_ff2048_markdown(
+    rows: Sequence[Mapping[str, Any]], path: Path
+) -> None:
+    lines = [
+        "# FF2048 MRL / CSR / MPSAE reproduction",
+        "",
+        "Published columns are references from Table 4 of Wen et al. (2025). "
+        "Reproduced CSR and MPSAE are independently trained fixed-K models on "
+        "the released FF2048 ResNet-50 embeddings.",
+        "",
+        "| K | Published MRL | Published CSR | Reproduced CSR | CSR gap | MPSAE | MPSAE-MRL | MPSAE-CSR |",
+        "|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for row in rows:
+        lines.append(
+            f"| {int(row['active_dimension'])} | "
+            f"{float(row['published_mrl_1nn_top1']):.2f} | "
+            f"{float(row['published_csr_1nn_top1']):.2f} | "
+            f"{float(row['reproduced_csr_1nn_top1']):.2f} | "
+            f"{float(row['csr_reproduction_gap_pp']):+.2f} | "
+            f"{float(row['mpsae_1nn_top1']):.2f} | "
+            f"{float(row['mpsae_minus_published_mrl_pp']):+.2f} | "
+            f"{float(row['mpsae_minus_reproduced_csr_pp']):+.2f} |"
+        )
+    lines.extend(
+        [
+            "",
+            "Metric: ImageNet-1K unit-normalized exact L2 1-NN top-1 accuracy (%).",
+            "The annealed CSRv2/MPSAEv2 arms are exploratory secondary artifacts and are not used in this primary table.",
+        ]
+    )
+    atomic_text("\n".join(lines) + "\n", path)
+
+
+def aggregate_paper_ff2048(
+    results_root: Path,
+    backbones: Sequence[str],
+    summaries: Mapping[str, Mapping[str, Any]],
+    bundle_name: Path,
+) -> int:
+    rows = extract_paper_ff2048_rows(backbones, summaries)
+    require_strict_paper_summary(summaries["resnet50"], PAPER_FF2048_PROTOCOL)
+    controlled_protocol = validate_controlled_protocol(backbones, summaries)
+    source_summary = summaries["resnet50"]
+    aggregate = {
+        "experiment": "FF2048_MRL_CSR_MPSAE_ImageNet_reproduction",
+        "protocol": PAPER_FF2048_PROTOCOL,
+        "completed_at_utc": utc_now(),
+        "reference": "Wen et al. 2025, arXiv:2503.01776, Tables 3 and 4",
+        "primary_methods": {
+            "mrl": "published Table 4 reference (not locally retrained)",
+            "csr": "locally reproduced independent fixed-K models",
+            "mpsae": "locally trained independent fixed-K models",
+        },
+        "controlled_protocol": dict(controlled_protocol),
+        "retrieval": retrieval_summary(source_summary),
+        "ff2048_integrity_check": (
+            source_summary.get("dataset", {}).get("ff2048_integrity_check")
+        ),
+        "rows": rows,
+        "secondary_methods": ["csrv2", "mpsaev2"],
+    }
+    aggregate_summary_path = results_root / "ff2048_reproduction_summary.json"
+    csv_path = results_root / "ff2048_reproduction_per_budget.csv"
+    markdown_path = results_root / "ff2048_reproduction_results.md"
+    atomic_json(aggregate, aggregate_summary_path)
+    write_csv(rows, csv_path)
+    write_paper_ff2048_markdown(rows, markdown_path)
+
+    aggregate_paths = [aggregate_summary_path, csv_path, markdown_path]
+    artifacts = result_artifacts(results_root, backbones, aggregate_paths)
+    manifest_path = results_root / "artifact_manifest.json"
+    manifest = {
+        "created_at_utc": utc_now(),
+        "protocol": PAPER_FF2048_PROTOCOL,
+        "backbones": list(backbones),
+        "artifacts": [
+            {
+                "path": artifact.relative_to(results_root).as_posix(),
+                "bytes": artifact.stat().st_size,
+                "sha256": sha256(artifact),
+            }
+            for artifact in artifacts
+        ],
+    }
+    atomic_json(manifest, manifest_path)
+    artifacts.append(manifest_path)
+
+    bundle_path = results_root / bundle_name
+    write_bundle(results_root, artifacts, bundle_path)
+    completion_path = results_root / "RUN_COMPLETE.json"
+    atomic_json(
+        {
+            "status": "complete",
+            "completed_at_utc": utc_now(),
+            "protocol": PAPER_FF2048_PROTOCOL,
+            "backbones": list(backbones),
+            "bundle": bundle_path.name,
+            "bundle_bytes": bundle_path.stat().st_size,
+            "bundle_sha256": sha256(bundle_path),
+            "study": "FF2048_MRL_CSR_MPSAE_ImageNet_reproduction",
+            "primary_table": csv_path.name,
+            "primary_report": markdown_path.name,
+        },
+        completion_path,
+    )
+
+    print("\nFF2048 reproduction aggregation complete")
+    print(f"Primary table: {csv_path}")
+    print(f"Results bundle: {bundle_path}")
+    print(f"Completion marker: {completion_path}")
+    return 0
+
+
+PAPER_RN18_BUDGETS = (8, 16, 64, 256)
+
+
+def extract_paper_rn18_rows(
+    backbones: Sequence[str], summaries: Mapping[str, Mapping[str, Any]]
+) -> List[Dict[str, Any]]:
+    if list(backbones) != ["resnet18"]:
+        raise RuntimeError(
+            "paper_rn18_study aggregation requires exactly ResNet-18"
+        )
+    raw_rows = (
+        summaries["resnet18"].get("paper_rn18_study", {}).get("rows")
+    )
+    summary = summaries["resnet18"]
+    config = summary.get("config", {})
+    study_seeds = config.get("study_seeds")
+    if (
+        not isinstance(study_seeds, list)
+        or len(study_seeds) != 3
+        or not all(isinstance(seed, int) for seed in study_seeds)
+        or len(set(study_seeds)) != 3
+    ):
+        raise RuntimeError(
+            "ResNet-18 primary aggregation requires three distinct recorded "
+            f"integer seeds, got {study_seeds!r}"
+        )
+    for method in (CSR_V1, MP_SAE_V1):
+        result = summary.get("results", {}).get(method, {})
+        if result.get("training_seeds") != study_seeds:
+            raise RuntimeError(
+                f"{method} training seeds {result.get('training_seeds')!r} "
+                f"do not match config.study_seeds={study_seeds!r}"
+            )
+        knn = result.get("knn", {})
+        if knn.get("aggregated_across_seeds") is not True:
+            raise RuntimeError(
+                f"{method} has not been aggregated across its three seeds"
+            )
+        recorded_seed_keys = set(knn.get("per_seed", {}))
+        expected_seed_keys = {str(seed) for seed in study_seeds}
+        if recorded_seed_keys != expected_seed_keys:
+            raise RuntimeError(
+                f"{method} per-seed keys are {sorted(recorded_seed_keys)!r}, "
+                f"expected {sorted(expected_seed_keys)!r}"
+            )
+    if not isinstance(raw_rows, list) or not raw_rows:
+        raise RuntimeError(
+            "ResNet-18 summary has no paper_rn18_study rows; run both "
+            "fixed-K CSR and MPSAE arms"
+        )
+    required = {
+        "active_dimension",
+        "dense_ff512_1nn_top1",
+        "csr_mean_1nn_top1",
+        "csr_std_1nn_top1",
+        "mpsae_mean_1nn_top1",
+        "mpsae_std_1nn_top1",
+        "mpsae_minus_csr_pp",
+        "mpsae_minus_csr_std_pp",
+        "csr_fidelity_percent",
+        "mpsae_fidelity_percent",
+    }
+    rows: List[Dict[str, Any]] = []
+    for raw in raw_rows:
+        if not isinstance(raw, dict):
+            raise RuntimeError("ResNet-18 study rows must be JSON objects")
+        missing = sorted(required.difference(raw))
+        if missing:
+            raise RuntimeError(
+                "ResNet-18 study row is missing: " + ", ".join(missing)
+            )
+        row = {"backbone": "resnet18", **raw}
+        for key in required:
+            if not isinstance(row[key], (int, float)):
+                raise RuntimeError(
+                    f"ResNet-18 study row has non-numeric {key}: {row[key]!r}"
+                )
+        rows.append(row)
+    rows.sort(key=lambda row: int(row["active_dimension"]))
+    budgets = tuple(int(row["active_dimension"]) for row in rows)
+    if budgets != PAPER_RN18_BUDGETS:
+        raise RuntimeError(
+            f"ResNet-18 study budgets are {budgets}, expected "
+            f"{PAPER_RN18_BUDGETS}"
+        )
+    return rows
+
+
+def write_paper_rn18_markdown(
+    rows: Sequence[Mapping[str, Any]], path: Path
+) -> None:
+    lines = [
+        "# ResNet-18 CSR / MPSAE Appendix E.1 study",
+        "",
+        "The CSR settings and timm ResNet-18 backbone follow Appendix E.1 and "
+        "Table 9 of Wen et al. (2025). MPSAE uses the same inputs, seeds, "
+        "optimizer, epochs, and fixed-K training budget.",
+        "The paper does not publish its seed values; the exact predeclared "
+        "local seeds are recorded in the JSON summary.",
+        "",
+        "| K | Dense FF512 | CSR mean ± std | MPSAE mean ± std | Paired MPSAE-CSR mean ± std | CSR fidelity | MPSAE fidelity |",
+        "|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for row in rows:
+        lines.append(
+            f"| {int(row['active_dimension'])} | "
+            f"{float(row['dense_ff512_1nn_top1']):.2f} | "
+            f"{float(row['csr_mean_1nn_top1']):.2f} ± "
+            f"{float(row['csr_std_1nn_top1']):.2f} | "
+            f"{float(row['mpsae_mean_1nn_top1']):.2f} ± "
+            f"{float(row['mpsae_std_1nn_top1']):.2f} | "
+            f"{float(row['mpsae_minus_csr_pp']):+.2f} ± "
+            f"{float(row['mpsae_minus_csr_std_pp']):.2f} | "
+            f"{float(row['csr_fidelity_percent']):.2f}% | "
+            f"{float(row['mpsae_fidelity_percent']):.2f}% |"
+        )
+    lines.extend(
+        [
+            "",
+            "Metric: ImageNet-1K unit-normalized exact L2 1-NN top-1 accuracy (%).",
+            "Means and sample standard deviations use the three matched seeds recorded in the run; the MPSAE-CSR uncertainty is computed from paired per-seed differences.",
+            "Image preprocessing is a semantic torchvision translation of the released FFCV pipeline, not bit-exact FFCV.",
+            "The local cache retains the complete training split; the released extractor randomly drops its final incomplete batch without publishing a reproducible order/seed.",
+            "Figure 4 does not tabulate exact ResNet-18 values, so no digitized paper target is treated as ground truth.",
+            "No MRL column is reported because neither cited paper provides a matched ResNet-18 MRL baseline.",
+        ]
+    )
+    atomic_text("\n".join(lines) + "\n", path)
+
+
+def aggregate_paper_rn18(
+    results_root: Path,
+    backbones: Sequence[str],
+    summaries: Mapping[str, Mapping[str, Any]],
+    bundle_name: Path,
+) -> int:
+    rows = extract_paper_rn18_rows(backbones, summaries)
+    require_strict_paper_summary(
+        summaries["resnet18"], PAPER_RN18_STUDY_PROTOCOL
+    )
+    controlled_protocol = validate_controlled_protocol(backbones, summaries)
+    source_summary = summaries["resnet18"]
+    feature_integrity = source_summary.get("dataset", {}).get(
+        "rn18_feature_integrity"
+    )
+    if not isinstance(feature_integrity, dict):
+        raise RuntimeError(
+            "ResNet-18 summary is missing its feature provenance record"
+        )
+    required_integrity = {
+        "backbone_weights": "timm/resnet18.a1_in1k",
+        "official_ffcv_bit_exact": False,
+        "paper_configuration_matched": True,
+        "source_train_drop_last": True,
+        "local_train_drop_last": False,
+        "local_full_training_split_retained": True,
+        "provenance_and_shape_passed": True,
+    }
+    integrity_deviations = [
+        f"{key}={feature_integrity.get(key)!r} (required: {expected!r})"
+        for key, expected in required_integrity.items()
+        if feature_integrity.get(key) != expected
+    ]
+    if integrity_deviations:
+        raise RuntimeError(
+            "ResNet-18 feature provenance is incomplete or inconsistent: "
+            + "; ".join(integrity_deviations)
+        )
+    aggregate = {
+        "experiment": "CSR_MPSAE_timm_ResNet18_ImageNet_study",
+        "protocol": PAPER_RN18_STUDY_PROTOCOL,
+        "completed_at_utc": utc_now(),
+        "reference": (
+            "Wen et al. 2025, arXiv:2503.01776, Appendix E.1, "
+            "Figure 4, and Table 9"
+        ),
+        "primary_methods": {
+            "dense": "locally measured frozen FF512 reference",
+            "csr": "three-seed Appendix E.1 configuration-matched fixed-K study",
+            "mpsae": "three-seed matched fixed-K extension",
+        },
+        "reproduction_scope": (
+            "configuration-matched Appendix E.1 study; local torchvision "
+            "feature extraction is not a bit-exact FFCV replay"
+        ),
+        "seed_disclosure": (
+            "Appendix E.1 reports three seeds but does not publish their "
+            "values; controlled_protocol.study_seeds records the predeclared "
+            "local values"
+        ),
+        "preprocessing_disclosure": (
+            "The local pipeline preserves the released crop, flip, resize, "
+            "and normalization semantics. It retains the complete ImageNet "
+            "training split because the released FFCV extractor randomly "
+            "drops its final incomplete batch without publishing the order "
+            "or seed needed to reconstruct that omission."
+        ),
+        "controlled_protocol": dict(controlled_protocol),
+        "retrieval": retrieval_summary(source_summary),
+        "rn18_feature_integrity": feature_integrity,
+        "published_numeric_curve_available": False,
+        "mrl_baseline_available": False,
+        "rows": rows,
+    }
+    aggregate_summary_path = results_root / "rn18_study_summary.json"
+    csv_path = results_root / "rn18_study_per_budget.csv"
+    markdown_path = results_root / "rn18_study_results.md"
+    atomic_json(aggregate, aggregate_summary_path)
+    write_csv(rows, csv_path)
+    write_paper_rn18_markdown(rows, markdown_path)
+
+    aggregate_paths = [aggregate_summary_path, csv_path, markdown_path]
+    artifacts = result_artifacts(results_root, backbones, aggregate_paths)
+    manifest_path = results_root / "artifact_manifest.json"
+    manifest = {
+        "created_at_utc": utc_now(),
+        "protocol": PAPER_RN18_STUDY_PROTOCOL,
+        "backbones": list(backbones),
+        "artifacts": [
+            {
+                "path": artifact.relative_to(results_root).as_posix(),
+                "bytes": artifact.stat().st_size,
+                "sha256": sha256(artifact),
+            }
+            for artifact in artifacts
+        ],
+    }
+    atomic_json(manifest, manifest_path)
+    artifacts.append(manifest_path)
+
+    bundle_path = results_root / bundle_name
+    write_bundle(results_root, artifacts, bundle_path)
+    completion_path = results_root / "RUN_COMPLETE.json"
+    atomic_json(
+        {
+            "status": "complete",
+            "completed_at_utc": utc_now(),
+            "protocol": PAPER_RN18_STUDY_PROTOCOL,
+            "backbones": list(backbones),
+            "bundle": bundle_path.name,
+            "bundle_bytes": bundle_path.stat().st_size,
+            "bundle_sha256": sha256(bundle_path),
+            "study": "CSR_MPSAE_timm_ResNet18_ImageNet_study",
+            "primary_table": csv_path.name,
+            "primary_report": markdown_path.name,
+        },
+        completion_path,
+    )
+    print("\nResNet-18 study aggregation complete")
+    print(f"Primary table: {csv_path}")
+    print(f"Results bundle: {bundle_path}")
+    print(f"Completion marker: {completion_path}")
+    return 0
+
+
 def configure_plot_style() -> None:
     import matplotlib
 
@@ -819,6 +1455,14 @@ def result_artifacts(
         for path in (results_root / name).glob("ablation_*"):
             if path.is_file() and path.suffix.lower() in PORTABLE_SUFFIXES:
                 paths.append(path)
+        for method in (CSR_V1, MP_SAE_V1):
+            method_dir = results_root / name / method
+            if method_dir.is_dir():
+                paths.extend(
+                    path
+                    for path in method_dir.glob("seed_*/k_*/history.json")
+                    if path.is_file()
+                )
         log_dir = results_root / name / "logs"
         if log_dir.is_dir():
             paths.extend(path for path in log_dir.glob("*.log") if path.is_file())
@@ -839,8 +1483,8 @@ def write_bundle(results_root: Path, artifacts: Sequence[Path], path: Path) -> N
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Create a controlled Matryoshka and CSR/MPSAE v1/v2 architecture ablation from "
-            "csr_vs_mmpot_imagenet.py outputs."
+            "Aggregate paper-faithful FF2048, the Appendix E.1 ResNet-18 "
+            "study, or the explicit torchvision architecture ablation."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -851,22 +1495,49 @@ def build_parser() -> argparse.ArgumentParser:
         help="backbone directories that must be present",
     )
     parser.add_argument(
-        "--bundle-name", default="imagenet_architecture_ablation_results.zip"
+        "--bundle-name", default=None,
+        help="plain ZIP filename; inferred from the recorded protocol when omitted",
     )
     return parser
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
-    bundle_name = Path(args.bundle_name)
-    if bundle_name.name != args.bundle_name or bundle_name.suffix.lower() != ".zip":
-        raise ValueError("bundle-name must be a plain filename ending in .zip")
     results_root = args.results_root.expanduser().resolve()
     results_root.mkdir(parents=True, exist_ok=True)
 
     summaries = {
         name: load_backbone_summary(results_root, name) for name in args.backbones
     }
+    protocols = {
+        summary.get("protocol", summary.get("config", {}).get("protocol"))
+        for summary in summaries.values()
+    }
+    if len(protocols) != 1 or None in protocols:
+        raise RuntimeError(
+            "cannot aggregate mixed or missing experiment protocols: "
+            + ", ".join(repr(value) for value in protocols)
+        )
+    protocol = next(iter(protocols))
+    if protocol == PAPER_FF2048_PROTOCOL:
+        inferred_bundle_name = "imagenet_ff2048_comparison_results.zip"
+    elif protocol == PAPER_RN18_STUDY_PROTOCOL:
+        inferred_bundle_name = "imagenet_rn18_csr_mpsae_study_results.zip"
+    else:
+        inferred_bundle_name = "imagenet_architecture_ablation_results.zip"
+    bundle_value = args.bundle_name or inferred_bundle_name
+    bundle_name = Path(bundle_value)
+    if bundle_name.name != bundle_value or bundle_name.suffix.lower() != ".zip":
+        raise ValueError("bundle-name must be a plain filename ending in .zip")
+    if protocol == PAPER_FF2048_PROTOCOL:
+        return aggregate_paper_ff2048(
+            results_root, args.backbones, summaries, bundle_name
+        )
+    if protocol == PAPER_RN18_STUDY_PROTOCOL:
+        return aggregate_paper_rn18(
+            results_root, args.backbones, summaries, bundle_name
+        )
+
     rows = [
         row
         for name in args.backbones

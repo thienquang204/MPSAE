@@ -4,6 +4,7 @@
 .DS_Store
 .env
 .env.*
+*.env
 !.env.example
 __pycache__/
 *.py[cod]
@@ -15,4 +16,6 @@ runs/
 outputs/
 output/
 wandb/
+.repair-test-venv/
+.repair-uv-cache/
 *.zip

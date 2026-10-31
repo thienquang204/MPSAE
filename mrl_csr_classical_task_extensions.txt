@@ -1,0 +1,677 @@
+EXPERIMENT ADDENDUM
+Complementary classical image tasks for frozen MRL and CSR crop embeddings
+Version 1.0 | 19 October 2026
+
+Companion to: mrl_csr_rcnn_experiment_setting.txt
+Status: proposed experimental design, source checked; no implementation, model
+training, numerical benchmark results, or runtime measurements are claimed.
+
+This addendum extends the detection protocol with two primary tasks: foreground
+mask prediction and 3D viewpoint estimation. It also identifies optional later
+extensions. The existing detection protocol remains the definition of task A.
+
+PROVENANCE
+  INHERITED: settings fixed in the companion detection specification, including
+             its PAPER/RELEASE provenance for MRL and CSR.
+  PRECEDENT: a task formulation, dataset, or metric established in cited work.
+  NEW:       choices proposed here for this frozen-transfer benchmark.
+
+All downstream heads, sampling choices, and training schedules below are NEW.
+They are not asserted to be the original DeepMask or viewpoint training recipe.
+References are listed in Section 12.
+
+
+1. OBJECTIVE AND RECOMMENDED SUITE
+=================================
+
+The main question is whether one fixed compact image representation transfers
+to several kinds of visual output, and which capabilities change with its budget.
+For each task, independently encode a supplied RGB crop through the full parent
+encoder, then expose only the prescribed compact global code to a task head:
+
+  v = f(crop(I, r));  u = C_b(v);  prediction = H_task(u / s).
+
+Here C_b is a native MRL prefix or a fitted CSR sparse encoder at budget b, and s
+is one training-fitted scalar as in the companion specification. The functions
+f and C_b remain frozen. Each task receives a separately trained readout.
+
+Task A: object detection on VOC2007.
+  Already specified: classification/ranking plus box refinement from the same
+  code, common fixed EdgeBoxes proposals, AP50/AP75 and conditional IoU gain.
+  Capability: region semantics and coarse localization.
+
+Task B: foreground-mask prediction given an object box on VOC2012.
+  New primary extension: a binary mask decoder consuming only the compact code.
+  Capability: the selected object's occupied shape within its crop.
+
+Task C: 3D viewpoint estimation given an object box and category on PASCAL3D+.
+  New primary extension: a small rotation decoder, evaluated on VOC2012 images.
+  Capability: orientation within an object category.
+
+Detection, masks, and viewpoint expose different outputs but use related PASCAL
+imagery. Do not describe them as three independent visual domains. ResNet18 and
+ResNet50 also remain two sizes within the same CNN architecture family.
+
+The distinction between task breadth and experimental care matters. More tasks
+broaden coverage; shared frozen representations, valid controls, honest input
+conditions, and controlled resource accounting make the comparison careful.
+
+
+2. REPRESENTATION SETTINGS THAT ARE REUSED
+=========================================
+
+INHERITED, with no extra representation training per downstream task:
+  - ResNet18: full dimension 512; ResNet50: full dimension 2048.
+  - Native released MRL parents with their original BlurPool construction.
+  - MRL prefixes RN18: {8,16,32,64,128,256,512}; RN50 additionally {1024,2048}.
+  - CSR parents: timm/resnet18.a1_in1k and timm/resnet50.a1_in1k.
+  - CSR Appendix E.1/Table 9: sparse width h=8192 for BOTH architectures;
+    training k in {8,16,64,256}; 10 epochs; Adam; batch 1024; LR 4e-5;
+    weight decay 1e-4; epsilon 6.25e-10; auxiliary k=512; auxiliary beta=1/32;
+    contrastive gamma=1.0; three seeds. Retain all code-level details and
+    ImageNet-only fitting conventions from the companion document [1,2].
+  - Fixed compressor per architecture/training-k/seed; evaluate at its training k.
+  - Seeds 0,1,2, with the same parent/compressor provenance and seed limitations.
+  - Main accuracy evaluation uses FP32 features and heads.
+
+The original 2 architectures x 4 k values x 3 seeds = 24 CSR fits serve the entire
+strict-transfer suite. Tasks B and C add crop extraction and readout training,
+not 48 additional CSR fits. The checkpoint loading and CSR fitting work described
+in the companion document still has to be implemented; this is reuse in the
+proposed execution plan, not a claim those checkpoints have already been fitted.
+
+Keep each MRL model and each CSR parent as its own full-vector reference. Native
+MRL and timm CSR parents are different learned encoders. Report absolute task
+scores and compact-minus-own-full-parent changes; absolute differences alone do
+not isolate the effects of compression.
+
+Every decoder input has width q=m for an MRL prefix, q=d for a full parent, or
+q=h=8192 for CSR. Preserve CSR coordinate identities. An indexed sparse first
+layer may accelerate the readout, but its trainable weight table is still sized
+by h. No full-feature reconstruction, RGB skip connection, patch token, shared
+whole-image ROI feature, or supplied shape may bypass the compact code.
+
+
+3. COMMON SPLITS, CROPS, AND HEAD FITTING FOR B AND C
+==================================================
+
+3.1 Splits and data exposure
+
+Task B uses the official VOC2012 segmentation train and val manifests. Task C
+uses the PASCAL3D+ annotations on the official VOC2012 detection train and val
+images. Use the PASCAL portion only for C; the additional ImageNet portion of
+PASCAL3D+ is not downstream fitting or evaluation data in this protocol [5,6].
+
+NEW internal development split: within each task's official training images,
+hash the UTF-8 string 'mrl-csr-extensions-v1/' + image_id with SHA256. Interpret
+the first 8 hexadecimal digits as an integer. Remainder 0 modulo 5 is development;
+the remaining images are head-fitting data. Keep all objects and crop variants
+from an image together. The same image ID has the same internal assignment in
+both tasks. Record the manifests and per-class counts.
+
+Freeze the protocol using these internal development splits. Then initialize
+fresh heads and fit on ALL official training images. Evaluate once on the public
+VOC2012 validation partition, which serves as the held-out evaluation set here.
+Do not train on trainval when val is the reported evaluation partition.
+
+VOC segmentation incorporates earlier VOC years. Check image IDs/content before
+reusing any task-trained head, region-fitted compressor, or tuned component across
+tasks. Reusing frozen global feature extraction is allowed; reusing target-trained
+parameters with exposure to the new evaluation images is not strict transfer.
+Keep regional-CSR variants task-specific and separately labelled.
+
+3.2 Five deterministic crop variants
+
+For an original supplied box with center (cx,cy), width w, height h, define:
+  r0: the original box;
+  r1/r2: translate its center by (+0.1w,0) / (-0.1w,0);
+  r3/r4: translate its center by (0,+0.1h) / (0,-0.1h).
+Each variant keeps the original width and height. Apply the inherited 1.2 context
+expansion to the selected variant, then the inherited floor/ceil convention,
+mean-color out-of-image padding, 224x224 bilinear warp, and RGB normalization.
+These translations are NEW controlled crop perturbations, not object rotations.
+
+Encode the altered RGB crop each time; do not imitate crop perturbation by
+changing output coordinates while retaining the original embedding. Masks are
+transformed into the altered crop frame. The physical viewpoint target stays
+unchanged. No flips, image rotations, color augmentation, or test-time averaging.
+
+Train by selecting an object and then one of its five variants uniformly. Report
+the clean r0 result as primary and the mean over r1-r4 as a separate robustness
+condition. Crop translations deliberately change the object's location in the
+normalized crop. Their purpose is to test whether the readout follows the image
+content instead of relying entirely on a centered-object template.
+
+3.3 Small-head training defaults
+
+  Optimizer: AdamW, LR 1e-3, betas (0.9,0.999), epsilon 1e-8.
+  Weight decay: 1e-4 on weight matrices, none on biases.
+  Batch: 256 objects/crops, sampling with replacement.
+  Sampling: choose a represented category uniformly, then an eligible object
+            from that category uniformly, then a crop variant uniformly.
+  Maximum: 5000 updates, constant LR, no scheduler or warmup.
+  Precision: FP32. No dropout or batch normalization in the new heads.
+  Initial weights: Normal(0,0.01). Biases zero except pose outputs, Section 5.
+  Seeds: 0,1,2; save identical presampled object/variant indices across methods
+         for each task, split, and seed.
+
+Input normalization: compute one scalar s=sqrt(mean ||u||^2), floored at 1e-12,
+over all eligible fitting crops for the task/budget, equally weighted by crop.
+Do not normalize every crop to unit length. Recompute s on official train for
+the final fit; never use evaluation crops to fit it. CSR itself still receives
+its parent's raw vector before this readout normalization.
+
+NEW limited schedule selection: save updates 1000,2500,5000 in the initial
+full-parent development runs. Using seed 0 and the primary MLP, choose one common
+update count PER TASK by the mean development score across the four full parents
+(two architectures x two parent types). Optimize mask macro-IoU or pose macro
+Acc30, respectively; break ties in favor of fewer updates. Then use that same
+count for all representations, budgets, and seeds of that task. Do not choose
+head duration using the compact-method ranking or the final evaluation set.
+
+If the full-parent runs do not show useful signal, apply the sensitivity checks
+in Section 7 before freezing the final protocol. Document any revised protocol;
+do not change settings for only the compact method that happens to underperform.
+
+
+4. TASK B: DIRECT FOREGROUND-MASK PREDICTION
+==========================================
+
+4.1 Precedent and interpretation
+
+DeepMask formulates mask prediction from an image patch. SDS connects region-based
+recognition to instance and semantic segmentation [3,4]. DeepMask uses spatial
+convolutional information, and SDS refinement also uses bottom-up mask geometry.
+Our frozen global-code decoder is a NEW adaptation of the task interface. These
+papers do not establish that a frozen average-pooled ImageNet vector will retain
+sufficient pixel geometry.
+
+The primary task supplies an object's box and asks for its binary foreground
+mask. It is conditional object-mask prediction, not full-image semantic
+segmentation or end-to-end instance detection.
+
+4.2 Data and target
+
+VOC2012 provides 1464 segmentation training images and 1449 validation images,
+with both class and object-instance masks [5]. Use SegmentationObject to separate
+instances and SegmentationClass to identify their class. Ignore label 255.
+
+NEW supplied-box definition for this task: use the tight axis-aligned bounding
+box of the instance's annotated non-void foreground pixels. This explicitly
+provides its visible extent; it is an oracle-box task. Convert to the inherited
+zero-based, half-open convention before constructing the five crop variants.
+Only nonempty annotated instances with a consistent foreground class are eligible.
+Record skipped instances and reasons before running the method comparison.
+
+The target is the selected instance alone. Other labelled instances are negative
+pixels for this target. Void pixels and out-of-image padding are ignored. Do not
+input the mask, class label, supplied-box coordinates, or image dimensions into
+the decoder; coordinates are used only for crop construction and output placement.
+
+4.3 Decoder and loss
+
+Primary head:
+  u/s -> Linear(q,128) -> ReLU -> Linear(128,784) -> reshape 28x28 logits.
+
+Upsample logits to 224x224 with bilinear interpolation, align_corners=False.
+Rasterize target foreground and valid-pixel maps in exactly the same crop frame
+using nearest-neighbor label sampling. Train with binary cross entropy with
+logits, averaged over valid pixels PER CROP, then averaged over the batch.
+Do not use raw pixel accuracy as the primary result.
+
+Decode by bilinearly resizing the 28x28 logits to the original expanded crop
+rectangle, applying sigmoid and a fixed 0.5 threshold, and placing the binary
+prediction in original-image coordinates. Clip placement to the image. Outside
+the predicted crop the mask is zero. No superpixels, edge snapping, CRF, SAM,
+raw-pixel refinement, or learned high-resolution feature branch.
+
+The primary decoder has 128q+101264 parameters. At CSR width 8192 this is 1149840.
+The head is small relative to an image backbone but is not parameter-matched
+across CSR and MRL budgets. A direct affine q->784 control has 784q+784 parameters
+(6423312 for CSR), so it is not automatically the cheapest readout.
+
+4.4 Metrics
+
+Compute foreground IoU in original-image coordinates on valid labelled pixels,
+comparing each predicted mask with its fixed target instance. Keep the target
+identity fixed; do not rematch predictions to whichever instance yields best IoU.
+An empty prediction receives IoU zero for a nonempty target.
+
+Report:
+  - Per-class mean object IoU and their unweighted mean (primary macro-IoU).
+  - Mean over all individual objects (secondary instance-weighted IoU).
+  - Clean-crop and translated-crop results separately.
+  - Compact-minus-own-full-parent IoU difference in percentage points.
+
+These are NEW conditional-mask metrics on VOC annotations, not the official
+full-image 21-class semantic-segmentation mIoU. Include object counts per class.
+
+4.5 Shape controls
+
+Evaluate all controls with identical rasterization and valid-pixel handling:
+  1. Fixed central filled rectangle occupying normalized coordinates
+     [1/12,11/12] along each crop axis, corresponding to the nominal unshifted
+     box inside a 1.2-expanded crop. It receives no per-instance offset.
+  2. One class-agnostic mean-mask template from fitting masks.
+  3. One mean-mask template per true category, selected by the supplied true
+     category. This is an explicitly privileged diagnostic, not a main-model
+     input. It estimates how much category identity alone explains shape.
+  4. Ground-truth mask downsampled to 28x28 then decoded by the same resize and
+     threshold pipeline. This is a resolution reference, not a proven upper
+     bound on every possible 28x28-logit decoder.
+
+Construct each template as a 28x28 probability grid: sum foreground-valid pixel
+area and divide by valid pixel area in each cell over its fitting crops. The
+resolution reference uses the same valid-weighted area averaging for one ground-
+truth mask. A cell with no valid support gets probability zero. Rasterize the
+fixed central-rectangle control by cell center, also as a probability grid.
+For all four controls, convert p to logit(clamp(p,1e-6,1-1e-6)) BEFORE using the
+common logit-resize/sigmoid/0.5-threshold decoder. Do not mistakenly pass
+probabilities as logits. Evaluation ground truth supplies the explicitly labelled
+resolution reference only; it never supplies predictions of the trained method.
+
+Only claim instance-specific shape evidence when the full parent improves over
+appropriate template controls. A recognizable class-average silhouette does not
+by itself demonstrate preservation of detailed spatial information.
+
+
+5. TASK C: 3D VIEWPOINT FROM A SUPPLIED OBJECT BOX AND CATEGORY
+============================================================
+
+5.1 Precedent and data
+
+PASCAL3D+ augments 12 rigid VOC2012 categories with 3D annotations [6]. Viewpoints
+and Keypoints evaluates known-box viewpoint prediction, including a classifier
+on global fc7 features, and reports geodesic rotation accuracy and median error
+[7]. It also distinguishes joint detection/viewpoint metrics from known-box
+evaluation. This is a particularly direct precedent for an embedding benchmark.
+
+Use all 12 categories:
+  aeroplane, bicycle, boat, bottle, bus, car, chair, diningtable, motorbike,
+  sofa, train, tvmonitor.
+
+Use VOC2012 train for downstream fitting and VOC2012 val for held-out evaluation,
+as described in Section 3. Exclude the added ImageNet images from this task.
+This reduced-data frozen-transfer setting is not a reproduction of the original
+viewpoint paper's larger training set or end-to-end training.
+
+Use provided object boxes. Require valid fine viewpoint annotations and a
+non-difficult object; exclude missing/coarse-only orientation targets rather
+than silently filling them with zero. A numerical angle of zero is itself valid.
+Record the release-specific validity fields, release/version hash, conversion
+function, exclusions, and eligible counts before fitting any heads.
+
+Train on eligible objects including occlusion/truncation. Primary evaluation is
+the non-occluded, non-truncated subset, following the clean known-box convention
+of [7]. Report all eligible objects and the occluded-or-truncated subset separately.
+Keep all 12 categories in the primary table; do not drop ambiguous categories
+after seeing results. Report per-category outcomes and note their ambiguities.
+
+5.2 Conditioning and small decoder
+
+Primary input condition: the object box AND true category are supplied. The
+category selects one output branch; only u/s supplies image evidence. This makes
+the target explicitly orientation within a known category. It is a legitimate
+conditional task, and is not claimed to infer class or detect the object.
+
+Head:
+  u/s -> Linear(q,128) -> ReLU -> Linear(128,12*6).
+Select the six outputs of the known category, giving two vectors a1,a2 in R^3.
+The total output width is 72, not 6 for the entire 12-category model.
+The head has 128q+9416 parameters (1057992 for CSR).
+
+NEW output choice: the continuous 6D rotation representation of Zhou et al. [8].
+For non-degenerate outputs:
+  b1 = a1 / ||a1||;
+  t2 = a2 - dot(b1,a2)*b1;
+  b2 = t2 / ||t2||;
+  b3 = cross(b1,b2);
+  Rhat = [b1 b2 b3]  (columns).
+
+Initialize each category's output bias to [1,0,0,0,1,0] to start near a valid
+identity rotation. Use epsilon 1e-6 to detect degenerate directions. Train with
+mean squared matrix error ||Rhat-Rgt||_F^2/9, averaged across examples. A non-finite
+direction or a1/t2 norm below epsilon halts that fit for numerical diagnosis;
+record the failed fit and any common protocol correction. Norm clamping alone
+does not make a degenerate output a valid rotation, so do not silently optimize
+matrix MSE on such a matrix. Use the same six-output convention, initialization,
+and rotation conversion for the affine control q->72.
+
+Convert the PASCAL3D+ azimuth/elevation/in-plane convention to Rgt using the
+author's viewpoint preprocessing/evaluation convention [7], pinned during
+implementation. Verify matrix handedness, angle units, multiplication order,
+and canonical rotations against the source. A library's default Euler order is
+not an interchangeable convention. No unverified converter is supplied here.
+This conversion is an explicit implementation gate before an experiment can run.
+
+Do not regress raw Euler angles with ordinary squared error: their wraparound
+creates avoidable artificial discontinuities. A separate two-output sin/cos
+azimuth probe is an optional simpler diagnostic, not full 3D viewpoint.
+
+5.3 Metrics and baselines
+
+For a valid predicted rotation:
+  e = acos(clip((trace(transpose(Rhat)*Rgt)-1)/2, -1, 1)).
+
+Use double precision for this small evaluation computation. At evaluation, a
+non-finite output, ||a1||<1e-6, or ||t2||<1e-6 counts as a failed prediction with
+error 180 degrees; it is never removed from the denominator. Report the failure
+count. Verify Rhat^T Rhat approximately equals identity and determinant is +1.
+
+Report for each category:
+  - Median geodesic rotation error, in degrees (MedErr).
+  - Fraction with e < 30 degrees (Acc30, the established Acc_{pi/6}).
+  - Acc15 as an extra precision diagnostic.
+  - Clean r0 and mean translated-crop conditions separately.
+
+Primary aggregates are the arithmetic mean of the 12 category Acc30 values
+and the arithmetic mean of the 12 category MedErr values. A pooled median is a
+different statistic; label it separately if provided. For a subset with no
+eligible examples in a category, report N/A and the number of categories in its
+macro average rather than assigning zero or silently changing the denominator.
+
+Show compact-minus-own-full-parent changes. Accuracy decreases and error increases
+both indicate worse performance, so retain the metric direction explicitly.
+
+Nonvisual baseline: for each category, choose the training rotation medoid under
+the same geodesic distance (minimum mean distance to that category's training
+rotations, deterministic object-ID tie-break). Predict it for every object of that
+category. This uses the same known-category information as the main task.
+
+Report the standard annotation-based metric first. Symmetry-aware alternatives
+require a documented category/object symmetry convention and a separate label;
+do not choose favorable symmetry equivalences after observing method errors.
+
+
+6. BUDGETS, READOUT CONTROLS, AND RUN ORDER
+=========================================
+
+6.1 Initial extension grid
+
+To limit extra head fitting, the main NEW extension grid is:
+  CSR k = {16,64};
+  MRL m = {16,32,64,128};
+  both full-parent references;
+  both architectures and three seeds.
+
+This contains equal-active comparisons m=k and nominal equal-byte comparisons
+m=2k under the inherited FP32-value/uint32-index convention. Dense codes cost
+4m bytes; CSR costs 8*nnz plus metadata. Report measured nnz and actual serialized
+bytes, not only nominal k. All inherited native budgets may be added later, but
+do not silently claim the smaller extension grid tested every budget.
+
+Use the width-128 MLP as primary for B and C. Run the affine head on both full
+parents and the same selected compact budgets as a readout diagnostic. Report
+parameter counts, memory, and runtime; fixed hidden width is not equal parameter
+count. The affine mask head can be expensive because CSR has 8192 coordinates.
+
+The initial MLP grid requires 16 readout configurations per task/seed:
+  2 architectures x (4 MRL prefixes + 1 MRL full + 2 CSR k + 1 CSR-parent full).
+Thus two new tasks x 16 configurations x 3 seeds = 96 final MLP fits. Affine
+controls add another 96 if run on that entire selected grid. Development fits
+and the final-refit stage are additional. These are cached-feature readouts,
+not backbone training runs; no wall-clock budget has been measured.
+
+6.2 Suggested execution order
+
+  A. Verify data, crop coordinates, mask rasterization, viewpoint conversion,
+     sparse first-layer equivalence, and nonvisual baselines.
+  B. Run the four full parents on internal development data using the MLP.
+     Select the common update count and check task sensitivity.
+  C. Freeze the task protocol and run RN18 compact settings first to debug the
+     complete comparison. This is a pilot; do not treat it as the final table.
+  D. Run both architectures, both new tasks, and all three seeds on the
+     preselected grid. Add the affine control.
+  E. Fit fresh final heads on each task's complete official training partition
+     and evaluate the held-out partition using the fixed rules.
+
+For Task B, the official train+val object count is 6929 [5]. Five crops/object
+would be 34645 encodes per parent before eligibility checks, calculated from
+that count. This is much smaller than a 256-proposal-per-image detection cache.
+Task C's eligible crop count must be measured from the selected annotations.
+Reuse cache rows only when image, parent, crop rectangle, and preprocessing are
+identical; same source image alone is not enough to reuse its crop descriptor.
+
+CSR code storage and sparse readout cost are not the complete pipeline cost.
+Include crop generation, all parent forwards, dense CSR encoding, feature cache,
+head parameters, and prediction/postprocessing cost. Four different parents
+remain necessary for the published-parent comparison; extract sequentially if
+memory or storage is constrained.
+
+
+7. CONTROLS THAT MAKE THE RESULTS INFORMATIVE
+============================================
+
+7.1 Full-parent sensitivity
+
+Check that the full embedding supports the task beyond its corresponding
+image-independent prior. For masks examine both the global and true-category
+templates; for viewpoint compare with the class rotation medoid. Inspect actual
+predictions as well as aggregate scores.
+
+If a full parent is weak, first verify the annotation and coordinate pipeline,
+training convergence, and the affine/MLP difference. One predetermined width-256
+MLP on full parents can diagnose a restrictive decoder; it is not an automatic
+change of the primary head. Make any final protocol revision before examining
+compact-method rankings and apply it to all methods.
+
+Do not suppress tasks because a particular compact method loses. Preserve a
+low-sensitivity result and state that it cannot cleanly isolate compression from
+the parent/interface limitation. Failure to decode from one small head is not a
+proof that the information is absent from the embedding.
+
+7.2 Same-parent comparison
+
+If one extra experiment is affordable, a strict ImageNet-fitted CSR-on-MRL
+control at RN18 k={16,64} can add causal clarity. Compare that CSR code with native
+prefixes from the exact same MRL parent. Reuse the new compressor across all
+tasks; do not fit it on each target set. This is a separately labelled method
+adaptation, with 2 k x 3 seeds = 6 additional CSR fits, not the Table 9 timm-parent
+experiment and not a use of existing CSR weights on a new coordinate system.
+
+7.3 Label efficiency and perturbations
+
+The translated-crop condition is already specified. An optional 10%-versus-100%
+training-image comparison adds a useful data-efficiency axis using the same
+cache and frozen representations. Define the nested image subsets and report
+class coverage before training; all crops of an image follow its assignment.
+Fit normalization and priors using only that condition's fitting images.
+Do not refit CSR in the low-label condition. This extra head grid is optional.
+
+7.4 Uncertainty and result summaries
+
+Report per-seed values, means, and sample standard deviations. The MRL repeats
+vary the readout seed; the CSR repeats vary compressor plus readout. Neither
+estimates variation over parent pretraining runs.
+
+For evaluation uncertainty, use paired bootstrap resampling of source images,
+keeping all objects and all crop variants of an image together. In each resample,
+compute the compact-minus-paired-full-parent aggregate separately for each of
+the three seeds, then average those three signed differences. Use 1000 replicates,
+seed 2026, and percentile 95% intervals for this mean difference. These intervals
+are conditional on the fitted models; they do not describe an ensemble predictor.
+Fix the required class set to the classes present in the original evaluated
+subset and report its size. Redraw a replicate missing one of those classes,
+rather than changing its macro denominator. This also handles occlusion subsets
+with fewer than 12 represented classes. Label image-sampling intervals separately
+from training-seed variation; they are not confidence intervals over pretraining.
+
+Plot task performance against stored bytes and show full-parent reference lines.
+Do not average raw AP, mask IoU, and angular degrees into one score. A table of
+task-specific preservation patterns is the primary conclusion. A compact code
+may outperform a full-vector readout under finite data and regularization; do
+not force its relative change to be nonpositive.
+
+
+8. CONNECTING MASKS AND VIEWPOINT BACK TO DETECTION
+=================================================
+
+After B/C establish a useful conditional signal, evaluate complete pipelines:
+  - Proposal code -> class/box heads + binary mask head -> instance-mask AP.
+  - Proposal code -> class/box heads + rotation head -> joint detection/rotation.
+
+These are optional integration experiments requiring additional settings and
+target-train-only detection heads. They are not already specified final results.
+For VOC2012 evaluation, train relevant detector heads only on permitted training
+images, with overlap auditing before reusing anything fitted on another VOC split.
+
+For masks, supply only image-derived boxes at inference. Train on positive
+proposals matched to masks, with fixed matching rules, and decode a mask in the
+coordinate frame of the actual encoded crop. A box-refinement step must not
+silently move that mask to a different frame. Report box AP beside mask AP and
+conditional mask IoU on a shared proposal subset to separate error sources.
+
+For viewpoint, the detected category selects the predicted rotation branch.
+Historical AVP evaluates detection plus binned azimuth; the full-rotation
+extension ARP_{pi/6} requires correct box overlap and geodesic error below 30
+degrees [7]. Name the metric correctly and use the author evaluation convention.
+Known-box MedErr/Acc30 alone is not AVP or ARP.
+
+Full-image semantic segmentation can then be constructed by combining predicted
+class scores and instance masks with a fixed overlap/background rule. That is a
+useful application, but is not independent evidence beyond the same detector and
+mask outputs. Its own integration protocol would need to be locked separately.
+
+
+9. OPTIONAL LATER TASK: PART OR KEYPOINT LOCALIZATION
+====================================================
+
+DeepPose provides a classical direct-coordinate regression formulation [9]. A
+new small adaptation is u/s -> 128 -> 2J coordinates for J named landmarks,
+normalized to the encoded crop. Mask the loss and evaluation to valid annotated
+landmarks; invert the crop transform for pixel-space evaluation. Predict all
+coordinates without a forced [0,1] clamp. Keep visibility out of the head input.
+
+Use a fixed mean-pose baseline. Report PCK at declared thresholds and a declared
+length normalization, for example 0.05 and 0.10 times the original object box's
+maximum side. These would be NEW protocol choices, not DeepPose's original
+torso-normalized PDJ/PCP metrics. No cascaded part crops in the initial task.
+
+CUB-200-2011 is attractive: its same images have 15 part locations, object boxes,
+attributes, and a segmentation download [10]. However, its official page warns
+of overlap with ImageNet, relevant to our parents. Audit overlap before claiming
+unseen-image generalization, or label this as a transfer diagnostic and retain
+other datasets. Another route is a dedicated human-pose dataset with its own
+standard split/metric. Dataset choice and exact fitting settings remain to be
+specified before this optional task becomes a primary benchmark.
+
+
+10. OPTIONAL LATER TASK: IMAGE MATCHING AND HOMOGRAPHY
+=====================================================
+
+HPatches is a classical patch descriptor benchmark. SuperPoint uses its image
+pairs to evaluate homography recovery through descriptor matching and RANSAC
+[11,12]. The endpoint can therefore be geometric transformation correctness,
+extending beyond nearest-neighbor retrieval accuracy.
+
+Proposed adaptation:
+  independently detect a fixed set of points in both images using one common
+  classical detector; crop normalized local RGB regions; encode each crop with
+  the same frozen parent and compact code; match descriptors with one fixed
+  distance/rule; estimate a homography with one fixed robust estimator.
+
+Ground-truth homographies are used for evaluation only in this full-image task.
+Do not obtain the correspondence locations by warping points using the true
+homography. The canonical pre-extracted HPatches patch evaluation is a different
+experiment, whose corresponding regions are constructed using ground truth.
+
+A NEW 256-points-per-image budget is a reasonable resource pilot. HPatches has
+116 sequences of six images; this cap gives at most 178176 crop encodes per
+parent across the complete set, calculated as 116*6*256. It is not free merely
+because the dataset has few images. A 224-pixel ResNet forward per tiny patch
+also differs substantially from specialized shared-feature-map descriptors.
+
+Use corner error thresholds such as 1/3/5 pixels only with a locked image-resize
+and coordinate convention. Count failed/degenerate homographies as failures.
+Report illumination and viewpoint conditions separately; bootstrap by sequence.
+Keep a SIFT/RootSIFT task sanity baseline and both full parents. Detector settings,
+patch scale/orientation normalization, matching, resizing, and robust-estimator
+parameters still require a separate implementation specification. Postpone this
+task until the full-parent pilot demonstrates useful matching signal.
+
+
+11. OUTPUT RECORDS AND PERMITTED CLAIMS
+======================================
+
+For every primary task record at least:
+  task, supplied_test_information, dataset/release, split_manifest_hash,
+  crop_variant, parent_id/hash, method, compressor_fit_data, seed,
+  nominal_m_or_k, measured_nnz, stored_code_bytes, head_family,
+  head_parameters, update_count, fit_images, fit_objects,
+  evaluation_images/objects, per_class_metric, primary_macro_metric,
+  own_full_parent_metric, signed_difference, extraction_time,
+  compression_time, head_fit_time, evaluation_time, peak_memory.
+
+Retain per-image predictions, masks or rotations, ground-truth associations,
+and invalid-prediction counts so results can be audited without re-encoding.
+
+A defensible eventual claim would be:
+  'We evaluate the same frozen compact crop embeddings on object detection,
+   object-mask prediction, and 3D viewpoint estimation, measuring task-dependent
+   changes from full-parent representations at controlled storage budgets.'
+
+Do not claim universal architecture generality, information-theoretic recovery,
+unseen pretraining data without an audit, full-scene segmentation from conditional
+masks, or end-to-end speedups from sparse storage alone. No winner is presumed.
+
+
+12. PRIMARY REFERENCES
+======================
+
+[1] Kusupati et al. Matryoshka Representation Learning. NeurIPS 2022.
+    https://arxiv.org/html/2205.13147v4
+    Exact checkpoints and paper/release differences are in the companion file.
+
+[2] Wen et al. Beyond Matryoshka: Revisiting Sparse Coding for Adaptive
+    Representation. ICML 2025. Appendix E.1, Table 9.
+    https://arxiv.org/html/2503.01776v5
+
+[3] Pinheiro, Collobert, Dollar. Learning to Segment Object Candidates
+    (DeepMask). NeurIPS 2015. Sections 2 and 3.
+    https://arxiv.org/pdf/1506.06204
+    https://proceedings.neurips.cc/paper_files/paper/2015/file/4e4e53aa080247bc31d0eb4e7aeb07a0-Paper.pdf
+
+[4] Hariharan, Arbelaez, Girshick, Malik. Simultaneous Detection and
+    Segmentation. ECCV 2014.
+    https://arxiv.org/pdf/1407.1808
+
+[5] Everingham and Winn. VOC2012 Development Kit; segmentation data and labels,
+    Sections 2.2 and 2.6; dataset statistics.
+    https://www.robots.ox.ac.uk/~vgg/projects/pascal/VOC/voc2012/htmldoc/index.html
+    https://www.robots.ox.ac.uk/~vgg/projects/pascal/VOC/voc2012/dbstats.html
+
+[6] Xiang, Mottaghi, Savarese. Beyond PASCAL: A Benchmark for 3D Object
+    Detection in the Wild. WACV 2014. Official project and evaluation protocol.
+    https://cs.stanford.edu/groups/cvgl/projects/pascal3d.html
+    https://cvgl.stanford.edu/papers/xiang_wacv14.pdf
+
+[7] Tulsiani and Malik. Viewpoints and Keypoints. CVPR 2015.
+    Sections 3.2, 5.1, 5.2, and 7.
+    https://arxiv.org/html/1411.6067v2
+    https://github.com/shubhtuls/ViewpointsAndKeypoints
+    Author scripts include mainVpsPreprocess, mainRigidViewpoint, and
+    runAvpExperiments; pin and inspect the relevant implementations when coding.
+
+[8] Zhou et al. On the Continuity of Rotation Representations in Neural
+    Networks. CVPR 2019. Section 4 and supplementary 6D construction.
+    https://arxiv.org/pdf/1812.07035
+
+[9] Toshev and Szegedy. DeepPose: Human Pose Estimation via Deep Neural
+    Networks. CVPR 2014.
+    https://arxiv.org/pdf/1312.4659
+    https://openaccess.thecvf.com/content_cvpr_2014/html/Toshev_DeepPose_Human_Pose_2014_CVPR_paper.html
+
+[10] Wah et al. Caltech-UCSD Birds-200-2011. Official dataset page and report.
+     Includes the explicit ImageNet-overlap warning.
+     https://www.vision.caltech.edu/datasets/cub_200_2011/
+
+[11] Balntas et al. HPatches: A benchmark and evaluation of handcrafted and
+     learned local descriptors. CVPR 2017.
+     https://arxiv.org/pdf/1704.05939
+     https://hpatches.github.io/
+
+[12] DeTone, Malisiewicz, Rabinovich. SuperPoint: Self-Supervised Interest Point
+     Detection and Description. CVPR Workshops 2018. Section 7.3 and Appendix A.
+     https://arxiv.org/pdf/1712.07629
+
+END OF ADDENDUM

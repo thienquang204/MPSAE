@@ -1,9 +1,9 @@
 # syntax=docker/dockerfile:1
-# Single image for the Matryoshka/CSRv2/MPSAEv2 architecture ablation.
+# MMRSAE ImageNet runner with the historical study entry points retained.
 FROM nvidia/cuda:13.0.2-devel-ubuntu24.04
 
-LABEL org.opencontainers.image.title="Graduate thesis three-method ablation runner"
-LABEL org.opencontainers.image.description="Matryoshka, CSRv2, and MPSAEv2 on ImageNet with ResNet-18 and ResNet-50"
+LABEL org.opencontainers.image.title="Graduate thesis adaptive-representation runner"
+LABEL org.opencontainers.image.description="ImageNet representation studies and frozen detection, mask, and viewpoint transfer"
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -11,7 +11,8 @@ ENV PYTHONUNBUFFERED=1 \
     PATH=/opt/venv/bin:$PATH \
     HF_HOME=/data/huggingface \
     HF_DATASETS_CACHE=/data/huggingface/datasets \
-    TORCH_HOME=/data/torch
+    TORCH_HOME=/data/torch \
+    TORCH_EXTENSIONS_DIR=/data/torch_extensions
 
 WORKDIR /app
 
@@ -53,15 +54,24 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then \
 
 RUN python -c "import faiss; assert hasattr(faiss, 'StandardGpuResources'), 'image contains CPU-only FAISS'"
 
-COPY csr_vs_mmpot_imagenet.py wandb_tracking.py \
+COPY csr_vs_mmpot_imagenet.py sparse_gpu_retrieval.py retrieval_timing.py wandb_tracking.py \
      aggregate_backbone_results.py download_imagenet.py \
-     container_pipeline.sh run_csr_vs_mmpot_imagenet.sh \
+     container_pipeline.sh experiment_shell_common.sh run_csr_vs_mmpot_imagenet.sh \
      run_all_experiments_container.sh ./
+COPY csrc/ ./csrc/
+COPY transfer_experiments.py transfer_representations.py transfer_data.py transfer_tasks.py transfer_reporting.py \
+     run_transfer_experiments.sh ./
+COPY mpsae_repair.py mpsae_repair_experiment.py repair_data.py repair_runtime.py repair_benchmark.py \
+     prepare_splits.py compare_predictions.py make_plan.py check_reference.py \
+     experiments.json run_matrix.csv run_mpsae_repair.sh ./
+COPY mmrsae.py mmrsae_gpu.py mmrsae_data.py mmrsae_imagenet.py run_mmrsae_imagenet.sh ./
 
 RUN chmod +x /app/container_pipeline.sh /app/run_csr_vs_mmpot_imagenet.sh \
-    /app/run_all_experiments_container.sh
+    /app/run_all_experiments_container.sh /app/run_transfer_experiments.sh \
+    /app/run_mpsae_repair.sh /app/run_mmrsae_imagenet.sh
 
-RUN mkdir -p /data/huggingface /data/torch /output
+RUN mkdir -p /data/csr_precompute_embeds /data/imagenet1k \
+    /data/huggingface /data/torch /data/torch_extensions /output
 
 VOLUME ["/data", "/output"]
 

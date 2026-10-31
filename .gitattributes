@@ -1,0 +1,5 @@
+# Server entry points and settings must remain usable by Linux Bash.
+*.sh text eol=lf
+*.env.example text eol=lf
+.env.example text eol=lf
+Dockerfile* text eol=lf

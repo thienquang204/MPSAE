@@ -1,0 +1,10 @@
+arm,repair,mask,rel_weight,ot_cost,auxiliary,k,updates,auxiliary_start,auxiliary_end,anneal_updates,initialization,data_epoch_start
+W,False,False,0.0,old,4k,8,250,32,32,0,fresh,0
+C,False,False,0.0,old,4k,8,250,32,32,0,common_W,2
+R,True,False,0.0,old,4k,8,250,32,32,0,common_W,2
+M,True,True,0.0,old,4k,8,250,32,32,0,common_W,2
+O,True,True,1.0,old,4k,8,250,32,32,0,common_W,2
+S,True,True,1.0,off,4k,8,250,32,32,0,common_W,2
+N,True,True,1.0,mixed,4k,8,250,32,32,0,common_W,2
+F,True,True,1.0,mixed,wide,8,250,64,64,0,common_W,2
+A,True,True,1.0,mixed,anneal,8,250,64,32,175,common_W,2

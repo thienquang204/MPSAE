@@ -1,144 +1,312 @@
-# ImageNet five-arm architecture ablation
+# Paper-faithful FF2048 comparison
 
-`csr_vs_mmpot_imagenet.py` implements the active thesis experiment:
-Matryoshka Representation Learning, CSR v1, MPSAE v1, CSRv2, and MPSAEv2 on
-ResNet-18 and ResNet-50. The script filename is retained for compatibility.
+This repository's primary ImageNet experiment is the `paper_ff2048` protocol
+implemented by `csr_vs_mmpot_imagenet.py`. It compares the published MRL
+ResNet-50 curve, a reproduction of CSR, and MPSAE on the same released FF2048
+features.
 
-## Controlled comparison
+## Audit conclusion
 
-For each backbone, the script uses ImageNet-1K and evaluates exact L2 1-NN
-accuracy with the training split as gallery and validation split as queries.
-Every embedding is unit normalized. ResNet-18 uses matched budgets
-`K={8,16,32,64,128,256,512}` and ResNet-50 uses
-`K={8,16,32,64,128,256,512,1024,2048}`. All four sparse arms additionally
-evaluate `K={1,2,4}`.
+The former experiment was not a reproduction of the comparison in *Beyond
+Matryoshka: Revisiting Sparse Coding for Adaptive Representation*. It started
+from torchvision `IMAGENET1K_V1` ResNet-18/50 weights and locally fine-tuned an
+MRL-like model for 10 epochs. The papers' main FF2048 comparison instead uses a
+specific ResNet-50 checkpoint from the MRL work. The original MRL ResNet-50
+models were trained with the FFCV 40-epoch recipe; the 10-epoch fine-tuning
+study is a separate MRL appendix experiment.
 
-### Matryoshka
+Consequently, a low result from the old harness did not show that MRL or CSR
+was incorrectly reported. It measured a different backbone, training recipe,
+and, for CSR, a different sparse-autoencoder objective.
 
-The pretrained backbone is fine-tuned end to end. Independent classifiers are
-attached to power-of-two feature prefixes from 8 through the full backbone
-dimension, and all evaluated prefix budgets are included. The objective is:
+There is no paper-matched FF2048 ResNet-18 baseline. ResNet-18 must not be
+pooled into the primary FF2048 comparison.
 
-```text
-L_MRL = lambda_MRL * sum_m CrossEntropy(W_m F(x)[:m], y).
-```
+The CSR paper's separate SOTA ResNet-50d column has higher absolute accuracy
+(75.19% for the full representation and roughly 74.9% for CSR), but it uses a
+different timm backbone. It is not a valid drop-in replacement when the goal
+is comparison with the published FF2048 MRL curve. "Best absolute backbone"
+and "paper-matched baseline" are therefore kept as different experiments.
 
-`lambda_MRL` is configured by `MRL_CLASSIFICATION_WEIGHT` and defaults to
-`1.0`. At budget K, exact 1-NN uses the first K feature coordinates.
+## Primary data and baseline provenance
 
-### CSR v1 fixed-K arm
-
-CSR v1 uses frozen cached backbone features and the CSR reconstruction,
-auxiliary, and non-negative contrastive objectives. Its training support is
-fixed at `V1_TRAIN_K=32` by default. Evaluation is independent of that training
-support and covers every sparse evaluation budget listed above.
-
-### MPSAE v1 fixed-K arm
-
-MPSAE v1 uses the matched frozen features, initial SAE state, and fixed
-`V1_TRAIN_K=32` support with the MPSAE reconstruction, nested-view, auxiliary,
-and multimarginal partial-transport objectives. It uses the same complete
-sparse evaluation-budget grid as CSR v1 and both v2 arms.
-
-### CSRv2 annealing arm
-
-The pretrained backbone is frozen and cached once. A tied Top-K sparse
-autoencoder with hidden width `h=4d` retains the existing reconstruction and
-non-negative contrastive objective:
+The strict protocol reads the authors' released archives directly:
 
 ```text
-L_CSRv2(t) = lambda_main L(K_t) + lambda_4K L(4K_t)
-           + lambda_aux L_aux + lambda_NCL L_NCL(K_t).
+FF2048_RN50_Embeds/1K_train_ff2048.npz
+FF2048_RN50_Embeds/1K_val_ff2048.npz
 ```
 
-The training support follows the CSRv2-style half-cosine continuation schedule:
+Both archives must contain `data` and `label`; the expected split sizes are
+1,281,167 train examples and 50,000 validation examples. Training converts the
+stored features to float32. It does not regenerate or silently replace these
+features with torchvision outputs.
+
+As a provenance/integrity check, the full 2048-dimensional released features
+are evaluated with unit-normalized exact L2 1-NN. The paper target is 71.19%
+top-1. A material gap here should be investigated before interpreting any
+sparse-model result. Strict mode stops before sparse training when the
+absolute gap exceeds 0.05 percentage points.
+
+The released dataset does not provide the MRL prefix embeddings needed to
+re-evaluate MRL locally. Therefore the strict protocol records the MRL values
+from Table 4 as a published reference and labels them as such. It never
+pretends that those values came from the local 10-epoch fine-tuning code.
+
+## Published 1-NN targets
+
+| K | MRL | CSR |
+|---:|---:|---:|
+| 8 | 62.19 | 67.78 |
+| 16 | 67.91 | 69.17 |
+| 32 | 69.46 | 70.15 |
+| 64 | 70.17 | 70.94 |
+| 128 | 70.52 | 70.99 |
+| 256 | 70.62 | 71.31 |
+| 512 | 70.82 | 71.29 |
+| 1024 | 70.89 | 71.30 |
+| 2048 | 70.97 | 71.20 |
+
+These are ImageNet-1K train-gallery to validation-query exact L2 1-NN top-1
+accuracies after L2 normalization. They are reference values, not results
+generated by this checkout.
+
+## CSR reproduction
+
+The strict settings follow Table 3 of the CSR paper:
+
+| Setting | Value |
+|:--|--:|
+| input dimension | 2048 |
+| latent dimension | 8192 |
+| epochs | 10 |
+| total batch size | 4096 |
+| learning rate | 4e-5 |
+| optimizer | Adam |
+| weight decay | 1e-4 |
+| Adam epsilon | 6.25e-10 |
+| auxiliary K | 512 |
+| dead threshold | 30 steps |
+| auxiliary coefficient | 1/32 |
+| NCL coefficient | 0.1 |
+| NCL temperature | 0.2 |
+| K | 8, 16, 32, ..., 2048 |
+
+A separate randomly initialized, fixed-K CSR model is trained for every
+reported K. A single model trained at K=32 and evaluated at every K is not the
+paper protocol.
+
+The implemented CSR loss matches the released visual code:
 
 ```text
-K_t = K_target + 0.5 * (K_start - K_target)
-                    * (1 + cos(pi * t / T_anneal)).
+L_CSR = MSE(x, x_hat_K)
+      + (1/8) MSE(x, x_hat_4K)
+      + (1/32) normalized_auxiliary_MSE
+      + 0.1 NCL(z_K, z_K)
 ```
 
-`K_start=64`, `K_target=2`, and `T_anneal` spans 70% of CSRv2's optimization
-steps by default. K remains at the target for the rest of training. Integer K
-is obtained by rounding and clamping to `[K_target,K_start]`.
+The encoder and decoder are tied. Pre-bias and latent bias start at zero. The
+auxiliary MSE is normalized by the mean-predictor MSE of its residual target.
+NCL uses two deterministic views, L2-normalized codes, and temperature 0.2.
+The released implementation does not project decoder weights after optimizer
+steps. The final incomplete training minibatch is retained.
 
-The environment controls are `CSRV2_MAIN_RECON_WEIGHT`,
-`CSRV2_MULTI_TOPK_RECON_WEIGHT`, `CSRV2_AUX_RECON_WEIGHT`,
-`CSRV2_CONTRASTIVE_WEIGHT`, `ANNEAL_START_K`, `TRAIN_K`, and
-`ANNEAL_FRACTION`.
+AMP and TF32 are disabled in strict mode. This avoids silently changing the
+released float32 calculation. Strict mode rejects deviations from the paper's
+reported sample counts, budgets, and Table 3 hyperparameters.
 
-### MPSAEv2 annealing arm
+## Controlled MPSAE comparison
 
-MPSAEv2 uses the same frozen features, tied SAE architecture, estimated
-pre-bias, random initialization, and training-order seed as CSRv2. Its current
-base support `K_t` follows the same half-cosine schedule. The Top-K, Top-2K,
-and Top-4K views therefore become Top-`K_t`, Top-`2K_t`, and Top-`4K_t` at
-every optimization step:
+MPSAE is evaluated on the same FF2048 arrays and with one independently
+trained fixed-K model per reported K. Its SAE initialization, tied dictionary,
+main K reconstruction, 4K reconstruction, auxiliary loss, Adam settings,
+batch size, and 10-epoch exposure match CSR. The 2K code is an MMPOT view; it
+is not granted an extra reconstruction loss. `MPSAEV2_EXTRA_EPOCHS=0` keeps
+the optimization budget matched.
 
-```text
-L_MPSAEv2(t) = lambda_main L(K_t)
-             + lambda_nested mean(L(2K_t), L(4K_t))
-             + lambda_aux L_aux
-             + lambda_MMPOT L_MMPOT-gap(K_t, 2K_t, 4K_t).
-```
+The MMPOT term and its coefficient are method-specific research choices, not
+hyperparameters from the CSR paper. They must be reported explicitly. Any
+tuning should use a declared tuning split or independent runs; selecting them
+from the final ImageNet validation comparison would bias the result.
 
-The MMPOT term uses the three-view circular-variance cost and a three-marginal
-entropy-regularized partial-transport optimality gap. Both MPSAE variants are
-trained for `base_epochs + 4`; Matryoshka and both CSR variants use
-`base_epochs`. Because the schedule
-is defined as a fraction, each sparse arm anneals over 70% of its own total
-optimization steps and then holds K fixed.
+The `csrv2` and `mpsaev2` cosine-annealed arms remain exploratory extensions.
+They are emitted for research continuity but are not substitutes for the
+fixed-K CSR reproduction in the headline paper comparison.
 
-The environment controls are `MPSAEV2_MAIN_RECON_WEIGHT`,
-`MPSAEV2_NESTED_RECON_WEIGHT`, `MPSAEV2_AUX_RECON_WEIGHT`,
-`MPSAEV2_MMPOT_WEIGHT`, plus the shared annealing controls.
+## ResNet-18 scope
 
-## Scope of the CSRv2 label
+The CSR appendix includes a different ResNet-18 input-dimension study using
+the timm `resnet18.a1_in1k` backbone, input dimension 512, latent dimension
+8192, batch size 1024, NCL coefficient 1.0, and K in {8, 16, 64, 256}. It does
+not provide a matched MRL or FF2048 ResNet-18 curve.
 
-This experiment intentionally isolates progressive K annealing inside the
-existing matched frozen-backbone protocol. It does not claim to implement the
-CSRv2 paper's separate supervised-contrastive or full-backbone fine-tuning
-variants. `MPSAEv2` likewise denotes the existing MPSAE objective augmented
-with the same annealing curriculum.
+That setup is now implemented as `--protocol paper_rn18_study`. Its strict
+configuration follows Appendix E.1/Table 9:
 
-## Recorded schedule data
+- frozen `timm/resnet18.a1_in1k` FF512 inputs;
+- h=8192, 10 epochs, batch size 1024, Adam lr=4e-5, weight decay=1e-4,
+  epsilon=6.25e-10;
+- K in {8,16,64,256}, auxiliary K=512, beta=1/32, multi-TopK weight=1/8,
+  and CSR gamma=1.0;
+- independent fixed-K models under the locally predeclared seeds 1227, 1228,
+  and 1229;
+- a full FF512 exact 1-NN reference measured before sparse training.
 
-Each sparse method records whether its K is fixed or annealed, its start and
-target K, total optimization steps, and applicable annealing metadata. Every epoch also
-records its first, last, and mean K. Batch-level W&B logs include the current
-K. Evaluation is not annealed: each reported point uses its requested fixed K.
+Appendix E.1 states that three random seeds are averaged, but it does not
+publish their values. The local set above is anchored at the released code's
+default 1227 and is recorded for reproducibility; it is not presented as the
+authors' unknown seed set.
 
-## Retrieval and timing
+MPSAE is trained for every identical K/seed pair with the same cached
+features, SAE initialization, reconstruction objective, optimizer, epochs,
+and data order. Its MMPOT term is the declared method-specific difference.
+The result table reports mean and sample standard deviation across seeds, plus
+the paired-seed mean and sample standard deviation of MPSAE minus CSR.
 
-Matryoshka prefixes use dense exact CPU FAISS `IndexFlatL2`. CSR/MPSAE v1/v2
-codes remain in bounded CPU SciPy CSR chunks and use exact sparse matrix
-products. Because
-all vectors are unit normalized and sparse codes are non-negative, maximizing
-the sparse dot product is exactly equivalent to minimizing squared L2 distance.
-The benchmark times only the neighbor-search computation; encoding,
-normalization, gallery construction, and index construction are excluded. All
-five retrieval timings therefore use the CPU while retaining the appropriate
-dense or sparse computation. The experiment records total search time and mean
-milliseconds per query and creates separate
-accuracy and retrieval-time plots for ResNet-18 and ResNet-50.
+The paper exposes the ResNet-18 CSR result only as Figure 4, not as an exact
+numeric table. The implementation therefore records provenance, shapes,
+sample counts, and the locally measured dense baseline but does not use
+digitized plot coordinates as an integrity gate. It also does not create an
+MRL number. A ResNet-18 MRL arm would be a new training study whose recipe
+must be specified independently.
 
-## Weight-free output policy
+The feature pipeline is translated from the released FFCV source: training
+uses random-resized-crop 224 and horizontal flip; validation applies a center
+crop with ratio 224/256 and then resizes that crop to 256 square; normalization
+uses mean/std 0.5. The extractor batch defaults to the source value 256. The
+translation preserves the stated geometry but is explicitly recorded as
+semantic rather than bit-exact FFCV.
 
-No trained model, optimizer, scheduler, scaler, or resume checkpoint is saved.
-JSON histories and result summaries are written after every epoch. Frozen
-backbone feature caches are reusable. Matryoshka features are regenerated from
-the live in-memory model because there is intentionally no trained weight file
-to bind a reused cache to.
+The released extractor also uses random FFCV ordering with `drop_last=True`.
+At batch size 256 that omits 143 of ImageNet's 1,281,167 training images, but
+the random order and seed needed to identify those exact images are not
+published. The local study therefore retains the complete training split for
+the shared CSR/MPSAE inputs and dense gallery, and records this difference in
+`rn18_feature_integrity`. The ResNet-18 result is configuration-matched; it
+is not labelled a bitwise or exact numerical reproduction of Figure 4.
 
-## One-command execution
+The old torchvision ResNet-18 experiment remains available only under
+`--protocol torchvision_ablation` and must be labelled as an ablation rather
+than a paper reproduction.
+
+## Running and outputs
+
+### Exact sparse GPU search and timing contract
+
+The retrieval comparison has a separate computational contract from training:
+
+1. Encode and normalize gallery and queries outside the search timer. Keep
+   sparse Top-K outputs as coordinate indices and float32 values. Construct
+   a coordinate-to-gallery posting index and transfer its arrays to the same
+   CUDA device used by the locally measured FAISS dense baseline.
+2. For an active query coordinate, accumulate products only into gallery
+   rows in its posting list. A bounded temporary score buffer covers one
+   gallery chunk. For the unit-normalized codes, squared L2 is `2 - 2*dot`;
+   select the maximum inner product in each chunk and merge chunk winners.
+   Include zero-score/non-overlapping candidates; these are part of exact
+   nearest-neighbor search, not candidates to discard. Zero-norm codes are
+   rejected before unit normalization.
+   Actual gallery chunks also respect a `4*1024**2` compact-entry cap,
+   limiting the builder's temporary sorting estimate to roughly 384 MiB;
+   the result metadata records actual chunk count and maximum row count.
+3. Keep the entire posting index and encoded query arrays GPU-resident for
+   measurement. Insufficient memory is a clear failure. Chunking bounds the
+   temporary score buffer without streaming the gallery through the PCIe
+   link inside the timer.
+4. Build the gallery index, then compile the CUDA extension on first use and
+   prepare its workspace before warmup. By default,
+   use three untimed warmups for each distinct query batch shape, then five
+   timed repetitions per batch. Interleave repetitions by query batch and
+   accumulate their times into full-query-set totals. Warmup and repetition
+   counts must each be at least one. Measure both CUDA events and
+   synchronized wall time. Include score initialization, sparse accumulation,
+   chunk reduction, and final merging. Exclude encoding, normalization,
+   transfer, index/workspace construction, and label lookup.
+5. Report the median and spread of measured repetitions, query count, batch
+   size, backend, device, and timing scope. The default dense and sparse
+   query batch is 32. Divide total search time by the query count to obtain
+   amortized time per query; this is not single-query serving latency.
+
+Dense retrieval uses GPU FAISS `IndexFlatL2`; sparse retrieval uses the local
+CUDA extension rather than CPU SciPy or dense expansion of the latent codes.
+Both perform exhaustive exact search, subject to float32 arithmetic. The
+sparse representation reduces multiplication work according to support
+overlap, while score initialization and nearest-neighbor reduction still
+cost work across the gallery. Runtime depends on dictionary-feature
+frequency, actual nonzero counts, query batching, and GPU characteristics;
+K alone does not establish a speedup.
+Atomic float32 accumulation may reorder nearly tied scores between repeated
+searches. Exhaustive search does not imply bitwise agreement with dense
+FAISS, which can use a different floating-point reduction order.
+
+The defaults are exposed as `KNN_QUERY_BATCH=32`,
+`SPARSE_KNN_QUERY_BATCH=32`, `SPARSE_GALLERY_CHUNK=65536`,
+`RETRIEVAL_WARMUP=3`, `RETRIEVAL_REPEATS=5`,
+`SPARSE_SCORE_BUFFER_MIB=256`, and `SPARSE_GPU_MEMORY_FRACTION=0.8`.
+`FAISS_GPU=1` is required by the launchers, and `FAISS_GPU_DEVICE` selects
+the shared retrieval device. The supplied CUDA development image includes
+the compiler toolchain for `csrc/`, and compiled extensions are cached in
+the persistent data volume. No CPU fallback is used to produce timings.
+Platforms without a compatible GPU FAISS wheel require a CUDA-enabled
+source build; native Windows also needs `nvcc` and MSVC for the retrieval
+extension. The supplied Linux Docker image includes the build toolchain.
+
+The published MRL curve contains accuracies only. It supplies no local
+latency measurement and cannot be a denominator for a measured speedup.
+Compare CSR and MPSAE with a locally measured dense baseline under matching
+hardware, query batching, precision, and timing scope. Storage comparisons
+also count sparse indices and posting metadata, not merely active values.
+In FF2048 mode, the integrity-check measurement is reused as a locally
+measured Dense FF2048 timing point at dimension 2048 in the timing table and
+plots. It is independent of published MRL; no smaller dense-prefix timings
+are inferred from it.
+
+These retrieval changes were implemented and reviewed as source only at the
+user's request. No import, build, benchmark, training, or test execution was
+performed, so neither measured correctness nor a runtime improvement is
+claimed here.
+
+`retrieval_timing.csv` and `retrieval_timing.md` preserve the measured local
+search results and their settings. Existing retrieval comparison plot
+filenames remain unchanged.
 
 ```bash
 cp .env.example .env
-# Replace HF_TOKEN after accepting the ImageNet license.
+# Accept the Hugging Face dataset conditions and set a read-only HF_TOKEN.
 bash run_all_experiments_docker.sh
 ```
 
-The container always runs all five arms on both ResNet backbones, then
-creates per-budget CSV/JSON tables, pairwise effects, plots, a manifest, a ZIP,
-and `RUN_COMPLETE.json`. It does not run the older pairwise-MMPOT or true-MMPOT
-experiment families.
+The primary per-budget audit is written to:
+
+```text
+resnet50/paper_ff2048_reproduction.csv
+resnet50/paper_ff2048_reproduction.md
+```
+
+Each row reports published MRL, published CSR, reproduced CSR, the CSR
+reproduction gap, MPSAE, and the MPSAE deltas. No numerical reproduction claim
+should be made until an actual run has populated these artifacts.
+
+For ResNet-18:
+
+~~~bash
+cp rn18_study.env.example .env
+bash run_all_experiments_docker.sh
+~~~
+
+Its primary files are:
+
+~~~text
+resnet18/paper_rn18_study.csv
+resnet18/paper_rn18_study.md
+rn18_study_per_budget.csv
+rn18_study_results.md
+imagenet_rn18_csr_mpsae_study_results.zip
+~~~
+
+## Sources
+
+- Wen et al., *Beyond Matryoshka: Revisiting Sparse Coding for Adaptive Representation*, arXiv:2503.01776.
+- `neilwen987/CSR_Adaptive_Rep`, released visual training and retrieval code.
+- `W1nd-navigator/CSR-precompute-embeds`, released FF2048 arrays.
+- `RAIVNLab/MRL`, original 40-epoch ResNet-50 training recipe and checkpoints.

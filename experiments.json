@@ -1,0 +1,50 @@
+{
+  "protocol": "mpsae-repair-neighborhood-v1",
+  "source": {
+    "repository": "W1nd-navigator/CSR-precompute-embeds",
+    "revision": null,
+    "train_sha256": null,
+    "validation_sha256": null,
+    "train_file": "FF2048_RN50_Embeds/1K_train_ff2048.npz",
+    "validation_file": "FF2048_RN50_Embeds/1K_val_ff2048.npz",
+    "parent": "RAIVNLab/MRL:r50_mrl0_e0_ff2048.pt",
+    "expected_rows": 1281167,
+    "validation_rows": 50000,
+    "dimension": 2048,
+    "classes": 1000
+  },
+  "model": {"input_dim": 2048, "hidden_dim": 8192, "k": 8},
+  "pilot": {
+    "seed": 1227,
+    "batch_size": 1024,
+    "warm_updates": 250,
+    "branch_updates": 250,
+    "fit_per_class": 128,
+    "cheap_per_class": 2,
+    "holdout_per_class": 8,
+    "anchor_count": 1024,
+    "checkpoint_interval": 25,
+    "diagnostic_updates": [0, 125, 250]
+  },
+  "optimizer": {"name": "Adam", "lr": 0.00004, "betas": [0.9, 0.999], "eps": 0.000000000625, "weight_decay": 0.0001},
+  "reconstruction": {"main_weight": 1.0, "wide_weight": 0.125, "dead_weight": 0.03125, "aux_k": 512, "dead_steps": 30},
+  "repair": {"depth": 1, "rank": 32, "clean_probability": 0.2, "erase_probability": 0.25, "power_iterations": 50, "alpha_factor": 0.9, "anneal_fraction": 0.7},
+  "bank": {"size": 1024, "teacher_temperature": 0.1, "student_temperature": 0.1, "refresh_interval": 25, "anchor_chunk_size": 128, "cache_teacher_profiles": false, "confirmation_exclusion": "minibatch_union"},
+  "transport": {"weight": 2.0, "mass": 0.9, "entropy": 0.2, "group_size": 32, "max_iterations": 100, "max_refine_iterations": 2000, "tolerance": 0.0001, "mixture_weight": 0.5, "mass_normalization": false},
+  "retrieval": {"query_batch_size": 32, "gallery_chunk_size": 65536, "score_buffer_mib": 256, "faiss_temp_memory_mib": 512, "gpu_memory_fraction": 0.8, "warmup": 3, "repeats": 5, "encode_batch_size": 1024},
+  "gates": {"minimum_gain_percentage_points": 0.3, "maximum_encoding_ratio": 3.0, "bootstrap_replicates": 1000, "bootstrap_seed": 2026, "holdout_requires_positive_lower_ci": true},
+  "confirmation": {"seeds": [1227, 1228], "batch_size": 4096, "epochs": 10, "retain_last_batch": true, "methods": ["C", "S", "selected_candidate"]},
+  "arms": {
+    "W": {"repair": false, "mask": false, "rel_weight": 0.0, "ot_cost": "old", "auxiliary": "4k"},
+    "C": {"repair": false, "mask": false, "rel_weight": 0.0, "ot_cost": "old", "auxiliary": "4k"},
+    "R": {"repair": true, "mask": false, "rel_weight": 0.0, "ot_cost": "old", "auxiliary": "4k"},
+    "M": {"repair": true, "mask": true, "rel_weight": 0.0, "ot_cost": "old", "auxiliary": "4k"},
+    "O": {"repair": true, "mask": true, "rel_weight": 1.0, "ot_cost": "old", "auxiliary": "4k"},
+    "S": {"repair": true, "mask": true, "rel_weight": 1.0, "ot_cost": "off", "auxiliary": "4k"},
+    "N": {"repair": true, "mask": true, "rel_weight": 1.0, "ot_cost": "mixed", "auxiliary": "4k"},
+    "F": {"repair": true, "mask": true, "rel_weight": 1.0, "ot_cost": "mixed", "auxiliary": "wide"},
+    "A": {"repair": true, "mask": true, "rel_weight": 1.0, "ot_cost": "mixed", "auxiliary": "anneal"}
+  },
+  "stages": {"triage": ["W", "C", "S", "N"], "attribution": ["R", "M", "O"], "wide": ["F", "A"]},
+  "precision": {"dtype": "float32", "amp": false, "tf32": false}
+}
