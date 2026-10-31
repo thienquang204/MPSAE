@@ -33,7 +33,7 @@ RUN python -m pip install --upgrade pip \
 # No CUDA FAISS wheel supports the ARM64 GB10. Compile a native GPU build for
 # compute capability 12.1 (sm_121) using the CUDA 13 toolkit in this image.
 # amd64 continues to use the prebuilt wheel selected by requirements.txt.
-RUN if [ "$TARGETARCH" = "arm64" ]; then \
+RUN set -eu; if [ "$TARGETARCH" = "arm64" ]; then \
         git clone --branch "v${FAISS_VERSION}" --depth 1 https://github.com/facebookresearch/faiss.git /tmp/faiss; \
         cmake -S /tmp/faiss -B /tmp/faiss/build -G Ninja \
           -DCMAKE_BUILD_TYPE=Release \

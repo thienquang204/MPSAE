@@ -268,12 +268,17 @@ def evaluate(args, bundle, model, output, checkpoint_path, identity, step, *, de
 
 def diagnostic(args, bundle, model, bank, output, step, total):
     import torch
+    if total < 1 or not 0 <= step <= total:
+        raise ValueError("Diagnostic position must be in [0, total_updates]")
     target = output / f"diagnostic_{step:07d}.json"
     ids = bundle.fit_ids[:min(64, len(bundle.fit_ids))]
     before = model.sae.inactive_steps.clone()
     generator = torch.Generator(device="cpu").manual_seed(args.seed + 9001)
+    # Endpoint reports use completed-update counts, while the loss schedule
+    # accepts zero-based update indices. Reuse the final update's budget.
+    loss_step = min(step, total - 1)
     _, stats, views = model.loss(tensor_rows(bundle.train, ids, next(model.parameters()).device),
-        bank=bank, row_ids=ids, mask_generator=generator, step=step, total_steps=total,
+        bank=bank, row_ids=ids, mask_generator=generator, step=loss_step, total_steps=total,
         diagnostics=True, update_activity=False)
     if not torch.equal(before, model.sae.inactive_steps):
         raise RuntimeError("Diagnostic mutated SAE activity counters")
@@ -315,7 +320,7 @@ def training_batches(ids, seed, epoch, batch_size, offset=0):
         yield ordinal, ids[order[first:last]]
 
 
-def fit_and_evaluate(args, backbone, bundle, output, code, gpu):
+def fit_and_evaluate(args, backbone, bundle, output, code, gpu, *, failure_context=None):
     import numpy as np
     import torch
     from mmrsae import MMRSAE, LandmarkBank
@@ -449,8 +454,12 @@ def fit_and_evaluate(args, backbone, bundle, output, code, gpu):
                               "retrieval": result, "peak_torch_gpu_mib": summary["peak_torch_gpu_mib"]})
         return summary
     except BaseException as error:
-        atomic_json(output / "failure.json", {"step": next_step, "error": repr(error),
-                    "traceback": traceback.format_exc(), "resume_from": str(checkpoint)})
+        failure = {"step": next_step, "error": repr(error),
+                   "traceback": traceback.format_exc(),
+                   "resume_from": str(checkpoint) if checkpoint.exists() else None}
+        if failure_context is not None:
+            failure_context.update(failure)
+        atomic_json(output / "failure.json", failure)
         update_wandb_summary({"failed": 1, "last_attempted_update": next_step})
         raise
 
@@ -516,6 +525,10 @@ def main(argv=None):
             tracking.wandb_run_name = f"{args.wandb_run_name}/{backbone}" if args.wandb_run_name else f"{name}/{backbone}"
             tracking.wandb_group = args.wandb_group or name
             exit_code = 1
+            # Share only this attempt's failure metadata with the fit handler.
+            # Reading an existing failure.json could reuse a prior attempt's
+            # training position when this attempt fails during preparation.
+            failure_context = {}
             try:
                 init_wandb(tracking, default_name=tracking.wandb_run_name, default_group=name,
                     tags=("MMRSAE", args.variant, backbone, "imagenet", args.evaluation),
@@ -537,14 +550,16 @@ def main(argv=None):
                 if args.prepare_only:
                     summaries[backbone] = {"status": "prepared", "source": bundle.provenance}
                 else:
-                    summaries[backbone] = fit_and_evaluate(args, backbone, bundle, output, code, gpu)
+                    summaries[backbone] = fit_and_evaluate(args, backbone, bundle, output, code, gpu,
+                                                           failure_context=failure_context)
                 atomic_json(suite / "summary.json", {"family": "MMRSAE", "trial": name,
                             "evaluation": args.evaluation, "backbones": summaries,
                             "requested_backbones": backbones, "complete": len(summaries) == len(backbones)})
                 exit_code = 0
                 del bundle
             except BaseException as error:
-                atomic_json(output / "failure.json", {"error": repr(error), "traceback": traceback.format_exc()})
+                atomic_json(output / "failure.json", {**failure_context, "error": repr(error),
+                            "traceback": traceback.format_exc()})
                 raise
             finally:
                 finish_wandb(exit_code=exit_code)

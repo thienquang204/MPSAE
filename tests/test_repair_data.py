@@ -1,5 +1,6 @@
 """Small synthetic checks for split integrity, cache memory use, and paired reporting."""
 import copy
+import io
 import json
 from pathlib import Path
 import shutil
@@ -7,6 +8,7 @@ import unittest
 from unittest import mock
 import uuid
 import warnings
+import zipfile
 
 try:
     import numpy as np
@@ -16,7 +18,7 @@ except ImportError:
 from compare_predictions import compare_predictions
 from make_plan import build_plan, load_config, matrix_rows, validate_config
 from prepare_splits import build_indices, prepare_splits
-from repair_data import exclusive_lock, inspect_npz, load_splits, open_feature_cache, sha256_file
+from repair_data import _read_npy_header, exclusive_lock, inspect_npz, load_splits, open_feature_cache, sha256_file
 
 
 class PlannerTests(unittest.TestCase):
@@ -88,6 +90,81 @@ class SplitAndCacheTests(unittest.TestCase):
         self.assertEqual(names, ["label.npy"])
         self.assertEqual(metadata["feature_shape"], [60, 7])
         np.testing.assert_array_equal(labels, self.labels)
+
+    def test_public_header_readers_preserve_versions_layout_and_byte_order(self):
+        class HeaderOnlyStream(io.BytesIO):
+            def __init__(self, contents, header_end):
+                super().__init__(contents)
+                self.header_end = header_end
+
+            def read(self, size=-1):
+                if size < 0 or self.tell() + size > self.header_end:
+                    raise AssertionError("Header inspection tried to read feature data")
+                return super().read(size)
+
+        for version in ((1, 0), (2, 0), (3, 0)):
+            for order in ("C", "F"):
+                for dtype in ("<f4", ">f4"):
+                    with self.subTest(version=version, order=order, dtype=dtype):
+                        array = np.array(self.features, dtype=dtype, order=order)
+                        encoded = io.BytesIO()
+                        np.lib.format.write_array(encoded, array, version=version, allow_pickle=False)
+                        contents = encoded.getvalue()
+                        header_end = len(contents) - array.nbytes
+                        stream = HeaderOnlyStream(contents, header_end)
+                        shape, fortran_order, actual_dtype = _read_npy_header(stream)
+                        self.assertEqual(shape, array.shape)
+                        self.assertEqual(fortran_order, order == "F")
+                        self.assertEqual(actual_dtype, array.dtype)
+                        self.assertEqual(stream.tell(), header_end)
+
+    def test_inspection_accepts_all_npy_versions_and_rejects_objects(self):
+        labels = io.BytesIO()
+        np.save(labels, self.labels, allow_pickle=False)
+        for version in ((1, 0), (2, 0), (3, 0)):
+            with self.subTest(version=version):
+                features = io.BytesIO()
+                np.lib.format.write_array(features, self.features, version=version, allow_pickle=False)
+                with zipfile.ZipFile(self.path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                    archive.writestr("data.npy", features.getvalue())
+                    archive.writestr("label.npy", labels.getvalue())
+                metadata, actual_labels = inspect_npz(self.path, hash_archive=False)
+                self.assertEqual(metadata["feature_shape"], list(self.features.shape))
+                np.testing.assert_array_equal(actual_labels, self.labels)
+
+        # A header alone is enough to reject object data, without unpickling.
+        objects = io.BytesIO()
+        np.lib.format.write_array_header_2_0(objects, {
+            "shape": self.features.shape, "fortran_order": False, "descr": "|O",
+        })
+        with zipfile.ZipFile(self.path, "w") as archive:
+            archive.writestr("data.npy", objects.getvalue())
+            archive.writestr("label.npy", labels.getvalue())
+        with self.assertRaisesRegex(ValueError, "numeric, two-dimensional"):
+            inspect_npz(self.path, hash_archive=False)
+
+    def test_v3_header_decodes_unicode_and_rejects_invalid_headers(self):
+        array = np.zeros(2, dtype=[("\u03bb", "<f4")])
+        encoded = io.BytesIO()
+        np.lib.format.write_array(encoded, array, version=(3, 0), allow_pickle=False)
+        encoded.seek(0)
+        self.assertEqual(_read_npy_header(encoded)[2], array.dtype)
+
+        magic = np.lib.format.magic(3, 0)
+        malformed = (
+            magic + b"\x01\x00",  # incomplete length
+            magic + (10_001).to_bytes(4, "little"),  # reject before reading body
+            magic + (100).to_bytes(4, "little") + b"{}",  # truncated body
+        )
+        for contents in malformed:
+            with self.subTest(contents=contents):
+                with self.assertRaises(ValueError):
+                    _read_npy_header(io.BytesIO(contents))
+        for body in (b"\xff", b"{}", b"{'shape': (-1, 2), 'fortran_order': False, 'descr': '<f4'}",
+                     b"{'shape': (1, 2), 'fortran_order': 0, 'descr': '<f4'}"):
+            with self.subTest(body=body):
+                with self.assertRaises(ValueError):
+                    _read_npy_header(io.BytesIO(magic + len(body).to_bytes(4, "little") + body))
 
     def test_disjoint_balanced_deterministic_pools(self):
         fingerprint = sha256_file(self.path)

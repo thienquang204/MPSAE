@@ -127,6 +127,7 @@ def download_file(url, destination, *, checksum=None, algorithm="sha256",
     partial = destination.with_name(destination.name + ".part")
     progress = destination.with_name(destination.name + ".download.json")
     with _lock(destination.with_name(destination.name + ".lock")):
+        retry_without_range = False
         for attempt in range(3):
             previous = json.loads(progress.read_text()) if progress.exists() else {}
             offset = partial.stat().st_size if partial.exists() else 0
@@ -138,7 +139,7 @@ def download_file(url, destination, *, checksum=None, algorithm="sha256",
                 return destination
             validator = previous.get("validator") if previous.get("url") == url else None
             headers = {"User-Agent": "frozen-crop-transfer/1.0", "Accept-Encoding": "identity"}
-            if offset and validator:
+            if offset and validator and not retry_without_range:
                 headers.update({"Range": f"bytes={offset}-", "If-Range": validator})
             else:
                 offset = 0
@@ -159,10 +160,16 @@ def download_file(url, destination, *, checksum=None, algorithm="sha256",
                     if expected_size and expected_size > max_bytes:
                         raise RuntimeError(f"Download exceeds byte limit: {expected_size}")
                     validator = response.headers.get("ETag") or response.headers.get("Last-Modified")
-                    atomic_json(progress, {"url": url, "validator": validator,
-                                           "expected_size": expected_size})
                     total, last_log = offset, time.monotonic()
                     with partial.open("ab" if offset else "wb") as output:
+                        retry_without_range = False
+                        # Truncate an obsolete partial before publishing the
+                        # new validator, so a crash cannot mix remote versions.
+                        if not offset:
+                            output.flush()
+                            os.fsync(output.fileno())
+                        atomic_json(progress, {"url": url, "validator": validator,
+                                               "expected_size": expected_size})
                         while True:
                             block = response.read(4 * 1024 * 1024)
                             if not block:
@@ -186,6 +193,11 @@ def download_file(url, destination, *, checksum=None, algorithm="sha256",
                                        "bytes": destination.stat().st_size, "complete": True})
                 return destination
             except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                # A complete but unchecked .part, or stale size metadata, can
+                # leave the next range beyond EOF. Fetch a fresh full response
+                # instead of repeating HTTP 416 or trusting length alone.
+                if isinstance(exc, urllib.error.HTTPError) and exc.code == 416 and offset:
+                    retry_without_range = True
                 if attempt == 2:
                     raise RuntimeError(f"Cannot download {url}: {exc}. Place the archive at "
                                        f"{destination}, or configure its URL and rerun.") from exc

@@ -6,6 +6,7 @@ No dataset download, model import, or feature extraction occurs here.
 """
 from __future__ import annotations
 
+import ast
 from contextlib import contextmanager
 import hashlib
 import json
@@ -96,6 +97,48 @@ def exclusive_lock(path):
             stream.close()
 
 
+def _read_npy_header(stream):
+    """Read only the NPY header using public NumPy APIs and the v3 format spec."""
+    import numpy as np
+
+    version = np.lib.format.read_magic(stream)
+    if version == (1, 0):
+        return np.lib.format.read_array_header_1_0(stream)
+    if version == (2, 0):
+        return np.lib.format.read_array_header_2_0(stream)
+    if version != (3, 0):
+        raise ValueError(f"Unsupported NPY format version: {version}")
+
+    # NumPy exposes no public v3 header reader. Its documented format uses a
+    # four-byte little-endian length followed by a UTF-8 Python-literal dict.
+    # Keep the same 10,000-byte header limit as the public v1/v2 readers.
+    length_bytes = stream.read(4)
+    if len(length_bytes) != 4:
+        raise ValueError("Truncated NPY v3 header length")
+    length = int.from_bytes(length_bytes, "little")
+    if length > 10_000:
+        raise ValueError("NPY v3 header exceeds the 10,000-byte limit")
+    header_bytes = stream.read(length)
+    if len(header_bytes) != length:
+        raise ValueError("Truncated NPY v3 header")
+    try:
+        header = ast.literal_eval(header_bytes.decode("utf-8"))
+    except (UnicodeError, SyntaxError, ValueError, RecursionError) as exc:
+        raise ValueError("Invalid NPY v3 header") from exc
+    if not isinstance(header, dict) or set(header) != {"shape", "fortran_order", "descr"}:
+        raise ValueError("NPY v3 header must contain shape, fortran_order, and descr")
+    shape = header["shape"]
+    if not isinstance(shape, tuple) or any(type(size) is not int or size < 0 for size in shape):
+        raise ValueError("NPY v3 shape must be a tuple of nonnegative integers")
+    if type(header["fortran_order"]) is not bool:
+        raise ValueError("NPY v3 fortran_order must be a boolean")
+    try:
+        dtype = np.lib.format.descr_to_dtype(header["descr"])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Invalid NPY v3 dtype descriptor") from exc
+    return shape, header["fortran_order"], dtype
+
+
 def inspect_npz(path, *, hash_archive=True):
     """Read data.npy's header, never its feature payload, and load numeric labels."""
     import numpy as np
@@ -107,9 +150,7 @@ def inspect_npz(path, *, hash_archive=True):
             if names.count(name) != 1:
                 raise ValueError(f"Expected exactly one {name} member in {path}")
         with archive.open("data.npy") as stream:
-            version = np.lib.format.read_magic(stream)
-            # _read_array_header handles NPY v1/v2/v3 while consuming only header bytes.
-            shape, fortran_order, dtype = np.lib.format._read_array_header(stream, version)
+            shape, fortran_order, dtype = _read_npy_header(stream)
         if len(shape) != 2 or dtype.hasobject or dtype.kind not in "fiu":
             raise ValueError("Expected a numeric, two-dimensional data array")
         with archive.open("label.npy") as stream:
