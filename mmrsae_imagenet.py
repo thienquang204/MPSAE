@@ -27,7 +27,8 @@ from wandb_tracking import (add_wandb_arguments, finish_wandb, init_wandb,
 
 
 PROTOCOL = "mmrsae-imagenet-manual-v1"
-VARIANTS = ("mmrsae", "mmrsae-rel", "mmrsae-wide", "mmrsae-annealed")
+# MMRSAE presets plus the repair-free mpsae/csr baselines (mmrsae.METHODS).
+VARIANTS = ("mmrsae", "mmrsae-rel", "mmrsae-wide", "mmrsae-annealed", "mpsae", "csr")
 SOURCE_FILES = ("mmrsae_imagenet.py", "mmrsae.py", "mmrsae_data.py", "mmrsae_gpu.py",
                 "mpsae_repair.py", "repair_data.py", "repair_runtime.py", "repair_benchmark.py",
                 "sparse_gpu_retrieval.py", "retrieval_timing.py", "wandb_tracking.py",
@@ -55,6 +56,8 @@ def build_parser():
     parser.add_argument("--ot-max-refine-iters", type=int, default=2000)
     parser.add_argument("--ot-tol", type=float, default=1e-4)
     parser.add_argument("--ot-microbatch", type=int, default=32)
+    parser.add_argument("--contrastive-weight", type=float, help="CSR NCL gamma; default 0.1 for ResNet-50, 1.0 for ResNet-18")
+    parser.add_argument("--contrastive-temperature", type=float, default=.2)
     parser.add_argument("--k-aux", type=int, default=512)
     parser.add_argument("--dead-steps", type=int, default=30)
     parser.add_argument("--anchor-count", type=int, default=1024)
@@ -136,11 +139,12 @@ def validate_args(args):
         raise ValueError("Require K <= hidden dimension and batch/OT group sizes >=2")
     if args.evaluation == "dev" and args.dev_size < 1:
         raise ValueError("--dev-size must be positive for development evaluation")
-    for name in ("lr", "adam_eps", "teacher_temperature", "student_temperature", "ot_eta", "ot_tol"):
+    for name in ("lr", "adam_eps", "teacher_temperature", "student_temperature", "ot_eta", "ot_tol",
+                 "contrastive_temperature"):
         value = getattr(args, name)
         if not math.isfinite(value) or value <= 0:
             raise ValueError(f"{name} must be finite and positive")
-    for name in ("weight_decay", "relation_weight", "ot_weight"):
+    for name in ("weight_decay", "relation_weight", "ot_weight", "contrastive_weight"):
         value = getattr(args, name)
         if value is not None and (not math.isfinite(value) or value < 0):
             raise ValueError(f"{name} must be finite and nonnegative")
@@ -171,9 +175,9 @@ def retrieval_config(args):
 def method_config(args, input_dim):
     from mmrsae import MMRSAEConfig
     return MMRSAEConfig(input_dim=input_dim, hidden_dim=args.hidden_dim, k=args.k, variant=args.variant,
-        rank=args.repair_rank, seed=args.seed, mask=True if args.mask is None else args.mask,
-        relation_weight=1. if args.relation_weight is None else args.relation_weight,
+        rank=args.repair_rank, seed=args.seed, mask=args.mask, relation_weight=args.relation_weight,
         ot_weight=args.ot_weight, mixture_weight=args.mixture_weight,
+        contrastive_weight=args.contrastive_weight, contrastive_temperature=args.contrastive_temperature,
         teacher_temperature=args.teacher_temperature, student_temperature=args.student_temperature,
         mass=args.ot_mass, eta=args.ot_eta, max_iters=args.ot_iters, max_refine_iters=args.ot_max_refine_iters,
         tol=args.ot_tol, microbatch=args.ot_microbatch, k_aux=args.k_aux, dead_steps=args.dead_steps,

@@ -54,6 +54,10 @@ def check_cuda_memory_budget(
         raise ValueError("Memory requests must be nonnegative and memory_fraction in (0, 1].")
     with torch.cuda.device(device):
         free_bytes, total_bytes = torch.cuda.mem_get_info(device)
+        if getattr(torch.cuda.get_device_properties(device), "is_integrated", False):
+            # Unified-memory GPUs (e.g. GB10) report only unused host RAM as
+            # free; reclaimable page cache is still available to allocations.
+            free_bytes = max(free_bytes, _host_available_bytes())
         cached_bytes = max(
             0, torch.cuda.memory_reserved(device) - torch.cuda.memory_allocated(device)
         )
@@ -67,6 +71,18 @@ def check_cuda_memory_budget(
             "Reduce batch/chunk sizes for temporary buffers or use a GPU with "
             "enough memory for the full index. No retrieval backend was changed."
         )
+
+
+def _host_available_bytes() -> int:
+    """Linux MemAvailable (free plus reclaimable cache), or 0 if unreadable."""
+    try:
+        with open("/proc/meminfo", encoding="ascii") as meminfo:
+            for line in meminfo:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
 
 
 def _load_extension() -> Any:

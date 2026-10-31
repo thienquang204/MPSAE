@@ -16,7 +16,6 @@ fi
 
 args=(
     --backbones "${MMRSAE_BACKBONES:-resnet50,resnet18}"
-    --variant "${MMRSAE_VARIANT:-mmrsae}"
     --k "${MMRSAE_K:-8}"
     --epochs "${MMRSAE_EPOCHS:-10}"
     --max-steps "${MMRSAE_MAX_STEPS:-500}"
@@ -51,6 +50,7 @@ optional_options=(
     MMRSAE_OT_MASS:--ot-mass MMRSAE_OT_ETA:--ot-eta MMRSAE_OT_ITERS:--ot-iters
     MMRSAE_OT_MAX_REFINE_ITERS:--ot-max-refine-iters MMRSAE_OT_TOL:--ot-tol
     MMRSAE_OT_MICROBATCH:--ot-microbatch MMRSAE_FEATURE_BATCH_SIZE:--feature-batch-size
+    MMRSAE_CONTRASTIVE_WEIGHT:--contrastive-weight MMRSAE_CONTRASTIVE_TEMPERATURE:--contrastive-temperature
     MMRSAE_WORKERS:--workers MMRSAE_ENCODE_BATCH_SIZE:--encode-batch-size
     MMRSAE_QUERY_BATCH_SIZE:--query-batch-size MMRSAE_GALLERY_CHUNK_SIZE:--gallery-chunk-size
     MMRSAE_SCORE_BUFFER_MIB:--score-buffer-mib MMRSAE_GPU_MEMORY_FRACTION:--gpu-memory-fraction
@@ -92,4 +92,21 @@ case "${MMRSAE_DENSE_REFERENCE:-0}" in
     *) echo "MMRSAE_DENSE_REFERENCE must be 0 or 1" >&2; exit 2 ;;
 esac
 
-exec "$python_bin" "$SCRIPT_DIR/mmrsae_imagenet.py" "${args[@]}" "$@"
+# MMRSAE_VARIANTS (comma-separated) runs several methods sequentially under
+# identical settings; otherwise the single MMRSAE_VARIANT is used. A failed
+# method is reported and the remaining methods still run.
+IFS=',' read -r -a variants <<< "${MMRSAE_VARIANTS:-${MMRSAE_VARIANT:-mmrsae}}"
+if (( ${#variants[@]} == 1 )); then
+    exec "$python_bin" "$SCRIPT_DIR/mmrsae_imagenet.py" "${args[@]}" --variant "${variants[0]// /}" "$@"
+fi
+failed=()
+for variant in "${variants[@]}"; do
+    variant="${variant// /}"
+    [[ -n "$variant" ]] || continue
+    echo "=== MMRSAE method: $variant ===" >&2
+    "$python_bin" "$SCRIPT_DIR/mmrsae_imagenet.py" "${args[@]}" --variant "$variant" "$@" || failed+=("$variant")
+done
+if (( ${#failed[@]} )); then
+    echo "MMRSAE methods failed: ${failed[*]}" >&2
+    exit 1
+fi
