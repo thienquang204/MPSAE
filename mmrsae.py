@@ -3,6 +3,10 @@
 The mathematical kernels remain shared with ``mpsae_repair``. This interface
 selects one manually configured method; it does not create an ablation grid,
 download data, run diagnostics, or start training on import.
+
+The ``mpsae`` and ``csr`` baselines reuse the same tied SAE, initialization,
+reconstruction terms and serving path without repair, masking or landmark KL,
+so they can be fitted and evaluated under the identical MMRSAE protocol.
 """
 from __future__ import annotations
 
@@ -12,6 +16,7 @@ from typing import Any
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from mpsae_repair import (
     LandmarkBank,
@@ -22,11 +27,35 @@ from mpsae_repair import (
     compact_codes,
     encode_repaired,
     estimate_alpha,
+    gradient_diagnostics,
+    reconstruction_terms,
     research_loss,
 )
 
 
 VARIANTS = ("mmrsae", "mmrsae-rel", "mmrsae-wide", "mmrsae-annealed")
+# Comparison methods without repair: original MPSAE (angular MMPOT) and CSR (NCL).
+BASELINES = ("mpsae", "csr")
+METHODS = VARIANTS + BASELINES
+
+
+def nonnegative_contrastive_loss(codes: torch.Tensor, temperature: float = 0.2) -> torch.Tensor:
+    """Released CSR two-view NCL, including L2 normalization and temperature.
+
+    Matches ``csr_vs_mmpot_imagenet.nonnegative_contrastive_loss``: both views
+    are the same deterministic code, as in the released CSR training loop.
+    """
+    batch = codes.shape[0]
+    identities = torch.arange(batch, device=codes.device).repeat(2)
+    normalized = F.normalize(torch.cat((codes.float(), codes.float()), dim=0), dim=-1)
+    logits = (normalized @ normalized.T) / temperature
+    same_sample = identities[:, None].eq(identities[None, :])
+    same_sample.fill_diagonal_(False)
+    negatives = ~identities[:, None].eq(identities[None, :])
+    positive_logits = logits.masked_fill(~same_sample, -torch.inf)
+    denominator_logits = logits.masked_fill(~(same_sample | negatives), -torch.inf)
+    return -(torch.logsumexp(positive_logits, dim=1)
+             - torch.logsumexp(denominator_logits, dim=1)).mean()
 
 
 @dataclass(frozen=True)
@@ -34,7 +63,8 @@ class MMRSAEConfig:
     """Resolved, serializable settings for exactly one MMRSAE fit.
 
     ``None`` means use the selected variant's default, rather than ignoring an
-    explicit zero. Set ``alpha`` to a positive value to fix it manually; otherwise
+    explicit zero. Baselines (``mpsae``, ``csr``) have no repair, so masking,
+    landmark KL and neighborhood OT are unavailable to them. Set ``alpha`` to a positive value to fix it manually; otherwise
     call :meth:`MMRSAE.initialize_repair` once on a training-only feature batch.
     The default reconstruction weights are shared with the original method.
     """
@@ -46,8 +76,8 @@ class MMRSAEConfig:
     rank: int = 32
     seed: int = 1227
     alpha: float | None = None
-    mask: bool = True
-    relation_weight: float = 1.0
+    mask: bool | None = None
+    relation_weight: float | None = None
     ot_weight: float | None = None
     mixture_weight: float | None = None
     auxiliary_mode: str | None = None
@@ -59,6 +89,8 @@ class MMRSAEConfig:
     max_refine_iters: int = 2000
     tol: float = 1e-4
     microbatch: int = 32
+    contrastive_weight: float | None = None
+    contrastive_temperature: float = 0.2
     k_aux: int = 512
     dead_steps: int = 30
     clean_probability: float = 0.2
@@ -66,17 +98,28 @@ class MMRSAEConfig:
     anchor_chunk_size: int = 128
 
     def __post_init__(self):
-        if self.variant not in VARIANTS:
-            raise ValueError(f"Unknown MMRSAE variant {self.variant!r}; choose {VARIANTS}")
+        if self.variant not in METHODS:
+            raise ValueError(f"Unknown MMRSAE variant {self.variant!r}; choose {METHODS}")
+        baseline = self.variant in BASELINES
         defaults = {
-            "ot_weight": 0.0 if self.variant == "mmrsae-rel" else 2.0,
-            "mixture_weight": 0.0 if self.variant == "mmrsae-rel" else 0.5,
+            "mask": not baseline,
+            "relation_weight": 0.0 if baseline else 1.0,
+            "ot_weight": 0.0 if self.variant in ("mmrsae-rel", "csr") else 2.0,
+            "mixture_weight": 0.0 if baseline or self.variant == "mmrsae-rel" else 0.5,
             "auxiliary_mode": {"mmrsae-wide": "wide", "mmrsae-annealed": "anneal"}.get(
                 self.variant, "baseline"),
+            # CSR gamma: 0.1 for FF2048 ResNet-50, 1.0 for the ResNet-18 study.
+            "contrastive_weight": (0.1 if self.input_dim == 2048 else 1.0) if self.variant == "csr" else 0.0,
         }
         for name, value in defaults.items():
             if getattr(self, name) is None:
                 object.__setattr__(self, name, value)
+        if baseline and (self.mask or self.relation_weight or self.mixture_weight
+                         or self.auxiliary_mode != "baseline"):
+            raise ValueError(f"Baseline {self.variant!r} has no repair, masking, landmark KL, "
+                             "neighborhood OT or auxiliary-budget schedule")
+        if self.variant != "csr" and self.contrastive_weight:
+            raise ValueError("Only the csr baseline uses the contrastive objective")
         for name in ("input_dim", "hidden_dim", "k", "rank", "max_iters", "max_refine_iters",
                      "microbatch", "anchor_chunk_size"):
             value = getattr(self, name)
@@ -96,7 +139,7 @@ class MMRSAEConfig:
             raise ValueError("max_refine_iters must be at least max_iters")
         if not isinstance(self.mask, bool):
             raise ValueError("mask must be a boolean")
-        for name in ("relation_weight", "ot_weight"):
+        for name in ("relation_weight", "ot_weight", "contrastive_weight"):
             value = getattr(self, name)
             if not math.isfinite(value) or value < 0:
                 raise ValueError(f"{name} must be finite and nonnegative")
@@ -104,7 +147,7 @@ class MMRSAEConfig:
             value = getattr(self, name)
             if not math.isfinite(value) or not 0 <= value <= 1:
                 raise ValueError(f"{name} must be in [0, 1]")
-        for name in ("teacher_temperature", "student_temperature", "eta", "tol"):
+        for name in ("teacher_temperature", "student_temperature", "eta", "tol", "contrastive_temperature"):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be finite and positive")
@@ -115,6 +158,10 @@ class MMRSAEConfig:
         if self.auxiliary_mode not in ("baseline", "wide", "anneal"):
             raise ValueError("auxiliary_mode must be baseline, wide, or anneal")
 
+    @property
+    def has_repair(self) -> bool:
+        return self.variant not in BASELINES
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -122,7 +169,8 @@ class MMRSAEConfig:
 class MMRSAE(nn.Module):
     """One reusable MMRSAE encoder, objective and checkpoint state.
 
-    All variants serve a repaired nonnegative Top-K code. Training may erase
+    All MMRSAE variants serve a repaired nonnegative Top-K code; the baselines
+    serve the plain SAE Top-K code and set ``repair`` to ``None``. Training may erase
     initial coefficients, but inference and landmark refresh always use clean
     initial codes. Transport and landmark profiles are training-only.
 
@@ -141,11 +189,12 @@ class MMRSAE(nn.Module):
             self.sae = ResearchSAE(config.input_dim, config.hidden_dim, config.dead_steps)
         self.repair = RepairModule(config.input_dim, config.hidden_dim, config.rank,
                                    alpha=config.alpha if config.alpha is not None else 1.0,
-                                   seed=config.seed)
-        self.register_buffer("repair_initialized", torch.tensor(config.alpha is not None))
+                                   seed=config.seed) if config.has_repair else None
+        ready = config.alpha is not None or not config.has_repair
+        self.register_buffer("repair_initialized", torch.tensor(ready))
         # A Python flag avoids a device synchronization on every encode/loss.
         # It is restored explicitly with the registered buffer when loading.
-        self._repair_ready = config.alpha is not None
+        self._repair_ready = ready
 
     @property
     def needs_bank(self) -> bool:
@@ -172,6 +221,8 @@ class MMRSAE(nn.Module):
         of the learned repair or accuracy. Never recalibrate after resuming:
         alpha is part of the saved model and changing it changes the method.
         """
+        if self.repair is None:
+            return {"alpha": None, "alpha_source": "not_applicable_without_repair"}
         if self._repair_ready:
             return {"alpha": float(self.repair.alpha), "alpha_source": "configured_or_restored"}
         if training_features.ndim != 2 or training_features.shape[1] != self.config.input_dim:
@@ -240,6 +291,8 @@ class MMRSAE(nn.Module):
             raise ValueError("Training row IDs must align with feature rows")
         cfg = self.config
         budget = auxiliary_budget(cfg.k, cfg.hidden_dim, step, total_steps, cfg.auxiliary_mode)
+        if cfg.variant == "csr":
+            return self._csr_loss(x, budget, diagnostics=diagnostics, update_activity=update_activity)
         return research_loss(
             self.sae, x, cfg.k, repair=self.repair, mask=cfg.mask,
             mask_generator=mask_generator, auxiliary_budget=budget, bank=bank, row_ids=row_ids,
@@ -252,3 +305,33 @@ class MMRSAE(nn.Module):
             clean_probability=cfg.clean_probability, erase_probability=cfg.erase_probability,
             anchor_chunk_size=cfg.anchor_chunk_size,
         )
+
+    def _csr_loss(self, x, budget, *, diagnostics, update_activity):
+        """CSR: shared reconstruction terms plus gamma * NCL, without transport.
+
+        Activity follows the released CSR order (K, 4K, then K again for the
+        duplicate NCL view); the dead mask is read after the first K update.
+        """
+        cfg = self.config
+        reconstruction, stats, views = reconstruction_terms(
+            self.sae, x, cfg.k, budget, update_activity=False, k_aux=cfg.k_aux)
+        z = views["final_k"]
+        if not bool(torch.isfinite(z).all()) or bool(z.gt(0).sum(1).eq(0).any()):
+            raise ValueError("invalid final code in final_k")
+        if update_activity:
+            for view in ("raw_k", "raw_4k", "raw_k"):
+                self.sae.update_activity(views[view])
+        contrastive = nonnegative_contrastive_loss(z, cfg.contrastive_temperature)
+        total = reconstruction + cfg.contrastive_weight * contrastive
+        if not bool(torch.isfinite(total)):
+            raise FloatingPointError("nonfinite CSR objective")
+        components = {"reconstruction": reconstruction,
+                      "contrastive": cfg.contrastive_weight * contrastive}
+        stats.update({"loss_total": total, "loss_contrastive_unweighted": contrastive,
+                      "weighted_contrastive": cfg.contrastive_weight * contrastive})
+        views["component_losses"] = components
+        views["profiles"] = None
+        if diagnostics:
+            stats.update(gradient_diagnostics(components, views))
+            stats["active_unit_coverage"] = z.gt(0).any(0).float().mean()
+        return total, stats, views

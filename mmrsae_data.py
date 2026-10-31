@@ -275,14 +275,18 @@ def _raw_split(split, args):
             raise RuntimeError(f"Pinned ImageNet release has no recognized {split} Parquet shards")
         with _offline_dataset(not args.download):
             try:
+                # The repo metadata lists train/validation/test, so the builder's
+                # split check rejects a single-split manifest; _labels() below
+                # verifies the exact row count and class vocabulary instead.
                 dataset = load_dataset(IMAGENET_REPO, split=split, revision=release["revision"],
-                                       data_files={split: shards},
+                                       data_files={split: shards}, verification_mode="no_checks",
                                        cache_dir=str(args.data_root), token=os.environ.get("HF_TOKEN") or True,
                                        download_config=DownloadConfig(max_retries=5, local_files_only=not args.download))
             except Exception as error:
                 raise RuntimeError(
-                    f"Cannot prepare ImageNet {split}. Accept https://huggingface.co/datasets/{IMAGENET_REPO} "
-                    "access conditions and authenticate using HF_TOKEN or `hf auth login`; no alternative dataset is substituted."
+                    f"Cannot prepare ImageNet {split} ({type(error).__name__}: {error}). If this is an access error, "
+                    f"accept https://huggingface.co/datasets/{IMAGENET_REPO} access conditions and authenticate using "
+                    "HF_TOKEN or `hf auth login`; no alternative dataset is substituted."
                 ) from error
         if not {"image", "label"}.issubset(dataset.column_names):
             raise ValueError("ImageNet source must contain image and label columns")

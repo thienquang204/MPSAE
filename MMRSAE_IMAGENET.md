@@ -25,6 +25,12 @@ The supplied presets are:
 | `mmrsae-rel` | Same | Enabled | Disabled | 4K |
 | `mmrsae-wide` | Same | Enabled | Mixed cost | min(h, max(64, 8K)) |
 | `mmrsae-annealed` | Same | Enabled | Mixed cost | Wide budget decreases to 4K over the first 70% of fitting |
+| `mpsae` (baseline) | Same tied SAE, no repair or masking | Disabled | Angular cost only | 4K |
+| `csr` (baseline) | Same tied SAE, no repair or masking; adds CSR NCL (gamma 0.1 for ResNet-50, 1.0 for ResNet-18, temperature 0.2) | Disabled | Disabled | 4K |
+
+The two baselines share the SAE initialization, optimizer, data order, budget
+and endpoint retrieval with the MMRSAE presets, so their scores are directly
+comparable within one protocol. They serve the plain Top-K code.
 
 The served budget remains K for every preset. K and 2K use repair; the third
 transport view is raw 4K. The wide budget replaces the existing reconstruction
