@@ -35,7 +35,7 @@ Teacher and student profiles describe similarities to the same ordered bank
 of 1,024 training examples. A teacher-to-student KL supplies a simpler direct
 distillation control. The proposed neighborhood cost is
 `1 - sum_r (pK_i[r] * p2K_j[r] * teacher_l[r])**(1/3)`.
-The mixed arm combines this with the original angular cost at weights 0.5/0.5
+The mixed arm combines this with the original angular cost at weights 0.8/0.2
 **before one partial-OT solve**. Teacher profiles and clean student keys are
 detached; gradients pass through the final sparse query codes. Banks and OT
 are absent from deployed inference.

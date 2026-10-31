@@ -184,7 +184,7 @@ These are source-level optimizations, with no measured speedup claimed.
 | M | Yes | Yes | No | Original | 4K |
 | O | Yes | Yes | Yes | Original | 4K |
 | S | Yes | Yes | Yes | Off | 4K |
-| N | Yes | Yes | Yes | 0.5 original + 0.5 neighborhood | 4K |
+| N | Yes | Yes | Yes | 0.8 original + 0.2 neighborhood | 4K |
 | F | Yes | Yes | Yes | Same as N | max(64,8K), capped at h |
 | A | Yes | Yes | Yes | Same as N | F budget linearly to 4K over 70% of updates |
 

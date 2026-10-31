@@ -380,16 +380,78 @@ def circular_variance_cost(z1, z2, z3):
 
 
 def neighborhood_cost(log_p, log_q, teacher_log):
-    # The largest intermediate is n*n*M, never n*n*n*M. Logs avoid a
-    # singular derivative through cube-root probabilities near underflow.
-    a, b, c = (log_p / 3).exp(), (log_q / 3).exp(), (teacher_log.detach() / 3).exp()
-    pairs = (a[:, None, :] * b[None, :, :]).flatten(0, 1)
-    return 1 - (pairs @ c.T).reshape(len(a), len(b), len(c))
+    """Bounded three-way Hellinger affinity distance over landmark profiles.
+
+    C[i,j,k] = 1 - sum_m (p[i,m] q[j,m] teacher[k,m])**(1/3).
+    Holder's inequality bounds the affinity by one for normalized profiles.
+    Renormalizing in log space makes that contract independent of accumulated
+    log-softmax roundoff and arbitrary row offsets. Exact zero probabilities
+    may be represented by -inf, but empty supports, NaNs and +inf are invalid.
+    The teacher is constant; both student profiles remain differentiable.
+    """
+    profiles = (log_p, log_q, teacher_log)
+    if any(not isinstance(value, torch.Tensor) for value in profiles):
+        raise TypeError("Neighborhood profiles must be floating-point tensors")
+    if any(value.ndim != 2 or not value.shape[0] or not value.shape[1] for value in profiles):
+        raise ValueError("Neighborhood profiles must be nonempty [rows, landmarks] matrices")
+    if any(not value.is_floating_point() for value in profiles):
+        raise TypeError("Neighborhood log-probabilities must be floating-point")
+    if any(value.device != log_p.device for value in profiles):
+        raise ValueError("Neighborhood profiles must share one device")
+    if any(value.shape[1] != log_p.shape[1] for value in profiles):
+        raise ValueError("Neighborhood profiles must share the same landmark columns")
+    # Keep double precision for reference/gradient checks; never accumulate a
+    # 1,024-landmark affinity in float16/bfloat16 or under autocast.
+    dtype = torch.float64 if any(value.dtype == torch.float64 for value in profiles) else torch.float32
+    with torch.autocast(device_type=log_p.device.type, enabled=False):
+        values = [value.to(dtype=dtype) for value in (log_p, log_q, teacher_log.detach())]
+        valid = torch.stack([(~(torch.isnan(value) | torch.isposinf(value)).any())
+                             & torch.isfinite(value).any(1).all() for value in values]).all()
+        if not bool(valid):
+            raise ValueError("Each neighborhood profile needs finite support and no NaN/+inf entries")
+        roots = []
+        for value in values:
+            shifted = value - value.max(dim=1, keepdim=True).values
+            normalized = shifted - torch.logsumexp(shifted, dim=1, keepdim=True)
+            roots.append((normalized / 3).exp())
+        a, b, c = roots
+        # Largest intermediate is rows_p*rows_q*M, never n*n*n*M.
+        pairs = (a[:, None, :] * b[None, :, :]).flatten(0, 1)
+        affinity = (pairs @ c.T).reshape(len(a), len(b), len(c))
+        if not bool(torch.isfinite(affinity).all()):
+            raise FloatingPointError("Nonfinite neighborhood affinity")
+        # GEMM reduction can overshoot one by a few float32 ulps even when
+        # profiles are identical. Project the affinity to its mathematical
+        # range before subtraction, so an OT kernel never sees negative cost.
+        return 1 - affinity.clamp(0., 1.)
 
 
 def entropy_term(x):
     positive = x > 0
     return (x[positive] * (x[positive].log() - 1)).sum()
+
+
+def _validate_transport_problem(cost, mass, eta, max_iters, tol, *, batched=False):
+    """Reject invalid transport inputs before forming an exponential kernel.
+
+    These solvers implement the declared nonnegative angular/neighborhood
+    costs. Their exponent clipping is not a solver for arbitrary signed costs.
+    In particular, NaN residuals must not slip through comparisons with tol.
+    """
+    rank = 4 if batched else 3
+    sides = cost.shape[1:] if batched else cost.shape
+    if cost.ndim != rank or len(set(sides)) != 1 or not sides or sides[0] < 2 or (batched and cost.shape[0] < 1):
+        raise ValueError("expected [groups,n,n,n] costs" if batched else "expected cubic cost of side >=2")
+    if not cost.is_floating_point():
+        raise TypeError("transport costs must use a floating-point dtype")
+    if not bool((torch.isfinite(cost) & cost.ge(0)).all()):
+        if not bool(torch.isfinite(cost).all()):
+            raise ValueError("nonfinite transport cost")
+        raise ValueError("negative transport cost; angular/neighborhood costs must be nonnegative")
+    if (not math.isfinite(mass) or not 0 < mass < 1 or
+            not math.isfinite(eta) or eta <= 0 or not math.isfinite(tol) or tol <= 0 or
+            isinstance(max_iters, bool) or not isinstance(max_iters, int) or max_iters < 1):
+        raise ValueError("partial solver requires finite 0<mass<1, positive finite eta/tol, and positive integer max_iters")
 
 
 @torch.no_grad()
@@ -402,10 +464,9 @@ def greenkhorn_mmpot(cost, mass, eta, max_iters, tol, *, solver_dtype=torch.floa
     for tiny finite-difference reference calculations, never the training default.
     Feasibility is independently checked by matching_gap_from_cost.
     """
-    if cost.ndim != 3 or len(set(cost.shape)) != 1 or len(cost) < 2:
-        raise ValueError("expected cubic cost of side >=2")
-    if not 0 < mass < 1 or eta <= 0 or max_iters < 1 or tol <= 0:
-        raise ValueError("partial solver requires 0<mass<1 and positive settings")
+    _validate_transport_problem(cost, mass, eta, max_iters, tol)
+    if solver_dtype not in (torch.float32, torch.float64):
+        raise ValueError("solver_dtype must be float32 or float64")
     n = len(cost)
     p = torch.full((n,), 1/n, device=cost.device, dtype=solver_dtype)
     kernel = torch.exp((-cost.to(solver_dtype)/eta).clamp(-60., 0.))
@@ -457,10 +518,7 @@ def batched_greenkhorn_mmpot(costs, mass, eta, max_iters, tol, *, stable_kl=Fals
     Groups retain separate scales, convergence decisions, and worst constraints.
     This batches the solver work; it does not couple examples across groups.
     """
-    if costs.ndim != 4 or len(set(costs.shape[1:])) != 1 or costs.shape[1] < 2:
-        raise ValueError("expected [groups,n,n,n] costs")
-    if not 0 < mass < 1 or eta <= 0 or max_iters < 1 or tol <= 0:
-        raise ValueError("invalid solver settings")
+    _validate_transport_problem(costs, mass, eta, max_iters, tol, batched=True)
     groups, n = costs.shape[:2]
     p = costs.new_full((groups, n), 1/n, dtype=torch.float32)
     kernel = torch.exp((-costs.float()/eta).clamp(-60., 0.))
@@ -515,29 +573,57 @@ def batched_greenkhorn_mmpot(costs, mass, eta, max_iters, tol, *, stable_kl=Fals
 def matching_gap_from_cost(cost, *, mass=.9, eta=.2, max_iters=100, tol=1e-4,
                            require_feasible=True, max_refine_iters=2000, solved=None,
                            solver_dtype=torch.float32, stable_kl=False):
-    if not bool(torch.isfinite(cost).all()):
-        raise ValueError("nonfinite transport cost")
+    _validate_transport_problem(cost, mass, eta, max_iters, tol)
+    if isinstance(max_refine_iters, bool) or not isinstance(max_refine_iters, int) or max_refine_iters < 1:
+        raise ValueError("max_refine_iters must be a positive integer")
     plan, slacks, stats = (greenkhorn_mmpot(cost.detach(), mass, eta, max_iters, tol,
                                           solver_dtype=solver_dtype, stable_kl=stable_kl)
                            if solved is None else solved)
     stats.setdefault("refinement_iterations", 0)
-    if require_feasible and not stats["refinement_iterations"] and max(stats["mass_error"], stats["cap_violation"]) > tol:
+    stats.setdefault("objective_refinement", 0)
+
+    def residual_error(record):
+        residuals = [float(record[name]) for name in ("mass_error", "cap_violation")]
+        return max(residuals) if all(math.isfinite(value) and value >= 0 for value in residuals) else float("inf")
+
+    def refine(record, reason):
         plan, slacks, refined = greenkhorn_mmpot(cost.detach(), mass, eta, max_refine_iters,
                                                 min(1e-10, tol*tol*.01),
                                                 solver_dtype=solver_dtype, stable_kl=True)
         refined["refinement_iterations"] = refined["iterations"]
-        refined["iterations"] += stats["iterations"]
-        stats = refined
-    if require_feasible and max(stats["mass_error"], stats["cap_violation"]) > tol:
+        refined["iterations"] += int(record.get("iterations", 0))
+        refined["objective_refinement"] = int(reason == "negative_matching_gap")
+        return plan, slacks, refined
+
+    if require_feasible and not stats["refinement_iterations"] and residual_error(stats) > tol:
+        plan, slacks, stats = refine(stats, "marginal_feasibility")
+    if require_feasible and residual_error(stats) > tol:
         raise RuntimeError(f"partial OT is infeasible after bounded refinement: {stats}")
     diagonal = torch.arange(len(cost), device=cost.device)
-    gradient_gap = mass*cost[diagonal, diagonal, diagonal].mean() - (cost*plan.detach()).sum()
     ref_plan = cost.new_full((len(cost),), mass/len(cost))
     ref_slack = cost.new_full((len(cost),), (1-mass)/len(cost))
-    entropy = entropy_term(ref_plan)+3*entropy_term(ref_slack)
-    entropy = entropy - entropy_term(plan) - sum(entropy_term(q) for q in slacks)
-    loss = gradient_gap + eta*entropy.detach()
-    stats["negative_gap"] = float(loss.detach()) < -max(tol, 1e-6)
+
+    def gap_value(current_plan, current_slacks):
+        gradient_gap = mass*cost[diagonal, diagonal, diagonal].mean() - (cost*current_plan.detach()).sum()
+        entropy = entropy_term(ref_plan)+3*entropy_term(ref_slack)
+        entropy = entropy - entropy_term(current_plan) - sum(entropy_term(q) for q in current_slacks)
+        loss = gradient_gap + eta*entropy.detach()
+        if not bool(torch.isfinite(loss)):
+            raise FloatingPointError("nonfinite estimated OT gap")
+        return loss
+
+    loss = gap_value(plan, slacks)
+    gap_tolerance = max(tol, 1e-6)
+    # Marginal feasibility alone does not certify an accurate optimizer. A
+    # feasible but suboptimal plan can make the estimated reference gap negative.
+    # Retry the actual objective before declaring failure; never hide the issue
+    # by clipping a materially negative gap or changing its envelope gradient.
+    if require_feasible and float(loss.detach()) < -gap_tolerance and not stats["refinement_iterations"]:
+        plan, slacks, stats = refine(stats, "negative_matching_gap")
+        if residual_error(stats) > tol:
+            raise RuntimeError(f"partial OT is infeasible after bounded refinement: {stats}")
+        loss = gap_value(plan, slacks)
+    stats["negative_gap"] = float(loss.detach()) < -gap_tolerance
     stats["diagonal_plan_mass"] = float(plan[diagonal, diagonal, diagonal].sum())
     if require_feasible and stats["negative_gap"]:
         raise RuntimeError(f"materially negative estimated OT gap: {float(loss.detach())}")
@@ -595,11 +681,15 @@ def mixed_matching_gap(z1, z2, z3, *, profiles=None, mixture_weight=0., mass=.9,
                           solved=solved_groups.get(position))
         losses.append(loss)
         record.update({"cost0_mean": float(old.detach().mean()),
+                       "cost0_min": float(old.detach().min()), "cost0_max": float(old.detach().max()),
+                       "costmix_min": float(cost.detach().min()), "costmix_max": float(cost.detach().max()),
                        "costmix_std": float(cost.detach().std(unbiased=False)),
                        "cost0_std_over_eta": float(old.detach().std(unbiased=False))/eta,
                        "costmix_std_over_eta": float(cost.detach().std(unbiased=False))/eta})
         if new is not None:
             record["costnbr_mean"] = float(new.detach().mean())
+            record["costnbr_min"] = float(new.detach().min())
+            record["costnbr_max"] = float(new.detach().max())
             record["costnbr_std_over_eta"] = float(new.detach().std(unbiased=False))/eta
             ids = torch.arange(len(new), device=new.device)
             record["diagonal_affinity"] = float((1-new[ids, ids, ids]).detach().mean())
@@ -615,6 +705,11 @@ def mixed_matching_gap(z1, z2, z3, *, profiles=None, mixture_weight=0., mass=.9,
     if not losses:
         raise ValueError("no valid OT groups")
     stats = {key: sum(float(item[key]) for item in records)/len(records) for key in records[0]}
+    for key in records[0]:
+        if key.startswith("cost") and key.endswith("_min"):
+            stats[key] = min(item[key] for item in records)
+        elif key.startswith("cost") and key.endswith("_max"):
+            stats[key] = max(item[key] for item in records)
     stats["mass_error_max"] = max(item["mass_error"] for item in records)
     stats["cap_violation_max"] = max(item["cap_violation"] for item in records)
     context = {}
@@ -657,10 +752,12 @@ def research_loss(sae, x, k, *, repair=None, mask=False, mask_generator=None,
               views["raw_4k"], profiles=profiles, mixture_weight=mixture_weight, mass=mass,
               eta=eta, max_iters=max_iters, tol=tol, microbatch=microbatch,
               require_feasible=require_feasible, max_refine_iters=max_refine_iters, diagnostics=diagnostics)
+        cost_fields = {"cost0_mean", "costnbr_mean", "costmix_std", "cost0_min", "cost0_max",
+                       "costnbr_min", "costnbr_max", "costmix_min", "costmix_max"}
         stats.update({"solver_"+key: value for key, value in solver_stats.items()
-                      if key not in ("cost0_mean", "costnbr_mean", "costmix_std")})
+                      if key not in cost_fields})
         stats.update({key: value for key, value in solver_stats.items()
-                      if key in ("cost0_mean", "costnbr_mean", "costmix_std")})
+                      if key in cost_fields})
         stats["solver_capacity_violation"] = solver_stats["cap_violation"]
         if diagnostics:
             components.update({key: ot_weight*context[key] for key in ("old_ot", "new_ot")})

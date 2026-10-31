@@ -1,5 +1,21 @@
 # Validation status for MMRSAE and the repair research profile
 
+The October 31, 2026 neighborhood-cost correction used source review and small
+CPU checks with the existing PyTorch 2.7.1+cpu environment. The previous cost
+produced negative values down to approximately -3.6e-7 for identical normalized
+1,024-landmark profiles; the corrected normalized, bounded affinity returned
+no negative entries on that reproduction. Mixed MMRSAE presets now use rho=0.2.
+The 15 neighborhood-cost tests and 11 transport-safety tests passed, including
+float64 reference/gradient checks, extreme/masked profiles, invalid inputs,
+bounded negative-gap refinement, and scalar/batched solver agreement. All 16
+existing mathematical checks passed. The existing 30 data/runner/runtime tests
+also passed; one cache test initially hit Windows' path-length limit and was
+rerun successfully in a short temporary directory. A small mixed-cost CPU
+forward/backward and solve at rho=0.2 also passed. No installation, dataset
+download, ImageNet fitting, or CUDA test was performed. These checks do not
+establish convergence for every entropy/conditioning setting or server build.
+The source-only records below describe earlier updates, not this correction.
+
 The Docker Compose addition was checked with Docker Compose v2.38.1 using
 `docker compose config --format json`. The check supplied the Compose manifest
 through standard input, substituting only its private `.env` file path with

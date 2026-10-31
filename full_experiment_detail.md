@@ -121,7 +121,7 @@ If you alter the method after viewing that gate, those queries become developmen
 
 ## 4. Exact pilot arm matrix
 
-The table is the complete arm definition. `Old` means the original angular cost. `Mixed` means 0.5 C0 + 0.5 Cnbr inside one partial-OT solve.
+The table is the complete arm definition. `Old` means the original angular cost. `Mixed` means 0.8 C0 + 0.2 Cnbr inside one partial-OT solve.
 
 | ID | Repair K and 2K | Active-code erasure | Direct KL | OT cost | Raw auxiliary budget | Purpose |
 |---|---|---|---|---|---|---|
@@ -204,7 +204,7 @@ Save every 25 branch updates and at branch endpoints. These intermediate checkpo
 | Student temperature | 0.1 | Explicit starting value |
 | Key refresh | Before update 0 and every 25 updates | Limits drift without a new EMA model |
 | Direct KL coefficient | 1 | Same in O/S/N/F/A |
-| Mixture weight | 0.5 | One new-cost setting, no broad sweep |
+| Mixture weight | 0.2 | One new-cost setting, no broad sweep |
 | Mask clean probability | 0.2 per row | Trains some exact deployment-path examples |
 | Mask erase probability | 0.25 per active coefficient | Moderate corruption |
 | Repair depth / rank | 1 / 32 | Small initial encoding overhead |

@@ -105,7 +105,7 @@ class MMRSAEConfig:
             "mask": not baseline,
             "relation_weight": 0.0 if baseline else 1.0,
             "ot_weight": 0.0 if self.variant in ("mmrsae-rel", "csr") else 2.0,
-            "mixture_weight": 0.0 if baseline or self.variant == "mmrsae-rel" else 0.5,
+            "mixture_weight": 0.0 if baseline or self.variant == "mmrsae-rel" else 0.2,
             "auxiliary_mode": {"mmrsae-wide": "wide", "mmrsae-annealed": "anneal"}.get(
                 self.variant, "baseline"),
             # CSR gamma: 0.1 for FF2048 ResNet-50, 1.0 for the ResNet-18 study.

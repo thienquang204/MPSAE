@@ -325,7 +325,7 @@ $$
 C^{\mathrm{mix}}
 =
 (1-\omega)C^0+\omega C^{\mathrm{nbr}},
-\qquad \omega=0.5\ \text{initially}.
+\qquad \omega=0.2\ \text{by default}.
 }
 $$
 
@@ -333,7 +333,7 @@ The third axis refers to image ℓ in both terms: its raw 4K code enters C0 and 
 
 Use one partial-OT solve per group for the combined cost. This is not the sum of two independently solved matching gaps. Do not add a broad final clamp that can suppress combined-cost gradients.
 
-A comparison of ω=0 and ω=0.5 tests the proposed mixture. Testing ω=1 is optional and answers whether the old cost can be removed.
+A comparison of ω=0 and ω=0.2 tests the configured mixture. Any different mixture weight is a separately declared experiment.
 
 ### 6.4 Partial matching gap and its gradient
 

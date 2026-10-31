@@ -32,6 +32,10 @@ The two baselines share the SAE initialization, optimizer, data order, budget
 and endpoint retrieval with the MMRSAE presets, so their scores are directly
 comparable within one protocol. They serve the plain Top-K code.
 
+Mixed MMRSAE presets use rho=0.2: `0.8 * angular_cost + 0.2 * neighborhood_cost`.
+An empty `MMRSAE_MIXTURE_WEIGHT` retains these method-specific defaults; MPSAE
+uses angular cost only, and CSR and `mmrsae-rel` do not use transport.
+
 The served budget remains K for every preset. K and 2K use repair; the third
 transport view is raw 4K. The wide budget replaces the existing reconstruction
 branch with weight 1/8; it does not add a second wide reconstruction term.
@@ -39,6 +43,19 @@ All presets produce clean repaired codes for both gallery and query at
 inference. Masking, landmark profiles, KL and transport are training work.
 There is no transport solver in retrieval. Manual weight and masking overrides
 are recorded separately from the preset name.
+
+The default mixed cost is `0.8 * angular + 0.2 * neighborhood` (rho=0.2).
+The neighborhood term is `1 - sum((p * q * teacher) ** (1/3))` over shared
+landmarks. Profiles are normalized in log space, computed in at least FP32
+with autocast disabled, and their affinity is projected to its mathematical
+[0, 1] interval before subtraction. Invalid profiles fail before transport;
+the teacher remains detached and gradients flow through both students.
+`cost0_min/max`, `costnbr_min/max`, and `costmix_min/max` record the actual
+cost ranges across OT groups. A negative estimated matching gap is a separate
+solver-quality issue, even when every entry of the cost tensor is nonnegative.
+An explicit `MMRSAE_MIXTURE_WEIGHT` or `--mixture-weight` overrides the preset;
+leave the environment setting empty to use rho=0.2 for the mixed methods and
+zero for the angular-only/no-OT controls.
 
 **Launching and setting parameters.** For Docker, copy
 [mmrsae.env.example](mmrsae.env.example) to `.env`, set the Hugging Face token
