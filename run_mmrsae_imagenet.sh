@@ -86,6 +86,11 @@ case "${MMRSAE_TIMED_RETRIEVAL:-1}" in
     0) args+=(--no-timed-retrieval) ;;
     *) echo "MMRSAE_TIMED_RETRIEVAL must be 0 or 1" >&2; exit 2 ;;
 esac
+case "${MMRSAE_ALLOW_EMPTY_CODES:-1}" in
+    1) args+=(--allow-empty-codes) ;;
+    0) args+=(--no-allow-empty-codes) ;;
+    *) echo "MMRSAE_ALLOW_EMPTY_CODES must be 0 or 1" >&2; exit 2 ;;
+esac
 case "${MMRSAE_DENSE_REFERENCE:-0}" in
     1) args+=(--dense-reference) ;;
     0) ;;

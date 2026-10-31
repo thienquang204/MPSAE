@@ -32,6 +32,20 @@ The two baselines share the SAE initialization, optimizer, data order, budget
 and endpoint retrieval with the MMRSAE presets, so their scores are directly
 comparable within one protocol. They serve the plain Top-K code.
 
+**All-zero codes.** The angular nested-view cost is zero on every code with at
+most K positive coefficients, so the OT term can shrink the support, and a code
+with max preactivation <= 0 is all zero (ReLU then passes no gradient). As in
+the original MPSAE runner, `--allow-empty-codes` (default; `MMRSAE_ALLOW_EMPTY_CODES=1`)
+does not stop on such codes and does not change any objective: they keep a zero
+direction in the OT cost and zero cosine to landmarks, stay zero rows in the
+retrieval index, and an empty query is recorded as a miss. Training logs
+`final_nnz_min`, `final_nnz_below_k_fraction`, `final_zero_code_fraction`,
+`raw_kth_preactivation_nonpositive_fraction`, `tail_ratio_2k_mean`,
+`tail_ratio_4k_mean` and `encoder_bias_mean`; retrieval reports
+`empty_gallery_codes`, `empty_query_codes` and `empty_query_fraction`.
+`--no-allow-empty-codes` restores the strict abort. The separate repair profile
+keeps its strict check.
+
 Mixed MMRSAE presets use rho=0.2: `0.8 * angular_cost + 0.2 * neighborhood_cost`.
 An empty `MMRSAE_MIXTURE_WEIGHT` retains these method-specific defaults; MPSAE
 uses angular cost only, and CSR and `mmrsae-rel` do not use transport.

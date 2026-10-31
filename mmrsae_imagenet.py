@@ -58,6 +58,9 @@ def build_parser():
     parser.add_argument("--ot-microbatch", type=int, default=32)
     parser.add_argument("--contrastive-weight", type=float, help="CSR NCL gamma; default 0.1 for ResNet-50, 1.0 for ResNet-18")
     parser.add_argument("--contrastive-temperature", type=float, default=.2)
+    parser.add_argument("--allow-empty-codes", action=argparse.BooleanOptionalAction, default=True,
+                        help="Keep training/evaluating through all-zero codes as the original MPSAE runner does; "
+                             "they are counted, and empty queries count as retrieval misses")
     parser.add_argument("--k-aux", type=int, default=512)
     parser.add_argument("--dead-steps", type=int, default=30)
     parser.add_argument("--anchor-count", type=int, default=1024)
@@ -169,7 +172,8 @@ def retrieval_config(args):
     return {"query_batch_size": args.query_batch_size, "gallery_chunk_size": args.gallery_chunk_size,
             "score_buffer_mib": args.score_buffer_mib, "faiss_temp_memory_mib": args.faiss_temp_memory_mib,
             "gpu_memory_fraction": args.gpu_memory_fraction, "warmup": args.retrieval_warmup,
-            "repeats": args.retrieval_repeats, "encode_batch_size": args.encode_batch_size}
+            "repeats": args.retrieval_repeats, "encode_batch_size": args.encode_batch_size,
+            "allow_empty_codes": args.allow_empty_codes}
 
 
 def method_config(args, input_dim):
@@ -182,7 +186,7 @@ def method_config(args, input_dim):
         mass=args.ot_mass, eta=args.ot_eta, max_iters=args.ot_iters, max_refine_iters=args.ot_max_refine_iters,
         tol=args.ot_tol, microbatch=args.ot_microbatch, k_aux=args.k_aux, dead_steps=args.dead_steps,
         clean_probability=args.clean_probability, erase_probability=args.erase_probability,
-        anchor_chunk_size=args.anchor_chunk_size)
+        anchor_chunk_size=args.anchor_chunk_size, allow_empty_codes=args.allow_empty_codes)
 
 
 def serializable(value):
@@ -297,6 +301,10 @@ def diagnostic(args, bundle, model, bank, output, step, total):
     old, new = report.get("gradient_old_ot_norm", 0.), report.get("gradient_new_ot_norm", 0.)
     if old > 1e-12 and new < .01 * old and model.config.mixture_weight > 0 and model.config.ot_weight > 0:
         warnings.append("Neighborhood OT gradient is below 1% of old-cost gradient on this diagnostic batch")
+    if report.get("final_zero_code_fraction", 0.) > 0:
+        warnings.append(f"{report['final_zero_code_fraction']:.2%} of diagnostic codes are all zero (support collapse)")
+    elif report.get("final_nnz_below_k_fraction", 0.) > 0:
+        warnings.append(f"{report['final_nnz_below_k_fraction']:.2%} of diagnostic codes have fewer than K positive coefficients")
     report["warnings"] = warnings
     atomic_json(target, report)
     log_wandb_metrics("diagnostics", report, step_metric="step")
@@ -354,7 +362,8 @@ def fit_and_evaluate(args, backbone, bundle, output, code, gpu, *, failure_conte
     optimizer = torch.optim.Adam(list(named.values()), lr=args.lr, betas=(.9, .999),
                                  eps=args.adam_eps, weight_decay=args.weight_decay)
     masks = torch.Generator(device="cpu").manual_seed(args.seed + 101)
-    bank = LandmarkBank(bundle.anchor_ids, tensor_rows(bundle.train, bundle.anchor_ids, device)) if model.needs_bank else None
+    bank = (LandmarkBank(bundle.anchor_ids, tensor_rows(bundle.train, bundle.anchor_ids, device),
+                         allow_empty_codes=cfg.allow_empty_codes) if model.needs_bank else None)
     checkpoint = output / "last.pt"
     next_step, elapsed, calibration = 0, 0., None
     if checkpoint.exists():
@@ -431,7 +440,8 @@ def fit_and_evaluate(args, backbone, bundle, output, code, gpu, *, failure_conte
                                 "gpu_peak_allocated_mib": torch.cuda.max_memory_allocated(device) / 2**20})
                     log_wandb_metrics("train", row, step_metric="step")
                     print(f"{backbone} {args.variant} K={args.k} update={next_step}/{total} "
-                          f"loss={row['loss_total']:.6f} GPU={row['gpu_allocated_mib']:.0f}MiB", flush=True)
+                          f"loss={row['loss_total']:.6f} nnz_min={row['final_nnz_min']} "
+                          f"zero_codes={row['zero_final_codes']} GPU={row['gpu_allocated_mib']:.0f}MiB", flush=True)
                 at_epoch_end = next_step % per_epoch == 0
                 if next_step % args.checkpoint_every == 0 or at_epoch_end or next_step == total:
                     save(next_step)

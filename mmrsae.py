@@ -64,7 +64,9 @@ class MMRSAEConfig:
 
     ``None`` means use the selected variant's default, rather than ignoring an
     explicit zero. Baselines (``mpsae``, ``csr``) have no repair, so masking,
-    landmark KL and neighborhood OT are unavailable to them. Set ``alpha`` to a positive value to fix it manually; otherwise
+    landmark KL and neighborhood OT are unavailable to them.
+    ``allow_empty_codes`` (default) follows the original MPSAE runner: an
+    all-zero final code does not stop training; it is counted and reported. Set ``alpha`` to a positive value to fix it manually; otherwise
     call :meth:`MMRSAE.initialize_repair` once on a training-only feature batch.
     The default reconstruction weights are shared with the original method.
     """
@@ -96,6 +98,7 @@ class MMRSAEConfig:
     clean_probability: float = 0.2
     erase_probability: float = 0.25
     anchor_chunk_size: int = 128
+    allow_empty_codes: bool = True
 
     def __post_init__(self):
         if self.variant not in METHODS:
@@ -139,6 +142,8 @@ class MMRSAEConfig:
             raise ValueError("max_refine_iters must be at least max_iters")
         if not isinstance(self.mask, bool):
             raise ValueError("mask must be a boolean")
+        if not isinstance(self.allow_empty_codes, bool):
+            raise ValueError("allow_empty_codes must be a boolean")
         for name in ("relation_weight", "ot_weight", "contrastive_weight"):
             value = getattr(self, name)
             if not math.isfinite(value) or value < 0:
@@ -247,7 +252,8 @@ class MMRSAE(nn.Module):
 
         The normal result is the unnormalized [B,h] code. ``compact=True``
         returns (int32 coordinates, float32 L2-normalized values), each [B,K],
-        directly suitable for CUDA retrieval. Zero/nonfinite compact rows fail.
+        directly suitable for CUDA retrieval. Nonfinite rows fail; all-zero
+        rows stay zero when ``allow_empty_codes`` is set, otherwise they fail.
         """
         self._require_ready()
         k = self.config.k if k is None else k
@@ -259,7 +265,7 @@ class MMRSAE(nn.Module):
             raise TypeError("MMRSAE's declared implementation uses float32 inputs and parameters")
         z = encode_repaired(self.sae, self.repair, x, k)
         if compact:
-            indices, values = compact_codes(z, k)
+            indices, values = compact_codes(z, k, allow_empty=self.config.allow_empty_codes)
             return indices.to(torch.int32).contiguous(), values.contiguous()
         return z
 
@@ -303,7 +309,7 @@ class MMRSAE(nn.Module):
             microbatch=cfg.microbatch, require_feasible=True, diagnostics=diagnostics,
             update_activity=update_activity, k_aux=cfg.k_aux,
             clean_probability=cfg.clean_probability, erase_probability=cfg.erase_probability,
-            anchor_chunk_size=cfg.anchor_chunk_size,
+            anchor_chunk_size=cfg.anchor_chunk_size, allow_empty_codes=cfg.allow_empty_codes,
         )
 
     def _csr_loss(self, x, budget, *, diagnostics, update_activity):
@@ -316,7 +322,8 @@ class MMRSAE(nn.Module):
         reconstruction, stats, views = reconstruction_terms(
             self.sae, x, cfg.k, budget, update_activity=False, k_aux=cfg.k_aux)
         z = views["final_k"]
-        if not bool(torch.isfinite(z).all()) or bool(z.gt(0).sum(1).eq(0).any()):
+        if not bool(torch.isfinite(z).all()) or (
+                not cfg.allow_empty_codes and bool(z.gt(0).sum(1).eq(0).any())):
             raise ValueError("invalid final code in final_k")
         if update_activity:
             for view in ("raw_k", "raw_4k", "raw_k"):
