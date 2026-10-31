@@ -16,6 +16,14 @@ W&B is online by default; both API tokens must be nonempty before Compose
 builds. Credentials stay in the ignored `.env` file. The Compose service uses
 `.env`, independently of the shell wrapper's `imagenet.env`.
 
+Run these commands from this folder on the server running your experiment.
+Docker Engine must be running before Compose can create containers; a working
+`docker --version` only confirms that the command-line client is installed.
+Run `docker info` on that server and confirm it shows a **Server** section
+without an error. Starting Docker Desktop on your PC does not start Docker
+on the remote server. GPU access and a compatible host driver are still required.
+Running `docker compose` alone shows help; use `docker compose up` to launch.
+
 Compose builds the existing image, checks GPU retrieval, prepares/downloads
 data, fits ResNet-50 then ResNet-18, and evaluates the configured experiment.
 It runs the current MMRSAE ImageNet workflow. The experiment defaults remain
@@ -36,7 +44,37 @@ For a background run that survives an SSH disconnect:
 
 ```bash
 docker compose up -d
-docker compose logs -f imagenet
+docker compose ps -a
+docker compose logs -f --tail 100 imagenet
+```
+
+`ps -a` also shows completed or failed containers, which are absent from the
+default running-container list. Read the logs if `imagenet` has exited.
+If no container appears, inspect the original `up` command's terminal output:
+configuration or image-build errors can prevent container creation, leaving
+no container logs to read.
+Press **Ctrl+C** to stop following logs; the detached job keeps running.
+With foreground `docker compose up`, **Ctrl+C** stops the job instead.
+
+To save the available container output or open a shell inside a running job:
+
+```bash
+docker compose logs --no-color imagenet > imagenet-container.log
+docker compose exec imagenet bash
+```
+
+Use `exit` to leave the shell. `exec` requires a running container; logs remain
+available after it exits until the container is removed.
+
+After updating the Python source on the server, rebuild the image to include
+the fix; `docker compose restart` reuses the old container code. To check GPU
+retrieval without downloading ImageNet or starting training, then launch:
+
+```bash
+docker compose run --rm --build imagenet --preflight-only
+# Continue after preflight reports "gpu_search_probe": "passed".
+docker compose up -d --build imagenet
+docker compose logs -f --tail 100 imagenet
 ```
 
 The console prints the W&B run URLs. `docker compose stop` stops the job;

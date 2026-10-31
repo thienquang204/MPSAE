@@ -39,7 +39,9 @@ def preflight(device, config):
         resources = faiss.StandardGpuResources()
         if not hasattr(resources, "setDefaultStream"):
             raise RuntimeError("FAISS must support the selected PyTorch CUDA stream")
-        resources.setDefaultStream(device.index, torch.cuda.current_stream(device).cuda_stream)
+        # PyTorch exposes an integer handle; FAISS's SWIG API needs cudaStream_t.
+        stream = faiss.cast_integer_to_cudastream_t(torch.cuda.current_stream(device).cuda_stream)
+        resources.setDefaultStream(device.index, stream)
         resources.setTempMemory(int(config["retrieval"].get("faiss_temp_memory_mib", 512)) * 2**20)
         preload_sparse_retrieval(device)
     return {"device": str(device), "device_name": torch.cuda.get_device_name(device),
@@ -389,7 +391,8 @@ def benchmark(features, labels, gallery_ids, query_ids, sae, repair, config,
                     float(settings.get("gpu_memory_fraction", .8)), "resident dense parent gallery")
                 resources.setTempMemory(int(settings.get("faiss_temp_memory_mib", 512)) * 2**20)
                 if hasattr(resources, "setDefaultStream"):
-                    resources.setDefaultStream(device.index, torch.cuda.current_stream(device).cuda_stream)
+                    stream = faiss.cast_integer_to_cudastream_t(torch.cuda.current_stream(device).cuda_stream)
+                    resources.setDefaultStream(device.index, stream)
                 else:
                     raise RuntimeError("FAISS build cannot bind the current CUDA stream for valid event timing")
                 index = faiss.index_cpu_to_gpu(resources, device.index, faiss.IndexFlatL2(features.shape[1]))

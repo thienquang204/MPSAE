@@ -63,7 +63,9 @@ def _retrieval_probe(device, settings):
     resources = faiss.StandardGpuResources()
     if not hasattr(resources, "setDefaultStream"):
         raise RuntimeError("FAISS must support the current PyTorch CUDA stream")
-    resources.setDefaultStream(device.index, torch.cuda.current_stream(device).cuda_stream)
+    # PyTorch exposes an integer handle; FAISS's SWIG API needs cudaStream_t.
+    stream = faiss.cast_integer_to_cudastream_t(torch.cuda.current_stream(device).cuda_stream)
+    resources.setDefaultStream(device.index, stream)
     resources.setTempMemory(int(settings.get("faiss_temp_memory_mib", 512)) * 2**20)
     options = faiss.GpuClonerOptions()
     options.useFloat16 = False
