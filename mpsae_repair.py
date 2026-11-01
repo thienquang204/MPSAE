@@ -224,27 +224,47 @@ def reconstruction_terms(sae, x, k, aux_budget=None, *, repair=None,
         sae.update_activity(raw["raw_4k"])
         sae.update_activity(raw["raw_2k"])
     total = main + nested / 8 + dead_loss / 32
+    final_nnz = small.gt(0).sum(1)
+    # Support-shrinkage monitors only; none of these enter the objective. The
+    # raw views are nested, so ||raw_jK||^2 - ||raw_K||^2 is their tail energy.
+    with torch.no_grad():
+        head = raw["raw_k"].square().sum(1)
+        safe_head = head.clamp_min(torch.finfo(head.dtype).tiny)
+        tail_2k = ((raw["raw_2k"].square().sum(1) - head).clamp_min(0) / safe_head).sqrt()
+        tail_4k = ((raw["raw_4k"].square().sum(1) - head).clamp_min(0) / safe_head).sqrt()
+        alive = head.gt(0)
     stats.update({"mse_final_K": main, "mse_raw_aux": nested, "loss_dead": dead_loss,
                   "dead_fraction": dead.float().mean(), "auxiliary_budget": aux_budget,
-                  "actual_nnz_mean": small.gt(0).sum(1).float().mean(),
-                  "zero_final_codes": small.gt(0).sum(1).eq(0).sum()})
+                  "actual_nnz_mean": final_nnz.float().mean(),
+                  "zero_final_codes": final_nnz.eq(0).sum(),
+                  "final_nnz_min": final_nnz.min(),
+                  "final_nnz_below_k_fraction": final_nnz.lt(k).float().mean(),
+                  "final_zero_code_fraction": final_nnz.eq(0).float().mean(),
+                  "raw_kth_preactivation_nonpositive_fraction": raw["raw_k"].gt(0).sum(1).lt(k).float().mean(),
+                  "raw_zero_code_fraction": (~alive).float().mean(),
+                  "tail_ratio_2k_mean": tail_2k[alive].mean() if bool(alive.any()) else head.new_zeros(()),
+                  "tail_ratio_4k_mean": tail_4k[alive].mean() if bool(alive.any()) else head.new_zeros(()),
+                  "encoder_bias_mean": sae.encoder_bias.detach().mean()})
     raw.update({"final_k": small, "final_2k": medium, "raw_auxiliary": wide})
     return total, stats, raw
 
 
-def compact_codes(z, k):
+def compact_codes(z, k, *, allow_empty=False):
+    """Compact L2-normalized codes. ``allow_empty`` keeps all-zero rows zero,
+    as the original MPSAE training path does, instead of failing."""
     values, indices = z.topk(min(k, z.shape[1]), dim=1, sorted=False)
     norms = values.norm(dim=1, keepdim=True)
-    if not bool(torch.isfinite(values).all()) or bool(norms.le(0).any()):
+    if not bool(torch.isfinite(values).all()) or (not allow_empty and bool(norms.le(0).any())):
         raise ValueError("nonfinite or zero-norm sparse code")
-    return indices, values / norms
+    return indices, values / norms.clamp_min(torch.finfo(values.dtype).tiny) if allow_empty else values / norms
 
 
-def indexed_cosines(query, k, normalized_bank_transpose, anchor_chunk=128):
-    """Sparse selected-value derivatives; intermediates <=B*K*anchor_chunk."""
+def indexed_cosines(query, k, normalized_bank_transpose, anchor_chunk=128, *, allow_empty=False):
+    """Sparse selected-value derivatives; intermediates <=B*K*anchor_chunk.
+    An allowed empty query has zero cosine to every landmark."""
     if anchor_chunk < 1:
         raise ValueError("anchor chunk size must be positive")
-    indices, values = compact_codes(query, k)
+    indices, values = compact_codes(query, k, allow_empty=allow_empty)
     key = normalized_bank_transpose.detach()
     similarities, overlaps = [], []
     for start in range(0, key.shape[1], anchor_chunk):
@@ -255,7 +275,7 @@ def indexed_cosines(query, k, normalized_bank_transpose, anchor_chunk=128):
 
 
 class LandmarkBank:
-    def __init__(self, anchor_ids, teacher_features):
+    def __init__(self, anchor_ids, teacher_features, *, allow_empty_codes=False):
         self.anchor_ids = torch.as_tensor(anchor_ids, dtype=torch.long, device=teacher_features.device)
         if len(self.anchor_ids) != len(teacher_features) or len(self.anchor_ids.unique()) != len(self.anchor_ids):
             raise ValueError("landmark identities must be distinct and match teacher rows")
@@ -263,6 +283,8 @@ class LandmarkBank:
         if not bool(torch.isfinite(self.teacher_features).all()) or bool(self.teacher_features.norm(dim=1).eq(0).any()):
             raise ValueError("invalid teacher bank features")
         self.teacher_normalized = F.normalize(self.teacher_features, dim=1)
+        # Empty student keys stay zero (zero cosine) instead of aborting refresh.
+        self.allow_empty_codes = bool(allow_empty_codes)
         self.codes = None
         self.refresh_count = 0
         self.last_refresh_step = None
@@ -281,7 +303,8 @@ class LandmarkBank:
             for bucket, budget in zip(all_codes, (k, 2*k)):
                 raw = sae.keep_topk(pre, budget)
                 z = raw if repair is None else repair(sae, batch, raw, budget)
-                compact_codes(z, budget)  # Fail on invalid keys, never silently normalize zeros.
+                # Fail on invalid keys; zeros are kept zero only when explicitly allowed.
+                compact_codes(z, budget, allow_empty=self.allow_empty_codes)
                 bucket.append(z.detach())
         self.codes = [torch.cat(bucket).detach() for bucket in all_codes]
         self.k = int(k)
@@ -320,7 +343,7 @@ class LandmarkBank:
             teacher = teacher_log.exp()
         student_logs, overlap = [], []
         for z, budget, bank in zip((z_k, z_2k), (k, 2*k), self.normalized_transposes):
-            cos, hits = indexed_cosines(z, budget, bank, anchor_chunk)
+            cos, hits = indexed_cosines(z, budget, bank, anchor_chunk, allow_empty=self.allow_empty_codes)
             student_logs.append((cos[:, allowed] / student_temperature).log_softmax(1))
             overlap.append(hits[:, allowed].any(1))
         denominator = math.log(max(2, int(allowed.sum())))
@@ -725,13 +748,19 @@ def research_loss(sae, x, k, *, repair=None, mask=False, mask_generator=None,
                   student_temperature=.1, mass=.9, eta=.2, max_iters=100, tol=1e-4,
                   microbatch=32, require_feasible=True, max_refine_iters=2000,
                   diagnostics=False, update_activity=True, k_aux=512,
-                  clean_probability=.2, erase_probability=.25, anchor_chunk_size=128):
+                  clean_probability=.2, erase_probability=.25, anchor_chunk_size=128,
+                  allow_empty_codes=False):
+    """``allow_empty_codes`` keeps training through all-zero final codes, as
+    the original MPSAE runner does; their count is reported, the objective is
+    unchanged (an all-zero view has zero normalized direction in the OT cost)."""
     reconstruction, stats, views = reconstruction_terms(sae, x, k, auxiliary_budget,
         repair=repair, mask=mask, mask_generator=mask_generator, update_activity=update_activity,
         k_aux=k_aux, clean_probability=clean_probability, erase_probability=erase_probability)
     for name in ("final_k", "final_2k", "raw_4k"):
         z = views[name]
-        if not bool(torch.isfinite(z).all()) or bool(z.gt(0).sum(1).eq(0).any()):
+        if not bool(torch.isfinite(z).all()):
+            raise ValueError(f"invalid final code in {name}")
+        if not allow_empty_codes and bool(z.gt(0).sum(1).eq(0).any()):
             raise ValueError(f"invalid final code in {name}")
     profiles = None
     relation = x.new_zeros(())

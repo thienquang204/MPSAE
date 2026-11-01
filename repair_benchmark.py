@@ -102,6 +102,9 @@ def _encoded_cache(features, row_ids, sae, repair, config, cache_root, identity,
     encode_batch = int(config["retrieval"].get("encode_batch_size", 1024))
     if encode_batch < 1:
         raise ValueError("encode_batch_size must be positive")
+    # Empty sparse codes stay zero rows (never retrieved; empty queries count as
+    # misses) only when explicitly allowed; otherwise the benchmark aborts.
+    allow_empty = bool(config["retrieval"].get("allow_empty_codes", False)) and sparse
     cache_identity = identity
     if role == "training_gallery" and isinstance(identity, dict):
         # Query pool/source does not change an already encoded training gallery.
@@ -112,6 +115,7 @@ def _encoded_cache(features, row_ids, sae, repair, config, cache_root, identity,
         "feature_shape": list(features.shape), "feature_dtype": str(features.dtype),
         "width": width, "sparse": sparse, "repair": repair is not None,
         "inference_code_hash": _code_hash(), "normalization": "row_l2_float32",
+        "empty_codes": "kept_zero" if allow_empty else "rejected",
         "encoding_runtime": {"device": str(device), "device_name": torch.cuda.get_device_name(device),
                              "torch_version": torch.__version__, "cuda_version": torch.version.cuda,
                              "amp": False, "tf32": False},
@@ -179,9 +183,12 @@ def _encoded_cache(features, row_ids, sae, repair, config, cache_root, identity,
                     raise ValueError("Final inference violates the finite nonnegative at-most-K code contract")
                 values, indices = final.topk(width, dim=1, sorted=False)
                 norms = values.norm(dim=1, keepdim=True)
-                if not bool(torch.isfinite(values).all()) or bool((values < 0).any()) or bool(norms.le(0).any()):
+                empty = norms.le(0).reshape(-1)
+                if not bool(torch.isfinite(values).all()) or bool((values < 0).any()) or (
+                        not allow_empty and bool(empty.any())):
                     raise ValueError("Invalid or zero-norm final sparse code; benchmark aborted")
-                values = values / norms
+                values = values / norms.clamp_min(torch.finfo(values.dtype).tiny)
+                state["zero_final_codes"] += int(empty.sum())
                 maps["values"][first:last] = values.cpu().numpy()
                 maps["indices"][first:last] = indices.to(torch.int32).cpu().numpy()
                 counts = values.gt(0).sum(1).cpu().numpy()
@@ -216,7 +223,8 @@ def _encoded_cache(features, row_ids, sae, repair, config, cache_root, identity,
 
 
 @torch.no_grad()
-def _resident_encoding_measurement(features, ids, sae, repair, k, batch_size, device, timed):
+def _resident_encoding_measurement(features, ids, sae, repair, k, batch_size, device, timed,
+                                   allow_empty=False):
     if sae is None:
         return {"scope": "protected_cached_full_features", "encoding_seconds_per_example": 0.0,
                 "encoder_extraction_measured": False}
@@ -243,7 +251,7 @@ def _resident_encoding_measurement(features, ids, sae, repair, k, batch_size, de
                         "correction_seconds": middle.elapsed_time(end) / 1000.,
                         "total_seconds": start.elapsed_time(end) / 1000.,
                         "wall_seconds": time.perf_counter() - wall_start})
-        if not bool(torch.isfinite(final).all()) or bool(final.norm(dim=1).le(0).any()):
+        if not bool(torch.isfinite(final).all()) or (not allow_empty and bool(final.norm(dim=1).le(0).any())):
             raise ValueError("Invalid final code in encoding timing")
     median = statistics.median(row["total_seconds"] for row in records)
     return {"scope": "resident_feature_to_final_code_excludes_transfer_normalization_storage",
@@ -350,8 +358,10 @@ def benchmark(features, labels, gallery_ids, query_ids, sae, repair, config,
                                                        identity, "validation_queries" if separate_queries else "training_queries", device)
             np.save(output_dir / "gallery_ids.npy", gallery_ids, allow_pickle=False)
             np.save(output_dir / "query_ids.npy", query_ids, allow_pickle=False)
+            allow_empty = bool(settings.get("allow_empty_codes", False)) and sparse
             encoding = _resident_encoding_measurement(features, gallery_ids, sae, repair, k,
-                                                       int(settings.get("encode_batch_size", 1024)), device, timed)
+                                                       int(settings.get("encode_batch_size", 1024)), device, timed,
+                                                       allow_empty=allow_empty)
             # Compilation is a separate setup operation, never part of search.
             setup_start = time.perf_counter()
             if sparse:
@@ -410,6 +420,7 @@ def benchmark(features, labels, gallery_ids, query_ids, sae, repair, config,
             predictions_path = output_dir / "predictions.csv"
             temporary_predictions = output_dir / "predictions.csv.tmp"
             correct = 0
+            empty_queries = 0
             products = 0
             nearest_distance_sum = 0.
             screening_search_seconds = 0.
@@ -419,9 +430,11 @@ def benchmark(features, labels, gallery_ids, query_ids, sae, repair, config,
                 for first in range(0, len(query_ids), query_batch):
                     last = min(first + query_batch, len(query_ids))
                     values = _numpy_rows(queries["values"], first, last, device, torch.float32)
+                    empty = np.zeros(last - first, dtype=bool)
                     if sparse:
                         indices = _numpy_rows(queries["indices"], first, last, device, torch.int32)
-                        if not bool(torch.isfinite(values).all()) or bool(values.norm(dim=1).le(0).any()):
+                        empty = values.norm(dim=1).le(0).cpu().numpy()
+                        if not bool(torch.isfinite(values).all()) or (not allow_empty and empty.any()):
                             raise ValueError("Invalid cached sparse query")
                         products += index.query_product_count(indices, values)
                         search = lambda: index.search(indices, values)
@@ -446,6 +459,11 @@ def benchmark(features, labels, gallery_ids, query_ids, sae, repair, config,
                     nearest_distance_sum += float(distances.sum(dtype=np.float64))
                     neighbors = gallery_ids[neighbor_positions]
                     predicted = np.asarray(labels)[neighbors].reshape(-1)
+                    # An empty query scores zero against every gallery row, so its
+                    # backend argmax is arbitrary: record it as an explicit miss.
+                    neighbors = np.where(empty, -1, neighbors)
+                    predicted = np.where(empty, -1, predicted)
+                    empty_queries += int(empty.sum())
                     true = np.asarray(query_labels)[query_ids[first:last]].reshape(-1)
                     correct += int(np.count_nonzero(predicted == true))
                     for row_id, target, prediction, neighbor in zip(query_ids[first:last], true, predicted, neighbors):
@@ -481,7 +499,11 @@ def benchmark(features, labels, gallery_ids, query_ids, sae, repair, config,
                 "encoder_extraction_measured": False,
             }
             if sparse:
-                metrics.update({"actual_nnz_mean": gallery_encoding["nonzero_sum"] / len(gallery_ids),
+                metrics.update({"empty_codes_policy": "kept_zero_query_counted_as_miss" if allow_empty else "rejected",
+                                "empty_gallery_codes": int(gallery_encoding["zero_final_codes"]),
+                                "empty_query_codes": empty_queries,
+                                "empty_query_fraction": empty_queries / len(query_ids),
+                                "actual_nnz_mean": gallery_encoding["nonzero_sum"] / len(gallery_ids),
                                 "sparse_padded_payload_bytes_per_row": 8 * k + 4,
                                 "sparse_product_count": products,
                                 "sparse_product_fraction_of_dense_dictionary": products / (len(query_ids) * len(gallery_ids) * int(sae.decoder.shape[0]))})
