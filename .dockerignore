@@ -18,4 +18,7 @@ output/
 wandb/
 .repair-test-venv/
 .repair-uv-cache/
+imagenet_embedding_weight/
+*.npz
+*.npy
 *.zip

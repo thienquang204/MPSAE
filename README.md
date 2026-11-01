@@ -10,11 +10,21 @@ cp .env.example .env
 docker compose up
 ```
 
-Use a Hugging Face token whose account has accepted the
-[ImageNet access conditions](https://huggingface.co/datasets/ILSVRC/imagenet-1k).
-W&B is online by default; both API tokens must be nonempty before Compose
-builds. Credentials stay in the ignored `.env` file. The Compose service uses
+Use `HF_TOKEN` with read access to the prepared embedding repository
+[quangnguyenopt/NSFW](https://huggingface.co/quangnguyenopt/NSFW/tree/main).
+It is a private Hugging Face **model** repository, not a dataset repository.
+Local NPZ/JSON pairs also work offline without a Hugging Face token.
+W&B is online by default and Compose requires `WANDB_API_KEY` for monitoring.
+Credentials stay in the ignored `.env` file. The Compose service uses
 `.env`, independently of the shell wrapper's `imagenet.env`.
+
+Both backbones now read prepared NPZ/JSON pairs, preferring files already in
+`MMRSAE_EMBEDDINGS`. Development runs download only the two training pairs;
+official evaluation additionally downloads validation. Stored RN18 archives
+are mapped directly; compressed FF2048 features are streamed once into a
+reusable disk map. Raw ImageNet and backbone extraction are unnecessary in
+the default mode. See `MMRSAE_IMAGENET.md` for offline copies, cache space,
+and the explicit `MMRSAE_EMBEDDING_SOURCE=legacy` mode.
 
 Run these commands from this folder on the server running your experiment.
 Docker Engine must be running before Compose can create containers; a working
@@ -35,8 +45,9 @@ ten-epoch official evaluation, set `MMRSAE_MAX_STEPS=0`, `MMRSAE_TRAIN_SIZE=0`,
 `GPU_DEVICE_ID=0` selects physical GPU 0, exposed as `cuda:0` inside the service.
 Data/cache files persist in `./data`; results and checkpoints persist in
 `./runs/mmrsae`. Compose creates those directories. Change `DATA_HOST_DIR` and
-`OUTPUT_ROOT` in `.env` to use another disk. ResNet-18 prepares the full raw
-ImageNet training split even when fitting uses a subset. Container files are
+`OUTPUT_ROOT` in `.env` to use another disk. Complete training embedding
+archives are still needed for subset fitting, but the feature matrices are
+not loaded into RAM. Container files are
 root-owned by default; optional `HOST_UID`/`HOST_GID` settings hand results back
 to those numeric IDs when the existing launcher exits.
 

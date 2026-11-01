@@ -31,6 +31,10 @@ args=(
     --device "${MMRSAE_DEVICE:-cuda:0}"
     --embeddings-dir "$embeddings_dir"
     --cache-dir "$cache_dir"
+    --embedding-source "${MMRSAE_EMBEDDING_SOURCE:-precomputed}"
+    --embeddings-repo "${MMRSAE_EMBEDDINGS_REPO:-quangnguyenopt/NSFW}"
+    --embeddings-repo-type "${MMRSAE_EMBEDDINGS_REPO_TYPE:-model}"
+    --embeddings-revision "${MMRSAE_EMBEDDINGS_REVISION:-main}"
     --output-dir "${MMRSAE_OUTPUT:-$SCRIPT_DIR/runs/mmrsae}"
     --wandb-mode "$wandb_mode"
     --wandb-project "${WANDB_PROJECT:-MMRSAE}"
@@ -62,6 +66,9 @@ optional_options=(
     MMRSAE_FF2048_REVISION:--ff2048-revision
     MMRSAE_FF2048_TRAIN_SHA256:--ff2048-train-sha256 MMRSAE_FF2048_VAL_SHA256:--ff2048-val-sha256
     MMRSAE_RN18_TRAIN:--rn18-train MMRSAE_RN18_VAL:--rn18-val
+    MMRSAE_DATA_ROOT:--data-root MMRSAE_DATA_BACKEND:--data-backend
+    MMRSAE_FEATURE_BATCH_SIZE:--feature-batch-size MMRSAE_WORKERS:--workers
+    MMRSAE_IMAGENET_REVISION:--imagenet-revision MMRSAE_PARENT_REVISION:--parent-revision
     WANDB_ENTITY:--wandb-entity WANDB_GROUP:--wandb-group
     WANDB_TAGS:--wandb-tags WANDB_NAME:--wandb-run-name
 )
@@ -106,40 +113,19 @@ IFS=',' read -r -a variants <<< "${MMRSAE_VARIANTS:-${MMRSAE_VARIANT:-mmrsae}}"
 # Planning/preparation modes fit nothing, so they produce no report.
 report_dir="${MMRSAE_OUTPUT:-$SCRIPT_DIR/runs/mmrsae}"
 make_report="${MMRSAE_REPORT:-1}"
-export_rn18=1
 previous=""
 for argument in "$@"; do
     case "$argument" in
-        --plan|--preflight-only) make_report=0; export_rn18=0 ;;
+        --plan|--preflight-only) make_report=0 ;;
         --prepare-only) make_report=0 ;;
         --output-dir=*) report_dir="${argument#--output-dir=}" ;;
     esac
     [[ "$previous" == "--output-dir" ]] && report_dir="$argument"
     previous="$argument"
 done
-# ResNet-18 trains from exported embedding archives, like ResNet-50 from
-# FF2048. Missing default archives are exported once from the raw images in
-# MMRSAE_DATA_ROOT (resumable); archives copied from another machine skip this.
-rn18_splits=()
-if (( export_rn18 )) && [[ ",${MMRSAE_BACKBONES:-resnet50,resnet18}," == *,resnet18,* ]]; then
-    [[ -n "${MMRSAE_RN18_TRAIN:-}" || -f "$embeddings_dir/1K_train_rn18.npz" ]] || rn18_splits+=(train)
-    if [[ "${MMRSAE_EVALUATION:-dev}" == official ]]; then
-        [[ -n "${MMRSAE_RN18_VAL:-}" || -f "$embeddings_dir/1K_val_rn18.npz" ]] || rn18_splits+=(validation)
-    fi
-fi
-for split in "${rn18_splits[@]}"; do
-    export_args=(--split "$split" --data-root "${MMRSAE_DATA_ROOT:-$SCRIPT_DIR/data/imagenet1k}"
-                 --output-dir "$embeddings_dir" --cache-dir "$cache_dir"
-                 --data-backend "${MMRSAE_DATA_BACKEND:-hf}" --device "${MMRSAE_DEVICE:-cuda:0}" "$download")
-    for mapping in MMRSAE_FEATURE_BATCH_SIZE:--feature-batch-size MMRSAE_WORKERS:--workers \
-                   MMRSAE_IMAGENET_REVISION:--imagenet-revision MMRSAE_PARENT_REVISION:--parent-revision; do
-        variable="${mapping%%:*}"
-        if [[ -n "${!variable:-}" ]]; then export_args+=("${mapping#*:}" "${!variable}"); fi
-    done
-    echo "=== Exporting ResNet-18 $split embeddings ===" >&2
-    "$python_bin" "$SCRIPT_DIR/export_rn18_embeddings.py" "${export_args[@]}" \
-        || echo "ResNet-18 $split export failed; resnet18 fits will report the missing archive" >&2
-done
+# Data preparation belongs to the Python runner, after GPU preflight. The
+# default reads prepared archives; --embedding-source legacy explicitly enables
+# the old RN18 exporter with the same resolved CLI/environment settings.
 failed=()
 for variant in "${variants[@]}"; do
     variant="${variant// /}"

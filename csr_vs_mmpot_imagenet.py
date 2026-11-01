@@ -1259,23 +1259,13 @@ class ReleasedNpzFeatures(Dataset):
 
     LABEL_KEYS = ("label", "labels", "target", "targets")
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, cache_dir: Optional[Path] = None) -> None:
+        from repair_data import open_feature_cache
+
         self.path = path.expanduser().resolve()
-        self.archive = np.load(self.path, allow_pickle=False)
-        if not isinstance(self.archive, np.lib.npyio.NpzFile):
-            raise ValueError(f"expected an NPZ archive, got: {self.path}")
-        if "data" not in self.archive.files:
-            raise ValueError(f"{self.path} has no 'data' embedding array")
-        label_key = next(
-            (key for key in self.LABEL_KEYS if key in self.archive.files), None
-        )
-        if label_key is None:
-            raise ValueError(
-                f"{self.path} has none of the supported label keys: "
-                + ", ".join(self.LABEL_KEYS)
-            )
-        self.features = self.archive["data"]
-        self.labels = self.archive[label_key]
+        self.features, self.labels, self.source = open_feature_cache(
+            self.path, cache_dir if cache_dir is not None else self.path.parent / ".feature_cache",
+            label_keys=self.LABEL_KEYS)
         if self.features.ndim != 2:
             raise ValueError(
                 f"{self.path} embeddings must be rank two, got {self.features.shape}"
@@ -4312,8 +4302,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if any(method in enabled_methods for method in SPARSE_METHODS):
         if args.protocol == PAPER_FF2048_PROTOCOL:
-            train_data = ReleasedNpzFeatures(args.ff2048_train_embeddings)
-            val_data = ReleasedNpzFeatures(args.ff2048_val_embeddings)
+            train_data = ReleasedNpzFeatures(args.ff2048_train_embeddings, args.cache_dir / "released_npz")
+            val_data = ReleasedNpzFeatures(args.ff2048_val_embeddings, args.cache_dir / "released_npz")
             frozen_train_meta = train_data.metadata("train")
             frozen_val_meta = val_data.metadata("validation")
             if args.paper_strict:

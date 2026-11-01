@@ -12,10 +12,10 @@ start the transfer suite, a parameter sweep, attribution arms, or promotion
 gates. Parameters are set by hand and recorded with each run. This is an
 exploratory experiment, not a strict reproduction or a claim of improvement.
 
-**This implementation has received source review only.** No launcher, test,
-download, dependency installation, training job, or benchmark was executed for
-this change, as requested. The checks described below are implemented checks
-that run when the user launches the experiment; they are not completed checks.
+**Validation scope.** Prepared-embedding I/O has CPU checks for local/offline
+loading, targeted Hub downloads, checksum reuse, direct NPZ mapping and split
+boundaries. Full ImageNet fitting and Docker/CUDA retrieval still require
+server validation. See [VALIDATION.md](VALIDATION.md) for the check record.
 
 The supplied presets are:
 
@@ -140,6 +140,10 @@ require the CUDA retrieval check. No CPU execution mode is provided.
 | `MMRSAE_DATA_SEED` / `--data-seed` | 42 | Stable allocation/extraction across model-seed changes |
 | `MMRSAE_EVAL_EVERY` / `--eval-every` | 0 | Endpoint only; a positive completed-epoch interval adds gallery evaluations |
 | `MMRSAE_CHECKPOINT_EVERY` / `--checkpoint-every` | 25 | Updates between resumable checkpoints |
+| `MMRSAE_EMBEDDING_SOURCE` / `--embedding-source` | `precomputed` | Local/Hub NPZ+JSON pairs; `legacy` enables the older preparation workflow |
+| `MMRSAE_EMBEDDINGS_REPO` / `--embeddings-repo` | `quangnguyenopt/NSFW` | Prepared embedding repository |
+| `MMRSAE_EMBEDDINGS_REPO_TYPE` / `--embeddings-repo-type` | `model` | Hub repository type, independent of ImageNet's dataset repository |
+| `MMRSAE_EMBEDDINGS_REVISION` / `--embeddings-revision` | `main` | Resolved once to an immutable commit in the cache |
 
 The default ceiling is 1,000 fitting updates across two backbones. This count
 excludes data preparation, encoding, search and initialization. Smaller steps
@@ -148,38 +152,64 @@ timed searches while retaining endpoint accuracy. Full-parent dense reference
 search is an explicit `--dense-reference` option because its gallery can be
 large. It is not required for every manual trial.
 
-**Data preparation and split boundaries.** ResNet-50 uses the released
-`FF2048_RN50_Embeds/1K_train_ff2048.npz` from
-`W1nd-navigator/CSR-precompute-embeds`. ResNet-18 reads the same archive
-layout (`data.npy` + `label.npy`) from `<embeddings-dir>/1K_{train,val}_rn18.npz`,
-written once by `export_rn18_embeddings.py` from the frozen
-`timm/resnet18.a1_in1k` parent and raw ImageNet images. Training never opens
-images. The data adapter resolves remote revisions to immutable commits,
-records provenance, checks archive hashes and schemas, and validates official
-source sizes and labels. Dataset access must already be granted to the
-supplied Hugging Face token; authorization failures stop preparation.
+**Data preparation and split boundaries.** Both backbones use prepared
+archives from [quangnguyenopt/NSFW](https://huggingface.co/quangnguyenopt/NSFW/tree/main).
+This is a private Hub **model** repository. Set `HF_TOKEN` to a token with
+read access to it; accepting ImageNet terms alone does not grant that access.
+Existing local pairs take precedence and require no network or token:
 
-Both archives are streamed to reusable read-only memory maps. The RN18 export
-covers every train (1,281,167) and validation (50,000) row in source order with
-one deterministic view, the evaluation centre crop (224/256 crop, resized to
-256), so a single archive serves any pool size or data seed. Extraction is
-resumable, and a JSON receipt beside each archive records its SHA-256, the
-parent weights and the image source; training trusts the archive only when
-its hash matches the receipt. The launcher exports missing default archives
-before fitting. All archives live in one flat folder (`MMRSAE_EMBEDDINGS`,
-default `data/embeddings`; a local `1K_{train,val}_ff2048.npz` there is used
-before any Hub download). Every archive has a `.json` receipt beside it; for
-FF2048 it records the pinned Hub revision and SHA-256 and is written after the
-first Hub-verified run. With the receipts, the folder verifies offline. To
-train on a machine without images or network, copy that folder (about 7.5 GB)
-and set `MMRSAE_DOWNLOAD=0`:
-
-```bash
-python export_rn18_embeddings.py --split all --data-root data/imagenet1k --output-dir data/embeddings  # once, with images
+```text
+<MMRSAE_EMBEDDINGS>/
+  1K_train_ff2048.npz   1K_train_ff2048.json
+  1K_train_rn18.npz     1K_train_rn18.json
+  1K_val_ff2048.npz     1K_val_ff2048.json
+  1K_val_rn18.npz       1K_val_rn18.json
 ```
 
-A prepared ImageFolder source is available to the export through
-`--data-backend imagefolder`.
+The loader downloads only missing files for the requested backbone/split,
+directly into this folder. It never downloads `weights.zip`, raw images,
+parent checkpoints or an entire repository snapshot. `dev` uses train only;
+`official` also opens val. Downloads use the Hub client's resumable cache.
+Revisions are pinned once, and the archive LFS hash must agree with its JSON
+before an archive download begins. Original receipts retain the FF2048
+publisher/parent identity or RN18's parent, transform and image provenance;
+the mirror is not relabelled as a new pretrained encoder.
+
+The RN18 files use uncompressed NPZ members, which are mapped directly in
+place, including ZIP64 and Fortran/byte-order handling. FF2048 files are
+compressed: their feature member is streamed in 8 MiB chunks once into a
+read-only NPY disk map. Repeated methods reuse it. Archive checksums are cached
+against the absolute path, size and nanosecond `mtime`/`ctime` values;
+a changed file or a different expected hash requires checking again or fails.
+Feature validation uses batches bounded to about 8 MiB, and training converts
+only the consumed batches to FP32. The feature matrix is never loaded whole
+into RAM. The legacy FF2048 comparison now uses this bounded-memory reader too.
+
+All four archives total about 8.1 GB. Compressed FF2048 train needs another
+10.5 GB of cache disk when first opened (validation adds about 0.41 GB).
+RN18 needs no second feature copy. Data/cache paths remain persistent under
+Docker's `/data`; keep the cache when resuming or comparing methods.
+
+For an offline server, copy the needed NPZ **and** JSON files to
+`MMRSAE_EMBEDDINGS` and set `MMRSAE_DOWNLOAD=0`. To reuse this checkout's
+existing `imagenet_embedding_weight` directory with Compose, set in `.env`:
+
+```dotenv
+DATA_HOST_DIR=/absolute/server/path/to/imagenet_embedding_weight
+MMRSAE_EMBEDDINGS=/data
+MMRSAE_DOWNLOAD=0
+```
+
+The directory must permit cache writes. For direct local execution, set
+`MMRSAE_EMBEDDINGS` to that local directory instead. Explicit
+`--ff2048-train/val` and `--rn18-train/val` paths still take precedence.
+
+`MMRSAE_EMBEDDING_SOURCE=legacy` retains the original FF2048 publisher download
+and automatic RN18 export from raw images. Missing default RN18 pairs are
+exported **after** GPU retrieval preflight, using the resolved CLI/environment
+settings. Existing archives still skip extraction. The standalone
+`export_rn18_embeddings.py` remains available, including `--data-backend
+imagefolder`; raw ImageNet permissions are needed only for those image paths.
 
 Default `--evaluation dev` uses disjoint training-derived queries and does
 not download/open official validation. Labels allocate/evaluate the pools;

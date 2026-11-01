@@ -1,8 +1,8 @@
 """ImageNet inputs for manually tuned MMRSAE runs.
 
-Only requested splits are opened. Both backbones read precomputed archives
-(data.npy + label.npy): ResNet-50 the released FF2048 arrays, ResNet-18 the
-archives written once by export_rn18_embeddings.py. No raw images are read here.
+Only requested splits are opened. Local NPZ/JSON pairs take precedence;
+missing pairs are downloaded individually from the configured embeddings
+repository. Raw ImageNet extraction is available only in explicit legacy mode.
 """
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from repair_data import atomic_json, canonical_hash, exclusive_lock, inspect_npz
 
 
 FF2048_REPO = "W1nd-navigator/CSR-precompute-embeds"
+EMBEDDINGS_REPO = "quangnguyenopt/NSFW"
 FF2048_PARENT = "RAIVNLab/MRL:r50_mrl0_e0_ff2048.pt"
 IMAGENET_REPO = "ILSVRC/imagenet-1k"
 COUNTS = {"train": 1_281_167, "validation": 50_000}
@@ -128,8 +129,9 @@ def _resolved_release(repo, repo_type, requested_revision, args):
                                          files_metadata=True, token=os.environ.get("HF_TOKEN") or None)
             except Exception as error:
                 raise RuntimeError(
-                    f"Cannot resolve {repo}@{requested_revision}. For ImageNet, accept its access "
-                    "conditions and authenticate with HF_TOKEN or `hf auth login`."
+                    f"Cannot resolve {repo}@{requested_revision}. Check repository access and "
+                    "authenticate with HF_TOKEN or `hf auth login`. Raw ImageNet access "
+                    "conditions apply only to the explicit legacy image workflow."
                 ) from error
             files = {}
             for item in info.siblings or []:
@@ -145,7 +147,7 @@ def _resolved_release(repo, repo_type, requested_revision, args):
     return result
 
 
-def _hub_file(release, filename, args, *, require_lfs=False):
+def _hub_file(release, filename, args, *, require_lfs=False, local_dir=None):
     from huggingface_hub import hf_hub_download
     entry = release["files"].get(filename)
     if entry is None:
@@ -153,14 +155,85 @@ def _hub_file(release, filename, args, *, require_lfs=False):
     expected = entry.get("sha256")
     if require_lfs and not re.fullmatch(r"[0-9a-f]{64}", str(expected)):
         raise RuntimeError(f"No trusted Hub LFS SHA-256 for {filename}; refusing unverifiable release")
+    location = ({"local_dir": str(local_dir)} if local_dir is not None else
+                {"cache_dir": str(Path(args.cache_dir) / "hub")})
     path = Path(hf_hub_download(
         release["repository"], filename, repo_type=release["repo_type"],
-        revision=release["revision"], cache_dir=str(Path(args.cache_dir) / "hub"),
+        revision=release["revision"], **location,
         local_files_only=not args.download, token=os.environ.get("HF_TOKEN") or None,
     ))
     if entry.get("size") is not None and path.stat().st_size != entry["size"]:
         raise RuntimeError(f"Downloaded file length differs from release metadata: {path}")
     return path, expected
+
+
+def _validate_receipt(manifest, backbone, split):
+    """Keep the original parent/preprocessing identity when using a mirror."""
+    if (not isinstance(manifest, dict) or manifest.get("split") != split
+            or not re.fullmatch(r"[0-9a-f]{64}", str(manifest.get("sha256")))):
+        raise ValueError(f"Invalid {backbone}/{split} embedding receipt: split or SHA-256")
+    if backbone == "resnet50":
+        name = "train" if split == "train" else "val"
+        if (manifest.get("repository") != FF2048_REPO
+                or manifest.get("filename") != f"FF2048_RN50_Embeds/1K_{name}_ff2048.npz"
+                or manifest.get("parent") != FF2048_PARENT
+                or not re.fullmatch(r"[0-9a-f]{40}", str(manifest.get("revision")))):
+            raise ValueError("FF2048 receipt does not identify the released ResNet-50 parent")
+    else:
+        parent = manifest.get("parent", {})
+        if (manifest.get("recipe") != "rn18-imagenet-export-v1"
+                or manifest.get("dimension") != 512 or manifest.get("rows") != COUNTS[split]
+                or not manifest.get("transform") or not isinstance(manifest.get("source"), dict)
+                or not isinstance(parent, dict) or parent.get("dimension") != 512
+                or parent.get("repository") != "timm/resnet18.a1_in1k"):
+            raise ValueError("RN18 receipt does not identify the exported ImageNet features and parent")
+    return manifest["sha256"]
+
+
+def _precomputed_split(split, args, backbone):
+    """Local pair or two targeted Hub downloads; never download raw images."""
+    name = "train" if split == "train" else "val"
+    suffix = "ff2048" if backbone == "resnet50" else "rn18"
+    explicit = _option(args, suffix + "_" + name)
+    filename = f"1K_{name}_{suffix}.npz"
+    candidate = Path(explicit) if explicit else Path(args.embeddings_dir) / filename
+    receipt = candidate.with_suffix(".json")
+    if explicit and not candidate.is_file():
+        raise FileNotFoundError(candidate)
+    # Preserve the older authenticated local FF2048 path without a sidecar.
+    if explicit and backbone == "resnet50" and not receipt.is_file():
+        return _ff2048_split(split, args)
+    if not candidate.is_file() or not receipt.is_file():
+        if not args.download:
+            raise FileNotFoundError(f"Missing embedding pair {candidate} / {receipt.name}; "
+                                    "copy the NPZ and JSON together or enable --download")
+        repo = _option(args, "embeddings_repo", EMBEDDINGS_REPO)
+        release = _resolved_release(repo, _option(args, "embeddings_repo_type", "model"),
+                                    _option(args, "embeddings_revision", "main"), args)
+        receipt_path, _ = _hub_file(release, Path(filename).with_suffix(".json").name,
+                                    args, local_dir=args.embeddings_dir)
+        manifest = json.loads(receipt_path.read_text(encoding="utf-8"))
+        expected = _validate_receipt(manifest, backbone, split)
+        entry = release["files"].get(filename, {})
+        if entry.get("sha256") != expected:
+            raise ValueError(f"Hub archive SHA-256 differs from {receipt_path.name}")
+        if not candidate.is_file():
+            candidate, _ = _hub_file(release, filename, args, require_lfs=True,
+                                      local_dir=args.embeddings_dir)
+        receipt = receipt_path
+    manifest = json.loads(receipt.read_text(encoding="utf-8"))
+    expected = _validate_receipt(manifest, backbone, split)
+    override = _option(args, "ff2048_" + name + "_sha256") if backbone == "resnet50" else None
+    if override and override.lower() != expected:
+        raise ValueError("Explicit FF2048 SHA-256 differs from the embedding receipt")
+    width = 2048 if backbone == "resnet50" else 512
+    features, labels, metadata = _open_archive(candidate, expected, split, width,
+                                               Path(args.cache_dir) / suffix)
+    if backbone == "resnet18" and manifest.get("labels_sha256") != _array_hash(labels):
+        raise ValueError("RN18 labels differ from their export receipt")
+    return features, labels, {**metadata, "kind": "precomputed_archive", "identity_verified": True,
+        "filename": filename, "trust": "archive_receipt_sha256", "receipt": manifest,
+        "parent": manifest["parent"], "transform": manifest.get("transform", "released_FF2048")}
 
 
 def _ff2048_split(split, args):
@@ -232,8 +305,19 @@ def _rn18_split(split, args):
     candidate = Path(explicit) if explicit else Path(args.embeddings_dir) / f"1K_{name}_rn18.npz"
     receipt = candidate.with_suffix(".json")
     if not candidate.is_file() or not receipt.is_file():
-        raise FileNotFoundError(f"Missing ResNet-18 embeddings {candidate} or its receipt {receipt.name}; "
-                                f"run export_rn18_embeddings.py --split {split} on a machine with ImageNet images")
+        if explicit:
+            raise FileNotFoundError(f"Missing ResNet-18 embeddings {candidate} or its receipt {receipt.name}")
+        # Legacy extraction now happens after the Python runner's GPU preflight
+        # and honors CLI overrides as well as environment-derived settings.
+        from export_rn18_embeddings import export_split
+        import copy
+        export_args = copy.copy(args)
+        export_args.output_dir = Path(args.embeddings_dir)
+        export_args.data_root = Path(_option(args, "data_root", "data/imagenet1k"))
+        export_args.data_backend = _option(args, "data_backend", "hf")
+        export_args.feature_batch_size = _option(args, "feature_batch_size", 256)
+        export_args.workers = _option(args, "workers", 4)
+        export_split(split, export_args)
     manifest = json.loads(receipt.read_text(encoding="utf-8"))
     expected = manifest.get("sha256")
     if not re.fullmatch(r"[0-9a-f]{64}", str(expected)) or manifest.get("split") != split:
@@ -261,8 +345,9 @@ def _open_archive(candidate, expected, split, width, cache_dir):
 
 def _check_rows(features, ids, what):
     import numpy as np
-    for start in range(0, len(ids), 8192):
-        values = np.asarray(features[ids[start:start + 8192]], dtype=np.float32)
+    batch_rows = max(1, (8 << 20) // (features.shape[1] * max(features.dtype.itemsize, 4)))
+    for start in range(0, len(ids), batch_rows):
+        values = np.asarray(features[ids[start:start + batch_rows]], dtype=np.float32)
         if not np.isfinite(values).all() or (np.linalg.norm(values, axis=1) == 0).any():
             raise RuntimeError(f"Invalid/zero features in the selected {what}")
 
@@ -285,7 +370,11 @@ def prepare_imagenet_features(args, backbone, device):
         raise ValueError("MMRSAE supports resnet18 and resnet50")
     if int(_option(args, "max_val", 0)) < 0:
         raise ValueError("max-val must be nonnegative")
-    read_split = _ff2048_split if backbone == "resnet50" else _rn18_split
+    if _option(args, "embedding_source", "precomputed") == "precomputed":
+        def read_split(split, settings):
+            return _precomputed_split(split, settings, backbone)
+    else:
+        read_split = _ff2048_split if backbone == "resnet50" else _rn18_split
     query, query_labels, query_source, query_cache = None, None, None, None
     query_source_ids = np.empty(0, dtype=np.int64)
     train, labels, source = read_split("train", args)

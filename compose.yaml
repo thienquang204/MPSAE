@@ -16,7 +16,8 @@ services:
       SUITE_ROOT: "/output/${SUITE_DIR:-mmrsae}"
       MMRSAE_OUTPUT: "/output/${SUITE_DIR:-mmrsae}"
       MMRSAE_DEVICE: cuda:0
-      HF_TOKEN: "${HF_TOKEN:?Set HF_TOKEN in .env to a token with ImageNet access}"
+      # Prepared local/public embeddings also support an empty token.
+      HF_TOKEN: "${HF_TOKEN:-}"
       WANDB_API_KEY: "${WANDB_API_KEY:?Set WANDB_API_KEY in .env for monitoring}"
       WANDB_MODE: "${WANDB_MODE:-online}"
       WANDB_ENTITY: "${WANDB_ENTITY:-}"

@@ -14,3 +14,4 @@ data/
 .repair-test-venv/
 .repair-uv-cache/
 tests/.repair_data_test_*/
+imagenet_embedding_weight/

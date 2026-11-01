@@ -1,5 +1,30 @@
 # Validation status for MMRSAE and the repair research profile
 
+The November 1, 2026 prepared-embedding update passed 31 CPU data tests in the
+existing `machinelearning` environment: 15 new archive/source/routing checks
+and 16 existing split/cache/planner/bootstrap checks. They cover direct
+ZIP64 NPZ mapping, Fortran and byte-order preservation, streamed compressed
+maps, unchanged-file hash reuse and changed-file rejection, local/offline
+loading for both backbones, targeted Hub file requests, JSON/LFS hash
+agreement, dev/official boundaries, legacy FF2048 overrides, and plan/preflight
+without data work. The synthetic Hub client is mocked: no large archive is
+downloaded by these tests. Test fixtures use short temporary directories to
+avoid Windows' path-length limit; the initial sandbox attempt could not write
+those temporary fixtures, and the successful rerun had the required access.
+An authenticated read of the real Hub repository metadata confirmed a private
+model repository at `db9dd8570abe1db97cdf67c9d7c9852cce6ac902`, with four NPZ/JSON
+pairs and archive LFS hashes matching the local receipts. No dependency was
+installed, and no Docker image, training job or CUDA benchmark was run.
+The proposed broader CPU suite was not run because its execution request
+was declined; no new claim is made about those additional checks.
+Python compilation checks passed for the six changed/new Python files, and
+`bash -n` passed for the MMRSAE, Docker, container and convenience launchers.
+The initial sandbox Bash attempt could not create its signal pipe; the
+successful syntax-only rerun had the required access. `docker compose config
+--format json`, using the public example settings and a dummy W&B key, also
+passed and confirmed the prepared-embedding source, model repository, two
+persistent mounts and support for an empty Hugging Face token with local data.
+
 The October 31, 2026 neighborhood-cost correction used source review and small
 CPU checks with the existing PyTorch 2.7.1+cpu environment. The previous cost
 produced negative values down to approximately -3.6e-7 for identical normalized

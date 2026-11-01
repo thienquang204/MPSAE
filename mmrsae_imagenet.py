@@ -85,7 +85,12 @@ def build_parser():
     parser.add_argument("--dev-size", type=int, default=10000, help="Training-derived development queries, disjoint from fitting and anchors")
     parser.add_argument("--max-val", type=int, default=0, help="Official validation limit; 0 uses the full official partition")
     parser.add_argument("--embeddings-dir", type=Path, default=Path("data/embeddings"),
-                        help="Holds 1K_{train,val}_ff2048.npz and 1K_{train,val}_rn18.{npz,json}; raw images are not read")
+                        help="Local NPZ/JSON pairs; missing files are downloaded here individually")
+    parser.add_argument("--embedding-source", choices=("precomputed", "legacy"), default="precomputed",
+                        help="Use prepared embeddings for both backbones; legacy retains the original FF2048/RN18 export workflow")
+    parser.add_argument("--embeddings-repo", default="quangnguyenopt/NSFW")
+    parser.add_argument("--embeddings-repo-type", choices=("model", "dataset"), default="model")
+    parser.add_argument("--embeddings-revision", default="main")
     parser.add_argument("--cache-dir", type=Path, default=Path("data/mmrsae"))
     parser.add_argument("--download", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--ff2048-train", type=Path)
@@ -95,6 +100,13 @@ def build_parser():
     parser.add_argument("--ff2048-val-sha256")
     parser.add_argument("--rn18-train", type=Path, help="Default <embeddings-dir>/1K_train_rn18.npz")
     parser.add_argument("--rn18-val", type=Path, help="Default <embeddings-dir>/1K_val_rn18.npz")
+    # Only the explicit legacy source needs images or a pretrained RN18 model.
+    parser.add_argument("--data-root", type=Path, default=Path("data/imagenet1k"))
+    parser.add_argument("--data-backend", choices=("hf", "imagefolder"), default="hf")
+    parser.add_argument("--feature-batch-size", type=int, default=256)
+    parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--imagenet-revision", default="main")
+    parser.add_argument("--parent-revision", default="main")
 
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--encode-batch-size", type=int, default=1024)
@@ -132,6 +144,10 @@ def validate_args(args):
                  "score_buffer_mib", "retrieval_warmup", "retrieval_repeats", "ot_iters", "ot_max_refine_iters"):
         if getattr(args, name) < 1:
             raise ValueError(f"--{name.replace('_', '-')} must be positive")
+    if args.feature_batch_size < 1 or args.workers < 0:
+        raise ValueError("Legacy extraction requires a positive feature batch size and nonnegative workers")
+    if not re.fullmatch(r"[\w.-]+/[\w.-]+", args.embeddings_repo) or not args.embeddings_revision.strip():
+        raise ValueError("Embeddings repository must be owner/name, with a nonempty revision")
     for name in ("max_steps", "seed", "data_seed", "train_size", "max_val", "eval_every",
                  "k_aux", "dead_steps", "faiss_temp_memory_mib"):
         if getattr(args, name) < 0:

@@ -12,6 +12,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
+import struct
 import tempfile
 import zipfile
 
@@ -139,21 +141,22 @@ def _read_npy_header(stream):
     return shape, header["fortran_order"], dtype
 
 
-def inspect_npz(path, *, hash_archive=True):
+def inspect_npz(path, *, hash_archive=True, label_keys=("label",)):
     """Read data.npy's header, never its feature payload, and load numeric labels."""
     import numpy as np
 
     path = Path(path)
     with zipfile.ZipFile(path) as archive:
         names = archive.namelist()
-        for name in ("data.npy", "label.npy"):
+        label_member = next((key + ".npy" for key in label_keys if key + ".npy" in names), "label.npy")
+        for name in ("data.npy", label_member):
             if names.count(name) != 1:
                 raise ValueError(f"Expected exactly one {name} member in {path}")
         with archive.open("data.npy") as stream:
             shape, fortran_order, dtype = _read_npy_header(stream)
         if len(shape) != 2 or dtype.hasobject or dtype.kind not in "fiu":
             raise ValueError("Expected a numeric, two-dimensional data array")
-        with archive.open("label.npy") as stream:
+        with archive.open(label_member) as stream:
             labels = np.load(stream, allow_pickle=False)
         if labels.shape not in ((shape[0],), (shape[0], 1)):
             raise ValueError("Labels must contain one value per feature row")
@@ -172,19 +175,81 @@ def inspect_npz(path, *, hash_archive=True):
     return metadata, labels
 
 
-def open_feature_cache(path, cache_dir, *, expected_sha256=None):
+def _file_identity(path):
+    stat = path.stat()
+    return {"path": str(path.resolve()), "bytes": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns, "ctime_ns": stat.st_ctime_ns}
+
+
+def _verified_archive_hash(path, cache_dir, expected_sha256):
+    """Hash once per file version, retaining an OS-stat-bound local receipt."""
+    identity = _file_identity(path)
+    # The full path identity is checked inside the receipt; keep filenames
+    # short enough for Windows checkouts with long repository paths.
+    receipt = Path(cache_dir) / "archive_checks" / (canonical_hash(identity["path"])[:24] + ".json")
+    with exclusive_lock(receipt.with_suffix(".lock")):
+        saved = json.loads(receipt.read_text(encoding="utf-8")) if receipt.exists() else {}
+        if saved.get("file") == identity:
+            digest = saved["sha256"]
+        else:
+            digest = sha256_file(path)
+            if _file_identity(path) != identity:
+                raise ValueError("Archive changed while its SHA-256 was being checked")
+        if expected_sha256 is not None and digest != expected_sha256:
+            raise ValueError("Training archive SHA-256 differs from the locked split source")
+        if saved.get("file") != identity:
+            atomic_json(receipt, {"file": identity, "sha256": digest})
+    return digest
+
+
+def _stored_feature_map(path, metadata):
+    """Map an uncompressed NPZ member in place, including ZIP64 archives."""
+    import numpy as np
+
+    with zipfile.ZipFile(path) as archive:
+        entry = archive.getinfo("data.npy")
+        if entry.compress_type != zipfile.ZIP_STORED:
+            return None
+        if entry.flag_bits & 1 or entry.compress_size != entry.file_size:
+            raise ValueError("Unsupported encrypted or malformed stored feature member")
+        with path.open("rb") as stream:
+            stream.seek(entry.header_offset)
+            header = stream.read(30)
+            if len(header) != 30 or header[:4] != b"PK\x03\x04":
+                raise ValueError("Invalid NPZ local file header")
+            name_bytes, extra_bytes = struct.unpack_from("<HH", header, 26)
+            member_start = entry.header_offset + 30 + name_bytes + extra_bytes
+            stream.seek(member_start)
+            shape, fortran_order, dtype = _read_npy_header(stream)
+            offset = stream.tell()
+    if (list(shape) != metadata["feature_shape"] or dtype.str != metadata["feature_dtype"]
+            or fortran_order != metadata["fortran_order"]):
+        raise ValueError("Stored feature header differs from inspected archive")
+    payload_bytes = int(np.prod(shape, dtype=object)) * dtype.itemsize
+    if offset + payload_bytes != member_start + entry.file_size or offset + payload_bytes > path.stat().st_size:
+        raise ValueError("Stored feature member has an invalid payload length")
+    return np.memmap(path, mode="r", dtype=dtype, offset=offset, shape=shape,
+                     order="F" if fortran_order else "C")
+
+
+def open_feature_cache(path, cache_dir, *, expected_sha256=None, label_keys=("label",)):
     """Return (read-only feature memmap, labels, source metadata).
 
-    The archive hash is checked once per call. Call this once per process and
-    reuse the returned mapping across arms. Compressed archives are streamed,
-    not unpacked in RAM. Interrupted copies are not accepted as valid caches.
+    Stored NPZ members are mapped directly without a second feature copy.
+    Compressed members are streamed once to a reusable NPY map. SHA-256 is
+    verified again only when the source file's path/size/timestamps change;
+    the expected hash must still match on every call. No full feature array
+    is loaded in RAM. Interrupted copies are not accepted as valid caches.
     """
     import numpy as np
 
-    metadata, labels = inspect_npz(path)
-    fingerprint = metadata["sha256"]
-    if expected_sha256 is not None and fingerprint != expected_sha256:
-        raise ValueError("Training archive SHA-256 differs from the locked split source")
+    path = Path(path)
+    metadata, labels = inspect_npz(path, hash_archive=False, label_keys=label_keys)
+    fingerprint = _verified_archive_hash(path, cache_dir, expected_sha256)
+    metadata["sha256"] = fingerprint
+    stored = _stored_feature_map(path, metadata)
+    if stored is not None:
+        return stored, labels, metadata
     directory = Path(cache_dir) / fingerprint
     directory.mkdir(parents=True, exist_ok=True)
     target, manifest_path = directory / "data.npy", directory / "cache.json"
@@ -200,6 +265,9 @@ def open_feature_cache(path, cache_dir, *, expected_sha256=None):
         elif target.exists() or manifest_path.exists():
             raise ValueError("Incomplete feature cache: preserve it for inspection and use a new cache directory")
         else:
+            required = metadata["feature_npy_bytes"] + (16 << 20)
+            if shutil.disk_usage(directory).free < required:
+                raise RuntimeError(f"Insufficient disk for decompressed features: need {required:,} bytes in {directory}")
             fd, temporary = tempfile.mkstemp(prefix="data.", suffix=".tmp", dir=directory)
             digest = hashlib.sha256()
             try:

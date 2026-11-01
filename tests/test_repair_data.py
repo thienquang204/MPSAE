@@ -3,10 +3,9 @@ import copy
 import io
 import json
 from pathlib import Path
-import shutil
+import tempfile
 import unittest
 from unittest import mock
-import uuid
 import warnings
 import zipfile
 
@@ -65,8 +64,8 @@ class PlannerTests(unittest.TestCase):
 @unittest.skipIf(np is None, "NumPy is needed for synthetic data tests")
 class SplitAndCacheTests(unittest.TestCase):
     def setUp(self):
-        self.root = Path(__file__).resolve().parent / (".repair_data_test_" + uuid.uuid4().hex)
-        self.root.mkdir()
+        self.temporary = tempfile.TemporaryDirectory(prefix="repair_data_")
+        self.root = Path(self.temporary.name)
         self.path = self.root / "source.npz"
         self.features = np.arange(60 * 7, dtype=np.float32).reshape(60, 7)
         self.labels = np.repeat(np.arange(3), 20)
@@ -74,9 +73,7 @@ class SplitAndCacheTests(unittest.TestCase):
         self.parameters = dict(fit_per_class=5, cheap_per_class=2, holdout_per_class=3, anchor_count=5)
 
     def tearDown(self):
-        if self.root.resolve().parent != Path(__file__).resolve().parent:
-            raise RuntimeError("Refusing to clean a test directory outside the test workspace")
-        shutil.rmtree(self.root)
+        self.temporary.cleanup()
 
     def test_inspection_never_loads_feature_array(self):
         original = np.load
