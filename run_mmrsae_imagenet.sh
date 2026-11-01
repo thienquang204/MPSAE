@@ -14,6 +14,8 @@ if [[ -z "$wandb_mode" ]]; then
     if [[ -n "${WANDB_API_KEY:-}" ]]; then wandb_mode=online; else wandb_mode=offline; fi
 fi
 
+embeddings_dir="${MMRSAE_EMBEDDINGS:-$SCRIPT_DIR/data/embeddings}"
+cache_dir="${MMRSAE_CACHE:-$SCRIPT_DIR/data/mmrsae}"
 args=(
     --backbones "${MMRSAE_BACKBONES:-resnet50,resnet18}"
     --k "${MMRSAE_K:-8}"
@@ -27,9 +29,8 @@ args=(
     --seed "${MMRSAE_SEED:-1227}"
     --data-seed "${MMRSAE_DATA_SEED:-42}"
     --device "${MMRSAE_DEVICE:-cuda:0}"
-    --data-backend "${MMRSAE_DATA_BACKEND:-hf}"
-    --data-root "${MMRSAE_DATA_ROOT:-$SCRIPT_DIR/data/imagenet1k}"
-    --cache-dir "${MMRSAE_CACHE:-$SCRIPT_DIR/data/mmrsae}"
+    --embeddings-dir "$embeddings_dir"
+    --cache-dir "$cache_dir"
     --output-dir "${MMRSAE_OUTPUT:-$SCRIPT_DIR/runs/mmrsae}"
     --wandb-mode "$wandb_mode"
     --wandb-project "${WANDB_PROJECT:-MMRSAE}"
@@ -49,9 +50,9 @@ optional_options=(
     MMRSAE_LOG_EVERY:--log-every MMRSAE_EVAL_EVERY:--eval-every
     MMRSAE_OT_MASS:--ot-mass MMRSAE_OT_ETA:--ot-eta MMRSAE_OT_ITERS:--ot-iters
     MMRSAE_OT_MAX_REFINE_ITERS:--ot-max-refine-iters MMRSAE_OT_TOL:--ot-tol
-    MMRSAE_OT_MICROBATCH:--ot-microbatch MMRSAE_FEATURE_BATCH_SIZE:--feature-batch-size
+    MMRSAE_OT_MICROBATCH:--ot-microbatch
     MMRSAE_CONTRASTIVE_WEIGHT:--contrastive-weight MMRSAE_CONTRASTIVE_TEMPERATURE:--contrastive-temperature
-    MMRSAE_WORKERS:--workers MMRSAE_ENCODE_BATCH_SIZE:--encode-batch-size
+    MMRSAE_ENCODE_BATCH_SIZE:--encode-batch-size
     MMRSAE_QUERY_BATCH_SIZE:--query-batch-size MMRSAE_GALLERY_CHUNK_SIZE:--gallery-chunk-size
     MMRSAE_SCORE_BUFFER_MIB:--score-buffer-mib MMRSAE_GPU_MEMORY_FRACTION:--gpu-memory-fraction
     MMRSAE_FAISS_TEMP_MEMORY_MIB:--faiss-temp-memory-mib
@@ -60,7 +61,7 @@ optional_options=(
     MMRSAE_FF2048_TRAIN:--ff2048-train MMRSAE_FF2048_VAL:--ff2048-val
     MMRSAE_FF2048_REVISION:--ff2048-revision
     MMRSAE_FF2048_TRAIN_SHA256:--ff2048-train-sha256 MMRSAE_FF2048_VAL_SHA256:--ff2048-val-sha256
-    MMRSAE_IMAGENET_REVISION:--imagenet-revision MMRSAE_PARENT_REVISION:--parent-revision
+    MMRSAE_RN18_TRAIN:--rn18-train MMRSAE_RN18_VAL:--rn18-val
     WANDB_ENTITY:--wandb-entity WANDB_GROUP:--wandb-group
     WANDB_TAGS:--wandb-tags WANDB_NAME:--wandb-run-name
 )
@@ -71,10 +72,11 @@ for mapping in "${optional_options[@]}"; do
 done
 
 case "${MMRSAE_DOWNLOAD:-1}" in
-    1) args+=(--download) ;;
-    0) args+=(--no-download) ;;
+    1) download=--download ;;
+    0) download=--no-download ;;
     *) echo "MMRSAE_DOWNLOAD must be 0 or 1" >&2; exit 2 ;;
 esac
+args+=("$download")
 case "${MMRSAE_MASK:-}" in
     1) args+=(--mask) ;;
     0) args+=(--no-mask) ;;
@@ -101,16 +103,58 @@ esac
 # identical settings; otherwise the single MMRSAE_VARIANT is used. A failed
 # method is reported and the remaining methods still run.
 IFS=',' read -r -a variants <<< "${MMRSAE_VARIANTS:-${MMRSAE_VARIANT:-mmrsae}}"
-if (( ${#variants[@]} == 1 )); then
-    exec "$python_bin" "$SCRIPT_DIR/mmrsae_imagenet.py" "${args[@]}" --variant "${variants[0]// /}" "$@"
+# Planning/preparation modes fit nothing, so they produce no report.
+report_dir="${MMRSAE_OUTPUT:-$SCRIPT_DIR/runs/mmrsae}"
+make_report="${MMRSAE_REPORT:-1}"
+export_rn18=1
+previous=""
+for argument in "$@"; do
+    case "$argument" in
+        --plan|--preflight-only) make_report=0; export_rn18=0 ;;
+        --prepare-only) make_report=0 ;;
+        --output-dir=*) report_dir="${argument#--output-dir=}" ;;
+    esac
+    [[ "$previous" == "--output-dir" ]] && report_dir="$argument"
+    previous="$argument"
+done
+# ResNet-18 trains from exported embedding archives, like ResNet-50 from
+# FF2048. Missing default archives are exported once from the raw images in
+# MMRSAE_DATA_ROOT (resumable); archives copied from another machine skip this.
+rn18_splits=()
+if (( export_rn18 )) && [[ ",${MMRSAE_BACKBONES:-resnet50,resnet18}," == *,resnet18,* ]]; then
+    [[ -n "${MMRSAE_RN18_TRAIN:-}" || -f "$embeddings_dir/1K_train_rn18.npz" ]] || rn18_splits+=(train)
+    if [[ "${MMRSAE_EVALUATION:-dev}" == official ]]; then
+        [[ -n "${MMRSAE_RN18_VAL:-}" || -f "$embeddings_dir/1K_val_rn18.npz" ]] || rn18_splits+=(validation)
+    fi
 fi
+for split in "${rn18_splits[@]}"; do
+    export_args=(--split "$split" --data-root "${MMRSAE_DATA_ROOT:-$SCRIPT_DIR/data/imagenet1k}"
+                 --output-dir "$embeddings_dir" --cache-dir "$cache_dir"
+                 --data-backend "${MMRSAE_DATA_BACKEND:-hf}" --device "${MMRSAE_DEVICE:-cuda:0}" "$download")
+    for mapping in MMRSAE_FEATURE_BATCH_SIZE:--feature-batch-size MMRSAE_WORKERS:--workers \
+                   MMRSAE_IMAGENET_REVISION:--imagenet-revision MMRSAE_PARENT_REVISION:--parent-revision; do
+        variable="${mapping%%:*}"
+        if [[ -n "${!variable:-}" ]]; then export_args+=("${mapping#*:}" "${!variable}"); fi
+    done
+    echo "=== Exporting ResNet-18 $split embeddings ===" >&2
+    "$python_bin" "$SCRIPT_DIR/export_rn18_embeddings.py" "${export_args[@]}" \
+        || echo "ResNet-18 $split export failed; resnet18 fits will report the missing archive" >&2
+done
 failed=()
 for variant in "${variants[@]}"; do
     variant="${variant// /}"
     [[ -n "$variant" ]] || continue
-    echo "=== MMRSAE method: $variant ===" >&2
+    (( ${#variants[@]} == 1 )) || echo "=== MMRSAE method: $variant ===" >&2
     "$python_bin" "$SCRIPT_DIR/mmrsae_imagenet.py" "${args[@]}" --variant "$variant" "$@" || failed+=("$variant")
 done
+# Tables and figures for every comparable group in the output directory,
+# including partial or failed fits. A reporting error never hides fit status.
+case "$make_report" in
+    1) "$python_bin" "$SCRIPT_DIR/mmrsae_reporting.py" --output-dir "$report_dir" \
+           || echo "MMRSAE report generation failed; fit results are unaffected" >&2 ;;
+    0) ;;
+    *) echo "MMRSAE_REPORT must be 0 or 1" >&2; exit 2 ;;
+esac
 if (( ${#failed[@]} )); then
     echo "MMRSAE methods failed: ${failed[*]}" >&2
     exit 1

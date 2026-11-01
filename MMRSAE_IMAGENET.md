@@ -46,6 +46,17 @@ retrieval index, and an empty query is recorded as a miss. Training logs
 `--no-allow-empty-codes` restores the strict abort. The separate repair profile
 keeps its strict check.
 
+**Reports and figures.** After every fitting invocation (one method or
+`MMRSAE_VARIANTS`, dev or official, complete or failed),
+[mmrsae_reporting.py](mmrsae_reporting.py) writes
+`<output>/reports/<evaluation>_k<K>_<id>/`: `results.csv`, `results.md`, and PNG
+and PDF figures `top1_by_method`, `training_loss` and `support_health`. Trials
+are grouped by all settings except the method plus the implementation identity,
+so one figure never mixes K, data sizes, evaluation pools or code versions.
+`reports/index.json` lists the groups. `--plan`, `--preflight-only` and
+`--prepare-only` produce no report; `MMRSAE_REPORT=0` disables it. Regenerate at
+any time without a GPU: `python mmrsae_reporting.py --output-dir runs/mmrsae`.
+
 Mixed MMRSAE presets use rho=0.2: `0.8 * angular_cost + 0.2 * neighborhood_cost`.
 An empty `MMRSAE_MIXTURE_WEIGHT` retains these method-specific defaults; MPSAE
 uses angular cost only, and CSR and `mmrsae-rel` do not use transport.
@@ -139,19 +150,36 @@ large. It is not required for every manual trial.
 
 **Data preparation and split boundaries.** ResNet-50 uses the released
 `FF2048_RN50_Embeds/1K_train_ff2048.npz` from
-`W1nd-navigator/CSR-precompute-embeds`. ResNet-18 uses the frozen
-`timm/resnet18.a1_in1k` parent and raw ImageNet images. The data adapter resolves
-remote revisions to immutable commits, records provenance, checks available
-archive hashes and schemas, and validates official source sizes and labels.
-Dataset access must already be granted to the supplied Hugging Face token;
-authorization failures stop preparation.
+`W1nd-navigator/CSR-precompute-embeds`. ResNet-18 reads the same archive
+layout (`data.npy` + `label.npy`) from `<embeddings-dir>/1K_{train,val}_rn18.npz`,
+written once by `export_rn18_embeddings.py` from the frozen
+`timm/resnet18.a1_in1k` parent and raw ImageNet images. Training never opens
+images. The data adapter resolves remote revisions to immutable commits,
+records provenance, checks archive hashes and schemas, and validates official
+source sizes and labels. Dataset access must already be granted to the
+supplied Hugging Face token; authorization failures stop preparation.
 
-FF2048 features are streamed to reusable read-only memory maps. RN18 extracts
-only the selected fitting, development and landmark rows for the default
-subset experiment, and stores float32 features in a resumable cache. It does
-not repeat parent extraction for each model seed or loss setting. The parent
-and extraction recipe remain part of the cache identity. A prepared
-ImageFolder source is available through `--data-backend imagefolder`.
+Both archives are streamed to reusable read-only memory maps. The RN18 export
+covers every train (1,281,167) and validation (50,000) row in source order with
+one deterministic view, the evaluation centre crop (224/256 crop, resized to
+256), so a single archive serves any pool size or data seed. Extraction is
+resumable, and a JSON receipt beside each archive records its SHA-256, the
+parent weights and the image source; training trusts the archive only when
+its hash matches the receipt. The launcher exports missing default archives
+before fitting. All archives live in one flat folder (`MMRSAE_EMBEDDINGS`,
+default `data/embeddings`; a local `1K_{train,val}_ff2048.npz` there is used
+before any Hub download). Every archive has a `.json` receipt beside it; for
+FF2048 it records the pinned Hub revision and SHA-256 and is written after the
+first Hub-verified run. With the receipts, the folder verifies offline. To
+train on a machine without images or network, copy that folder (about 7.5 GB)
+and set `MMRSAE_DOWNLOAD=0`:
+
+```bash
+python export_rn18_embeddings.py --split all --data-root data/imagenet1k --output-dir data/embeddings  # once, with images
+```
+
+A prepared ImageFolder source is available to the export through
+`--data-backend imagefolder`.
 
 Default `--evaluation dev` uses disjoint training-derived queries and does
 not download/open official validation. Labels allocate/evaluate the pools;

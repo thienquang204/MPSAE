@@ -34,6 +34,7 @@ if [[ "$EXPERIMENT_SCOPE" == "mmrsae" ]]; then
     esac
     export MMRSAE_CACHE="${MMRSAE_CACHE:-/data/mmrsae}"
     export MMRSAE_DATA_ROOT="${MMRSAE_DATA_ROOT:-/data/imagenet1k}"
+    export MMRSAE_EMBEDDINGS="${MMRSAE_EMBEDDINGS:-/data/embeddings}"
     mountpoint -q "$OUTPUT_MOUNT" \
         || { echo "$OUTPUT_MOUNT must be mounted for persistent MMRSAE results" >&2; exit 2; }
     mmrsae_status=0

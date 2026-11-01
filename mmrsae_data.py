@@ -1,23 +1,20 @@
 """ImageNet inputs for manually tuned MMRSAE runs.
 
-Only requested splits are opened. ResNet-50 reuses released FF2048 arrays;
-ResNet-18 extracts the selected rows once into resumable FP32 memory maps.
-Imports of dataset/model libraries are deferred until preparation is requested.
+Only requested splits are opened. Both backbones read precomputed archives
+(data.npy + label.npy): ResNet-50 the released FF2048 arrays, ResNet-18 the
+archives written once by export_rn18_embeddings.py. No raw images are read here.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
-import shutil
-import time
 from typing import Any
 
-from repair_data import atomic_json, canonical_hash, exclusive_lock, inspect_npz, open_feature_cache, sha256_file
+from repair_data import atomic_json, canonical_hash, exclusive_lock, inspect_npz, open_feature_cache
 
 
 FF2048_REPO = "W1nd-navigator/CSR-precompute-embeds"
@@ -170,19 +167,27 @@ def _ff2048_split(split, args):
     name = "train" if split == "train" else "val"
     explicit = _option(args, "ff2048_" + name)
     filename = f"FF2048_RN50_Embeds/1K_{name}_ff2048.npz"
-    candidate = Path(explicit) if explicit else Path(args.data_root) / filename
+    candidate = Path(explicit) if explicit else Path(args.embeddings_dir) / Path(filename).name
     expected = _option(args, "ff2048_" + name + "_sha256") or None
     if expected and not re.fullmatch(r"[0-9a-fA-F]{64}", expected):
         raise ValueError(f"Invalid --ff2048-{name}-sha256")
     expected = expected.lower() if expected else None
     if explicit and not candidate.is_file():
         raise FileNotFoundError(candidate)
+    receipt = candidate.with_suffix(".json")
     if candidate.is_file():
         revision = _option(args, "ff2048_revision", "main")
         # A local path/header is not evidence that this is the declared parent.
-        # Offline use needs an explicit immutable revision plus a trusted hash,
-        # or an existing release receipt from which to recover both values.
-        if expected and re.fullmatch(r"[0-9a-f]{40}", str(revision)):
+        # Offline use needs an immutable revision plus a trusted hash: from the
+        # receipt beside the archive, explicit options, or a release receipt.
+        if not expected and receipt.is_file():
+            manifest = json.loads(receipt.read_text(encoding="utf-8"))
+            if (manifest.get("repository") != FF2048_REPO or manifest.get("filename") != filename
+                    or not re.fullmatch(r"[0-9a-f]{64}", str(manifest.get("sha256")))
+                    or not re.fullmatch(r"[0-9a-f]{40}", str(manifest.get("revision")))):
+                raise ValueError(f"Invalid FF2048 receipt: {receipt}")
+            expected, revision, trust = manifest["sha256"], manifest["revision"], "receipt_sha256_and_immutable_revision"
+        elif expected and re.fullmatch(r"[0-9a-f]{40}", str(revision)):
             trust = "user_supplied_sha256_and_immutable_revision"
         else:
             release = _resolved_release(FF2048_REPO, "dataset", revision, args)
@@ -207,291 +212,59 @@ def _ff2048_split(split, args):
         source = {"kind": "released_archive", "identity_verified": True,
                   "repository": FF2048_REPO, "revision": release["revision"],
                   "filename": filename, "trust": "pinned_Hub_LFS_sha256"}
-    # Reject a mistaken local archive from its small header/label members,
-    # before streaming a potentially large feature payload onto disk.
-    header, header_labels = inspect_npz(candidate, hash_archive=False)
-    if header["feature_shape"][1] != 2048 or not str(header["feature_dtype"]).lstrip("<>=|").startswith("f"):
-        raise ValueError("FF2048 archive requires floating-point features of width 2048")
-    _labels(header_labels, header["feature_shape"][0], split)
-    del header_labels
-    features, labels, metadata = open_feature_cache(candidate, Path(args.cache_dir) / "ff2048", expected_sha256=expected)
-    if features.shape[1] != 2048 or features.dtype.kind != "f":
-        raise ValueError(f"FF2048 requires floating-point features of width 2048, got {features.shape}/{features.dtype}")
-    labels = _labels(labels, len(features), split)
+    features, labels, metadata = _open_archive(candidate, expected, split, 2048, Path(args.cache_dir) / "ff2048")
+    if source["kind"] == "local_archive" and not receipt.exists():
+        # Verified against the Hub: record it so copies of the embeddings
+        # folder verify offline, like the RN18 export receipts.
+        try:
+            atomic_json(receipt, {"repository": FF2048_REPO, "revision": source["revision"], "filename": filename,
+                                  "split": split, "sha256": expected, "parent": FF2048_PARENT})
+            os.chmod(receipt, 0o644)
+        except OSError as error:
+            print(f"Could not write FF2048 receipt {receipt}: {error}", flush=True)
     return features, labels, {**source, **metadata, "parent": FF2048_PARENT}
 
 
-@contextmanager
-def _offline_dataset(enabled):
-    """No backend/network fallback when the user requests cached inputs only."""
-    if not enabled:
-        yield
-        return
-    from datasets import config as dataset_config
-    from huggingface_hub import constants as hub_config
-    old_environment = {name: os.environ.get(name) for name in ("HF_DATASETS_OFFLINE", "HF_HUB_OFFLINE")}
-    flags = [(dataset_config, "HF_DATASETS_OFFLINE"), (dataset_config, "HF_HUB_OFFLINE"), (hub_config, "HF_HUB_OFFLINE")]
-    previous = [(module, key, getattr(module, key)) for module, key in flags if hasattr(module, key)]
-    try:
-        for name in old_environment:
-            os.environ[name] = "1"
-        for module, key, _ in previous:
-            setattr(module, key, True)
-        yield
-    finally:
-        for module, key, value in previous:
-            setattr(module, key, value)
-        for name, value in old_environment.items():
-            if value is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = value
+def _rn18_split(split, args):
+    """Read an archive written by export_rn18_embeddings.py, trusted via its receipt hash."""
+    name = "train" if split == "train" else "val"
+    explicit = _option(args, "rn18_" + name)
+    candidate = Path(explicit) if explicit else Path(args.embeddings_dir) / f"1K_{name}_rn18.npz"
+    receipt = candidate.with_suffix(".json")
+    if not candidate.is_file() or not receipt.is_file():
+        raise FileNotFoundError(f"Missing ResNet-18 embeddings {candidate} or its receipt {receipt.name}; "
+                                f"run export_rn18_embeddings.py --split {split} on a machine with ImageNet images")
+    manifest = json.loads(receipt.read_text(encoding="utf-8"))
+    expected = manifest.get("sha256")
+    if not re.fullmatch(r"[0-9a-f]{64}", str(expected)) or manifest.get("split") != split:
+        raise ValueError(f"Invalid ResNet-18 export receipt: {receipt}")
+    features, labels, metadata = _open_archive(candidate, expected, split, 512, Path(args.cache_dir) / "rn18")
+    source = {"kind": "exported_archive", "identity_verified": True, "filename": candidate.name,
+              "trust": "export_receipt_sha256", "recipe": manifest["recipe"], "image_source": manifest["source"],
+              "transform": manifest["transform"]}
+    return features, labels, {**source, **metadata, "parent": manifest["parent"]}
 
 
-def _raw_split(split, args):
+def _open_archive(candidate, expected, split, width, cache_dir):
+    # Reject a mistaken local archive from its small header/label members,
+    # before streaming a potentially large feature payload onto disk.
+    header, header_labels = inspect_npz(candidate, hash_archive=False)
+    if header["feature_shape"][1] != width or not str(header["feature_dtype"]).lstrip("<>=|").startswith("f"):
+        raise ValueError(f"{candidate.name} requires floating-point features of width {width}")
+    _labels(header_labels, header["feature_shape"][0], split)
+    del header_labels
+    features, labels, metadata = open_feature_cache(candidate, cache_dir, expected_sha256=expected)
+    if features.shape[1] != width or features.dtype.kind != "f":
+        raise ValueError(f"{candidate.name} requires floating-point features of width {width}, got {features.shape}/{features.dtype}")
+    return features, _labels(labels, len(features), split), metadata
+
+
+def _check_rows(features, ids, what):
     import numpy as np
-    backend = _option(args, "data_backend", "hf")
-    if backend == "imagefolder":
-        from torchvision.datasets import ImageFolder
-        directory = Path(args.data_root) / ("train" if split == "train" else "val")
-        dataset = ImageFolder(directory)
-        if len(dataset.classes) != 1000 or any(not re.fullmatch(r"n[0-9]{8}", value) for value in dataset.classes):
-            raise ValueError("ImageFolder must contain all 1,000 ImageNet synset directories (n########)")
-        labels = _labels(np.asarray(dataset.targets, dtype=np.int64), len(dataset), split)
-        digest = hashlib.sha256()
-        for path, label in dataset.samples:
-            stat = Path(path).stat()
-            digest.update(f"{Path(path).relative_to(directory).as_posix()}\0{label}\0{stat.st_size}\0{stat.st_mtime_ns}\n".encode())
-        identity = {"backend": backend, "path": str(directory.resolve()), "fingerprint": digest.hexdigest(),
-                    "fingerprint_kind": "relative_paths_labels_sizes_mtimes", "classes": dataset.classes}
-    elif backend == "hf":
-        from datasets import DownloadConfig, load_dataset
-        release = _resolved_release(IMAGENET_REPO, "dataset", _option(args, "imagenet_revision", "main"), args)
-        # Giving split= alone can still prepare every split in a dataset
-        # builder. Restrict the shard manifest itself before any download.
-        shards = sorted(name for name in release["files"]
-                        if name.endswith(".parquet") and re.match(rf"{split}(?:-|\.)", Path(name).name))
-        if not shards:
-            raise RuntimeError(f"Pinned ImageNet release has no recognized {split} Parquet shards")
-        with _offline_dataset(not args.download):
-            try:
-                # The repo metadata lists train/validation/test, so the builder's
-                # split check rejects a single-split manifest; _labels() below
-                # verifies the exact row count and class vocabulary instead.
-                dataset = load_dataset(IMAGENET_REPO, split=split, revision=release["revision"],
-                                       data_files={split: shards}, verification_mode="no_checks",
-                                       cache_dir=str(args.data_root), token=os.environ.get("HF_TOKEN") or True,
-                                       download_config=DownloadConfig(max_retries=5, local_files_only=not args.download))
-            except Exception as error:
-                raise RuntimeError(
-                    f"Cannot prepare ImageNet {split} ({type(error).__name__}: {error}). If this is an access error, "
-                    f"accept https://huggingface.co/datasets/{IMAGENET_REPO} access conditions and authenticate using "
-                    "HF_TOKEN or `hf auth login`; no alternative dataset is substituted."
-                ) from error
-        if not {"image", "label"}.issubset(dataset.column_names):
-            raise ValueError("ImageNet source must contain image and label columns")
-        labels = _labels(np.asarray(dataset.select_columns(["label"])["label"]), len(dataset), split)
-        names = list(getattr(dataset.features["label"], "names", []))
-        if len(names) != 1000:
-            raise ValueError("ImageNet source must declare the 1,000-class label vocabulary")
-        identity = {"backend": backend, "repository": IMAGENET_REPO, "revision": release["revision"],
-                    "fingerprint": dataset._fingerprint, "classes": names,
-                    "shards_sha256": canonical_hash({name: release["files"][name] for name in shards})}
-    else:
-        raise ValueError("data-backend must be hf or imagefolder")
-    identity.update(split=split, rows=len(labels), labels_sha256=_array_hash(labels),
-                    pixel_validation="every_selected_image_during_extraction")
-    return dataset, labels, identity
-
-
-def _parent_files(args):
-    import timm
-    import torch
-    import torchvision
-    release = _resolved_release("timm/resnet18.a1_in1k", "model", _option(args, "parent_revision", "main"), args)
-    weights, expected = _hub_file(release, "model.safetensors", args, require_lfs=True)
-    configuration, _ = _hub_file(release, "config.json", args)
-    observed = sha256_file(weights)
-    if observed != expected:
-        raise RuntimeError("ResNet-18 weight checksum differs from its pinned release")
-    identity = {"repository": release["repository"], "revision": release["revision"],
-                "weights_sha256": observed, "config_sha256": sha256_file(configuration),
-                "dimension": 512, "precision": "float32", "tf32": False, "timm": timm.__version__,
-                "torchvision": torchvision.__version__, "torch": str(torch.__version__)}
-    return weights, identity
-
-
-class _EvaluationCrop:
-    def __call__(self, image):
-        from torchvision.transforms import functional as fn, InterpolationMode
-        width, height = image.size
-        side = max(1, int(min(width, height) * 224 / 256))
-        image = fn.crop(image, (height - side) // 2, (width - side) // 2, side, side)
-        return fn.resize(image, [256, 256], interpolation=InterpolationMode.BILINEAR, antialias=True)
-
-
-class _SelectedImages:
-    """Worker-safe index-seeded transforms, independent of extraction/resume order."""
-    def __init__(self, dataset, ids, query_ids, backend, data_seed):
-        from torchvision import transforms
-        self.dataset, self.ids, self.backend = dataset, ids, backend
-        self.data_seed = int(data_seed)
-        self.query_ids = set(int(value) for value in query_ids)
-        normalization = transforms.Normalize((0.5,) * 3, (0.5,) * 3)
-        self.train_transform = transforms.Compose([
-            transforms.RandomResizedCrop(224, scale=(0.08, 1.0), ratio=(3 / 4, 4 / 3),
-                                         interpolation=transforms.InterpolationMode.BILINEAR, antialias=True),
-            transforms.RandomHorizontalFlip(0.5), transforms.ToTensor(), normalization,
-        ])
-        self.query_transform = transforms.Compose([_EvaluationCrop(), transforms.ToTensor(), normalization])
-
-    def __len__(self):
-        return len(self.ids)
-
-    def __getitem__(self, index):
-        import torch
-        source_id = int(self.ids[index])
-        sample = self.dataset[source_id]
-        original = sample["image"] if self.backend == "hf" else sample[0]
-        image = None
-        try:
-            if original is None or min(original.size) < 1:
-                raise ValueError(f"Invalid ImageNet image at source row {source_id}")
-            image = original.convert("RGB")
-            image.load()
-            with torch.random.fork_rng(devices=[]):
-                torch.random.default_generator.manual_seed(self.data_seed + source_id)
-                transform = self.query_transform if source_id in self.query_ids else self.train_transform
-                return transform(image)
-        except Exception as error:
-            raise RuntimeError(f"Failed decoding/preprocessing ImageNet row {source_id}") from error
-        finally:
-            if image is not None and image is not original:
-                image.close()
-            if original is not None and hasattr(original, "close"):
-                original.close()
-
-
-def _collate_images(images):
-    """Group the train224/query256 boundary without padding or changing views."""
-    import torch
-    groups = {}
-    for index, image in enumerate(images):
-        groups.setdefault(tuple(image.shape), []).append((index, image))
-    return [(torch.tensor([row[0] for row in rows], dtype=torch.long),
-             torch.stack([row[1] for row in rows])) for rows in groups.values()]
-
-
-def _materialize(rows, dimension, identity, args, make_batches):
-    """Resume FP32 writes from durable cursors; publish only complete maps."""
-    import numpy as np
-    signature = canonical_hash(identity)
-    directory = Path(args.cache_dir) / "features" / signature
-    directory.mkdir(parents=True, exist_ok=True)
-    final, partial, receipt = directory / "features.npy", directory / "features.partial.npy", directory / "features.json"
-    shape = (rows, dimension)
-    with exclusive_lock(directory / "extract.lock"):
-        metadata = json.loads(receipt.read_text(encoding="utf-8")) if receipt.exists() else {}
-        if metadata and metadata.get("signature") != signature:
-            raise RuntimeError(f"Feature cache identity mismatch: {receipt}")
-        cursor = int(metadata.get("rows_complete", 0))
-        if not 0 <= cursor <= rows:
-            raise RuntimeError(f"Invalid durable extraction cursor: {receipt}")
-        if final.exists() and not metadata.get("complete"):
-            if cursor != rows or partial.exists():
-                raise RuntimeError(f"Uncommitted feature cache: {final}")
-            metadata.update(complete=True, bytes=final.stat().st_size, mtime_ns=final.stat().st_mtime_ns)
-            atomic_json(receipt, metadata)
-        if metadata.get("complete"):
-            if not final.is_file() or final.stat().st_size != metadata["bytes"] or final.stat().st_mtime_ns != metadata["mtime_ns"]:
-                raise RuntimeError(f"Completed feature cache is missing or changed: {final}")
-            array = np.load(final, mmap_mode="r", allow_pickle=False)
-            if array.shape != shape or array.dtype != np.float32 or cursor != rows:
-                raise RuntimeError(f"Malformed completed feature cache: {final}")
-            callback = _option(args, "progress_callback")
-            if callback:
-                callback({"phase": "features", "rows_complete": rows, "rows": rows, "cache_hit": True})
-            return array, metadata
-        if cursor and not partial.exists():
-            raise RuntimeError(f"Partial feature data missing at durable cursor {cursor}: {partial}")
-        if not partial.exists():
-            required = rows * dimension * 4 + (512 << 20)
-            if shutil.disk_usage(directory).free < required:
-                raise RuntimeError(f"Insufficient free disk for feature cache ({required:,} bytes including reserve)")
-            array = np.lib.format.open_memmap(partial, mode="w+", dtype=np.float32, shape=shape)
-        else:
-            array = np.load(partial, mmap_mode="r+", allow_pickle=False)
-            if array.shape != shape or array.dtype != np.float32:
-                raise RuntimeError(f"Malformed partial feature cache: {partial}")
-        metadata.update(signature=signature, identity=identity, complete=False, rows_complete=cursor, rows=rows)
-        atomic_json(receipt, metadata)
-        started, prior = time.monotonic(), float(metadata.get("seconds", 0))
-        for batch_number, values in enumerate(make_batches(cursor)):
-            values = np.asarray(values, dtype=np.float32)
-            if values.ndim != 2 or values.shape[1] != dimension or cursor + len(values) > rows or not np.isfinite(values).all():
-                raise RuntimeError("Parent produced malformed/nonfinite feature rows")
-            if (np.square(values.astype(np.float64)).sum(axis=1) == 0).any():
-                raise RuntimeError("Parent produced zero-norm feature rows; exact normalized retrieval would be invalid")
-            stop = cursor + len(values)
-            array[cursor:stop] = values
-            cursor = stop
-            if (batch_number + 1) % 25 == 0 or cursor == rows:
-                array.flush()
-                with partial.open("r+b") as handle:
-                    os.fsync(handle.fileno())
-                metadata.update(rows_complete=cursor, seconds=prior + time.monotonic() - started)
-                atomic_json(receipt, metadata)
-                print(f"ImageNet feature cache: {cursor:,}/{rows:,} rows", flush=True)
-                callback = _option(args, "progress_callback")
-                if callback:
-                    callback({"phase": "features", "rows_complete": cursor, "rows": rows,
-                              "seconds": metadata["seconds"], "cache_hit": False})
-        if cursor != rows:
-            raise RuntimeError(f"Extraction ended early: {cursor}/{rows}")
-        del array
-        os.replace(partial, final)
-        metadata.update(complete=True, bytes=final.stat().st_size, mtime_ns=final.stat().st_mtime_ns)
-        atomic_json(receipt, metadata)
-        return np.load(final, mmap_mode="r", allow_pickle=False), metadata
-
-
-def _rn18_features(dataset, source_ids, query_ids, source, weights, parent, args, device):
-    identity = {"recipe": DATA_RECIPE, "source": source, "parent": parent,
-                "source_ids_sha256": _array_hash(source_ids), "query_ids_sha256": _array_hash(query_ids),
-                "data_seed": int(_option(args, "data_seed", 42)),
-                "transform": "rrc224_flip0.5_seedPlusSourceRow;query_center224of256_resize256;mean_std0.5;fp32"}
-    selected = _SelectedImages(dataset, source_ids, query_ids, args.data_backend, _option(args, "data_seed", 42))
-
-    def batches(cursor):
-        import torch
-        import timm
-        from safetensors.torch import load_file
-        from torch.utils.data import DataLoader, Subset
-        # Cache hits and cache misses must not change the later SAE RNG stream.
-        with torch.random.fork_rng(devices=[]):
-            network = timm.create_model("resnet18.a1_in1k", pretrained=False)
-        network.load_state_dict(load_file(str(weights)), strict=True)
-        network.reset_classifier(0)
-        network.eval().requires_grad_(False).to(device)
-        loader = DataLoader(Subset(selected, range(cursor, len(selected))), shuffle=False,
-                            batch_size=int(_option(args, "feature_batch_size", 256)),
-                            num_workers=int(_option(args, "workers", 4)), pin_memory=True,
-                            collate_fn=_collate_images,
-                            generator=torch.Generator().manual_seed(int(_option(args, "data_seed", 42))),
-                            **({"prefetch_factor": 2} if _option(args, "workers", 4) else {}))
-        try:
-            with torch.inference_mode(), torch.autocast(device_type="cuda", enabled=False):
-                for groups in loader:
-                    values = torch.empty((sum(len(images) for _, images in groups), 512), dtype=torch.float32)
-                    for positions, images in groups:
-                        output = network(images.to(device, non_blocking=True)).float()
-                        if output.shape != (len(images), 512):
-                            raise RuntimeError(f"Unexpected ResNet-18 feature shape: {tuple(output.shape)}")
-                        values[positions] = output.cpu()
-                    yield values.numpy()
-        finally:
-            del network
-    return _materialize(len(source_ids), 512, identity, args, batches)
+    for start in range(0, len(ids), 8192):
+        values = np.asarray(features[ids[start:start + 8192]], dtype=np.float32)
+        if not np.isfinite(values).all() or (np.linalg.norm(values, axis=1) == 0).any():
+            raise RuntimeError(f"Invalid/zero features in the selected {what}")
 
 
 def prepare_imagenet_features(args, backbone, device):
@@ -510,61 +283,30 @@ def prepare_imagenet_features(args, backbone, device):
     torch.backends.cudnn.allow_tf32 = False
     if backbone not in ("resnet18", "resnet50"):
         raise ValueError("MMRSAE supports resnet18 and resnet50")
-    if int(_option(args, "feature_batch_size", 256)) < 1 or int(_option(args, "workers", 4)) < 0:
-        raise ValueError("feature-batch-size must be positive and workers nonnegative")
     if int(_option(args, "max_val", 0)) < 0:
         raise ValueError("max-val must be nonnegative")
+    read_split = _ff2048_split if backbone == "resnet50" else _rn18_split
     query, query_labels, query_source, query_cache = None, None, None, None
     query_source_ids = np.empty(0, dtype=np.int64)
-    if backbone == "resnet50":
-        train, labels, source = _ff2048_split("train", args)
-        pools = _select_pools(labels, args)
-        selected = np.unique(np.concatenate(list(pools.values())))
-        # The common released FP32 array is memory mapped once, shared across
-        # budgets and seeds. Validate only rows this manual run can consume.
-        for start in range(0, len(selected), 8192):
-            values = np.asarray(train[selected[start:start + 8192]], dtype=np.float32)
-            if not np.isfinite(values).all() or (np.linalg.norm(values, axis=1) == 0).any():
-                raise RuntimeError("Invalid/zero FF2048 features in the selected training pools")
-        cache = {"path": str(train.filename), "dtype": str(train.dtype), "conversion": "FP32 batches when consumed"}
-        source_ids = np.arange(len(train), dtype=np.int64)
-        parent = {"identity": FF2048_PARENT, "dimension": 2048, "precision": str(train.dtype)}
-    else:
-        dataset, source_labels, source = _raw_split("train", args)
-        pools = _select_pools(source_labels, args)
-        source_ids = np.unique(np.concatenate(list(pools.values())))
-        weights, parent = _parent_files(args)
-        train, cache = _rn18_features(dataset, source_ids, pools["query"], source, weights, parent, args, device)
-        labels = source_labels[source_ids]
-        pools = {name: np.searchsorted(source_ids, ids).astype(np.int64) for name, ids in pools.items()}
-        del dataset
+    train, labels, source = read_split("train", args)
+    pools = _select_pools(labels, args)
+    # The archive is memory mapped once, shared across budgets and seeds.
+    # Validate only rows this manual run can consume.
+    _check_rows(train, np.unique(np.concatenate(list(pools.values()))), "training pools")
+    cache = {"path": str(train.filename), "dtype": str(train.dtype), "conversion": "FP32 batches when consumed"}
+    source_ids = np.arange(len(train), dtype=np.int64)
+    parent = ({"identity": FF2048_PARENT, "dimension": 2048, "precision": str(train.dtype)}
+              if backbone == "resnet50" else source["parent"])
     if args.evaluation == "official":
         maximum = int(_option(args, "max_val", 0))
-        if backbone == "resnet50":
-            query, query_labels, query_source = _ff2048_split("validation", args)
-            query_cache = {"path": str(query.filename), "dtype": str(query.dtype)}
-            ids = np.arange(len(query), dtype=np.int64)
-            query_source_ids = ids.copy()
-            if maximum:
-                ids, _ = _balanced_take(query_labels, ids, min(maximum, len(ids)), np.random.default_rng(_option(args, "data_seed", 42) + 173))
-            pools["query"] = ids
-            for start in range(0, len(ids), 8192):
-                values = np.asarray(query[ids[start:start + 8192]], dtype=np.float32)
-                if not np.isfinite(values).all() or (np.linalg.norm(values, axis=1) == 0).any():
-                    raise RuntimeError("Invalid/zero FF2048 validation features")
-        else:
-            dataset, all_query_labels, query_source = _raw_split("validation", args)
-            if query_source["classes"] != source["classes"]:
-                raise ValueError("Training and validation class vocabularies/order differ")
-            ids = np.arange(len(all_query_labels), dtype=np.int64)
-            if maximum:
-                ids, _ = _balanced_take(all_query_labels, ids, min(maximum, len(ids)), np.random.default_rng(_option(args, "data_seed", 42) + 173))
-            query, query_cache = _rn18_features(dataset, ids, ids, query_source, weights, parent, args, device)
-            query_labels = all_query_labels[ids]
-            query_source_ids = ids
-            pools["query"] = np.arange(len(ids), dtype=np.int64)
-            query_source = {**query_source, "selected_source_ids_sha256": _array_hash(ids)}
-            del dataset
+        query, query_labels, query_source = read_split("validation", args)
+        query_cache = {"path": str(query.filename), "dtype": str(query.dtype)}
+        ids = np.arange(len(query), dtype=np.int64)
+        query_source_ids = ids.copy()
+        if maximum:
+            ids, _ = _balanced_take(query_labels, ids, min(maximum, len(ids)), np.random.default_rng(_option(args, "data_seed", 42) + 173))
+        pools["query"] = ids
+        _check_rows(query, ids, "validation queries")
     split_identity = {"recipe": DATA_RECIPE, "evaluation": args.evaluation, "data_seed": int(_option(args, "data_seed", 42)),
                       "train_size": int(args.train_size), "dev_size": int(args.dev_size),
                       "anchor_count": int(args.anchor_count), "source": source,
@@ -595,7 +337,7 @@ def prepare_imagenet_features(args, backbone, device):
                 "data_seed": int(_option(args, "data_seed", 42)), "evaluation": args.evaluation,
                 "source_ids_sha256": _array_hash(source_ids), "query_source_ids_sha256": _array_hash(query_source_ids),
                 "pools": split_identity["pools"], "feature_dtype": str(train.dtype),
-                "preprocessing": "released_FF2048" if backbone == "resnet50" else cache["identity"]["transform"]}
+                "preprocessing": "released_FF2048" if backbone == "resnet50" else source["transform"]}
     provenance = {"identity": identity, "recipe": DATA_RECIPE, "backbone": backbone, "parent": parent,
                   "train_source": source, "query_source": query_source, "feature_cache": cache,
                   "query_cache": query_cache, "splits": split_identity, "split_directory": str(split_directory.resolve()),

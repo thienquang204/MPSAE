@@ -84,8 +84,8 @@ def build_parser():
     parser.add_argument("--train-size", type=int, default=128000, help="Fitting/gallery rows; 0 uses all eligible training rows")
     parser.add_argument("--dev-size", type=int, default=10000, help="Training-derived development queries, disjoint from fitting and anchors")
     parser.add_argument("--max-val", type=int, default=0, help="Official validation limit; 0 uses the full official partition")
-    parser.add_argument("--data-backend", choices=("hf", "imagefolder"), default="hf")
-    parser.add_argument("--data-root", type=Path, default=Path("data/imagenet"))
+    parser.add_argument("--embeddings-dir", type=Path, default=Path("data/embeddings"),
+                        help="Holds 1K_{train,val}_ff2048.npz and 1K_{train,val}_rn18.{npz,json}; raw images are not read")
     parser.add_argument("--cache-dir", type=Path, default=Path("data/mmrsae"))
     parser.add_argument("--download", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--ff2048-train", type=Path)
@@ -93,10 +93,8 @@ def build_parser():
     parser.add_argument("--ff2048-revision", default="main")
     parser.add_argument("--ff2048-train-sha256")
     parser.add_argument("--ff2048-val-sha256")
-    parser.add_argument("--imagenet-revision", default="main")
-    parser.add_argument("--parent-revision", default="main")
-    parser.add_argument("--feature-batch-size", type=int, default=256)
-    parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--rn18-train", type=Path, help="Default <embeddings-dir>/1K_train_rn18.npz")
+    parser.add_argument("--rn18-val", type=Path, help="Default <embeddings-dir>/1K_val_rn18.npz")
 
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--encode-batch-size", type=int, default=1024)
@@ -130,11 +128,11 @@ def validate_args(args):
         raise ValueError("--backbones must be a unique comma-separated list of resnet18,resnet50")
     for name in ("k", "hidden_dim", "repair_rank", "anchor_count", "anchor_chunk_size", "bank_refresh",
                  "alpha_power_iterations", "epochs", "batch_size", "checkpoint_every", "log_every",
-                 "feature_batch_size", "encode_batch_size", "query_batch_size", "gallery_chunk_size",
+                 "encode_batch_size", "query_batch_size", "gallery_chunk_size",
                  "score_buffer_mib", "retrieval_warmup", "retrieval_repeats", "ot_iters", "ot_max_refine_iters"):
         if getattr(args, name) < 1:
             raise ValueError(f"--{name.replace('_', '-')} must be positive")
-    for name in ("max_steps", "seed", "data_seed", "train_size", "max_val", "workers", "eval_every",
+    for name in ("max_steps", "seed", "data_seed", "train_size", "max_val", "eval_every",
                  "k_aux", "dead_steps", "faiss_temp_memory_mib"):
         if getattr(args, name) < 0:
             raise ValueError(f"--{name.replace('_', '-')} must be nonnegative")
