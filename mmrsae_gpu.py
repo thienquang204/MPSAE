@@ -162,6 +162,17 @@ def preflight(device, config, *, gallery_rows_estimate=0, input_dim=2048):
     rows = int(gallery_rows_estimate)
     if rows < 0 or input_dim < 1:
         raise ValueError("Gallery estimate must be nonnegative and input_dim positive")
+    landmark_dictionary = model.get("landmark_dictionary", True)
+    if not isinstance(landmark_dictionary, bool):
+        raise ValueError("model.landmark_dictionary must be a boolean")
+    rank, anchors = model.get("rank", 32), model.get("anchor_count", 1024)
+    context_references = model.get("context_reference_count", 0)
+    if isinstance(context_references, bool) or not isinstance(context_references, int) or context_references < 0:
+        raise ValueError("model.context_reference_count must be a nonnegative integer")
+    if landmark_dictionary:
+        for name, value in (("rank", rank), ("anchor_count", anchors)):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"model.{name} must be a positive integer")
     score_cap = int(settings.get("score_buffer_mib", 256)) * 2**20
     query_batch = int(settings.get("query_batch_size", 32))
     chunk_rows = min(int(settings.get("gallery_chunk_size", 65536)),
@@ -186,21 +197,40 @@ def preflight(device, config, *, gallery_rows_estimate=0, input_dim=2048):
                 workspace_bytes = 4 * query_batch * chunk
                 construction_bytes = 96 * chunk * k + 24 * (width + 1)
                 parameter_count = input_dim * width + width + input_dim
-                parameter_count += int(model.get("rank", 32)) * (input_dim + width)
-                # Parameters, gradients and Adam's two moments. Activations,
-                # the landmark bank and library scratch are excluded explicitly.
+                dictionary_buffer_bytes = attention_workspace_bytes = 0
+                if landmark_dictionary:
+                    parameter_count += 2 * input_dim * rank + 1
+                    # Frozen FP32 features and normalized keys, int64 anchor IDs,
+                    # and the temperature/architecture scalar buffers.
+                    dictionary_buffer_bytes = 8 * anchors * input_dim + 8 * anchors + 8
+                    # Simultaneous FP32 attention logits and softmax weights.
+                    attention_workspace_bytes = 8 * int(settings.get("encode_batch_size", 1024)) * anchors
+                # The separate immutable DLMMSAE reference bank stays resident
+                # during evaluation in this runner, though it is training-only.
+                context_reference_bytes = context_references * (8 * input_dim + 8)
+                model_buffer_bytes = 8 * width + dictionary_buffer_bytes + context_reference_bytes
+                # Parameters, gradients and Adam's two moments. The persistent
+                # input dictionary is included; the refreshed KL bank and full
+                # training/encoding activation footprint are not estimated here.
                 parameter_state_bytes = 16 * parameter_count
-                peak_bound = parameter_state_bytes + index_bytes + max(workspace_bytes, construction_bytes)
+                peak_bound = parameter_state_bytes + model_buffer_bytes + index_bytes + max(
+                    workspace_bytes, construction_bytes, attention_workspace_bytes)
                 check_cuda_memory_budget(target, peak_bound, fraction,
-                                         "MMRSAE parameters/Adam and resident sparse retrieval")
+                                         "MMRSAE parameters/Adam, input dictionary and sparse retrieval")
                 estimates = {"gallery_rows": rows, "sparse_index_upper_bytes": index_bytes,
                              "sparse_score_workspace_bytes": workspace_bytes,
                              "sparse_build_workspace_estimate_bytes": construction_bytes,
                              "parameter_adam_gradient_bytes": parameter_state_bytes,
-                             "estimate_excludes": "training activations, landmark bank, library overhead"}
+                             "landmark_dictionary": landmark_dictionary,
+                             "landmark_dictionary_buffer_bytes": dictionary_buffer_bytes,
+                             "context_reference_buffer_bytes": context_reference_bytes,
+                             "landmark_attention_workspace_estimate_bytes": attention_workspace_bytes,
+                             "model_buffer_bytes": model_buffer_bytes,
+                             "estimate_excludes": "training activations, refreshed student KL bank, "
+                                                  "non-attention encoding intermediates, library overhead"}
                 if config.get("dense_reference", False):
                     dense_bytes = 4 * rows * input_dim + temporary_mib * 2**20
-                    check_cuda_memory_budget(target, dense_bytes + parameter_state_bytes, fraction,
+                    check_cuda_memory_budget(target, dense_bytes + parameter_state_bytes + model_buffer_bytes, fraction,
                                              "optional resident full-parent FAISS gallery")
                     estimates["dense_reference_payload_and_scratch_bytes"] = dense_bytes
             properties = torch.cuda.get_device_properties(target)

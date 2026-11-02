@@ -1,5 +1,75 @@
 # Validation status for MMRSAE and the repair research profile
 
+The November 2, 2026 DLMMSAE and overview-plot update passed **124 CPU tests**
+under `tests/` in the existing `machinelearning` environment. The 30 added tests
+cover direct context KL, frozen/disjoint reference banks and self-ID exclusion,
+adapter gradients independent of residual blending, clean-teacher/noisy-student
+RNG, context KL together with sparse KL and angular OT, actual training-K
+annealing, exact Adam continuation, training-only data splits and synchronized
+training-time accounting. Linear-probe tests cover real CPU classifier learning,
+query-label isolation, sparse coordinate preservation, deterministic epoch
+checkpoint continuation, and interrupted per-K/full-parent aggregation. Plot
+tests generate PNG/PDFs, keep classification distinct from 1-NN, distinguish K
+from measured nonzero counts, reject unmeasured latency, and average only
+matched backbone sets at the same K. The final complete suite passed after
+correcting a test expectation: full dense width is not a measured nonzero count.
+
+Changed Python modules compile, the launcher passes Bash syntax checking, and
+`git diff --check` passes. File-writing tests and the MSYS shell check needed
+permitted execution outside the Windows sandbox. Nine-method layout fixtures
+were rendered and visually inspected under ignored `runs/.plot_layout_preview`;
+they are synthetic test values, not experiment results. `torch.cuda.is_available()`
+is false in this environment. No ImageNet fit, CUDA retrieval, GPU linear-probe
+fit, Docker build, download or dependency installation was run.
+
+The current recipe is `mmrsae-imagenet-context-distillation-v4` with fixed
+training references and a separate context RNG in DLMMSAE checkpoints. The
+auto evaluation grid now starts at K=2,4. Old protocol/source identities cannot
+resume under this changed recipe. End-to-end CUDA correctness, actual accuracy,
+compute cost and method improvements remain unmeasured.
+
+The earlier November 2, 2026 landmark-first architecture update passed 93 tests
+under `tests/`, all 16 `check_reference` mathematical checks, and one subsequently
+added optimizer-resume regression (110 CPU checks in total). Eleven tests in
+`tests/test_mmrsae_dictionary_first.py` cover landmark synthesis before the sole
+SAE output gate, original-feature reconstruction targets, frozen dictionary
+buffers and frontend gradients, clean budget nesting, dense activation masking,
+checkpoint restoration/old-architecture rejection, actual training-K annealing,
+and KL-bank refresh at budget changes. The real eight-update CPU resume test
+restores dictionary/model state, Adam moments, sparse bank keys and mask RNG;
+its continuation matches uninterrupted training bitwise across further K changes.
+The multi-K tests now initialize the input dictionary and check the K/2K/4K
+schedule rather than the superseded auxiliary-B schedule.
+
+The full suite required a permitted rerun outside the Windows sandbox after
+temporary-directory access failed with WinError 5, including inside the
+workspace. The Bash syntax check likewise passed after a permitted rerun;
+the task's temporary workspace directory was then removed. Changed Python
+files compile, and whitespace checks pass. CPU accounting probes verify model
+buffers and mocked GPU preflight estimates; they do not measure actual GPU use.
+The Docker COPY list includes the new `mmrsae_dictionary.py` module. No ImageNet
+fit, Docker build, dependency installation, download or CUDA benchmark was run.
+That revision used `mmrsae-imagenet-landmark-first-v3`; its checkpoints carry
+the fixed training dictionary and reject the former residual-repair architecture.
+
+The November 2, 2026 angular-OT/multi-K update passed all 83 tests under
+`tests/` and all 16 `check_reference` mathematical checks in the existing
+`machinelearning` Python environment. The 12 new tests cover angular-only model
+objectives and rejection of mixed-cost overrides, finite CPU backward, CSRv2's
+cosine budget and endpoint loss/gradient agreement with CSR, repaired inference
+at multiple K, budget validation, plan/preflight routing, per-K evaluation
+dispatch, interrupted-result persistence, legacy report compatibility and PNG/PDF
+generation with all seven methods. Retrieval in these new tests is mocked;
+synthetic report values are test fixtures, not ImageNet results. The initial
+sandbox run passed the computation checks but could not write temporary files;
+the permitted rerun passed, followed by the full CPU regression suite.
+The MSYS Bash syntax check for `run_mmrsae_imagenet.sh` passed after a permitted
+rerun outside the sandbox, which had blocked its signal pipe. Python compilation
+and whitespace checks also passed. No dependency was installed, no data was
+downloaded, and no ImageNet fitting, Docker build, extension compilation or CUDA
+retrieval benchmark was run for this update. The new protocols reject old recipe
+identities; these checks do not validate a server's CUDA runtime or measured accuracy.
+
 The November 1, 2026 prepared-embedding update passed 31 CPU data tests in the
 existing `machinelearning` environment: 15 new archive/source/routing checks
 and 16 existing split/cache/planner/bootstrap checks. They cover direct

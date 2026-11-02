@@ -20,6 +20,7 @@ import torch
 from torch.nn import functional as F
 
 from repair_data import atomic_json, canonical_hash, exclusive_lock, sha256_file
+from mpsae_repair import encoding_start
 
 
 def preflight(device, config):
@@ -71,7 +72,8 @@ def _array_hash(array):
 
 def _code_hash():
     digest = hashlib.sha256()
-    for filename in ("repair_benchmark.py", "mpsae_repair.py", "sparse_gpu_retrieval.py", "retrieval_timing.py",
+    for filename in ("repair_benchmark.py", "mpsae_repair.py", "mmrsae_dictionary.py",
+                     "sparse_gpu_retrieval.py", "retrieval_timing.py",
                      "csrc/sparse_retrieval.cpp", "csrc/sparse_retrieval.cu"):
         path = Path(__file__).resolve().parent / filename
         digest.update(filename.encode())
@@ -114,6 +116,7 @@ def _encoded_cache(features, row_ids, sae, repair, config, cache_root, identity,
         "rows_hash": _array_hash(row_ids), "rows": len(row_ids),
         "feature_shape": list(features.shape), "feature_dtype": str(features.dtype),
         "width": width, "sparse": sparse, "repair": repair is not None,
+        "landmark_synthesis": getattr(sae, "dictionary", None) is not None,
         "inference_code_hash": _code_hash(), "normalization": "row_l2_float32",
         "empty_codes": "kept_zero" if allow_empty else "rejected",
         "encoding_runtime": {"device": str(device), "device_name": torch.cuda.get_device_name(device),
@@ -174,7 +177,7 @@ def _encoded_cache(features, row_ids, sae, repair, config, cache_root, identity,
             wall_start = time.perf_counter()
             x = _tensor_batch(features, row_ids[first:last], device)
             start_event.record()
-            initial = x if not sparse else sae.encode(x, width)
+            initial = x if not sparse else encoding_start(sae, repair, x, width)
             initial_event.record()
             final = initial if repair is None else repair(sae, x, initial, width)
             final_event.record()
@@ -231,7 +234,7 @@ def _resident_encoding_measurement(features, ids, sae, repair, k, batch_size, de
     x = _tensor_batch(features, ids[:batch_size], device)
     warmup, repeats = (3, 5) if timed else (1, 1)
     def encode():
-        initial = sae.encode(x, k)
+        initial = encoding_start(sae, repair, x, k)
         return initial if repair is None else repair(sae, x, initial, k)
     for _ in range(warmup):
         encode()
@@ -242,7 +245,7 @@ def _resident_encoding_measurement(features, ids, sae, repair, k, batch_size, de
         torch.cuda.synchronize(device)
         wall_start = time.perf_counter()
         start.record()
-        initial = sae.encode(x, k)
+        initial = encoding_start(sae, repair, x, k)
         middle.record()
         final = initial if repair is None else repair(sae, x, initial, k)
         end.record()
@@ -270,6 +273,11 @@ def _numpy_rows(array, start, stop, device, dtype):
 
 def _parameter_bytes(module):
     return 0 if module is None else sum(p.numel() * p.element_size() for p in module.parameters())
+
+
+def _buffer_bytes(module):
+    """Resident buffers, including derived keys not persisted in checkpoints."""
+    return 0 if module is None else sum(b.numel() * b.element_size() for b in module.buffers())
 
 
 @torch.no_grad()
@@ -316,6 +324,7 @@ def benchmark(features, labels, gallery_ids, query_ids, sae, repair, config,
                             "gallery_ids_sha256": _array_hash(gallery_ids),
                             "query_ids_sha256": _array_hash(query_ids), "seed": int(seed),
                             "sparse": sae is not None, "repair": repair is not None,
+                            "landmark_synthesis": getattr(sae, "dictionary", None) is not None,
                             "k": config["model"]["k"] if sae is not None else int(features.shape[1])}
     if (output_dir / "metrics.json").exists():
         existing = json.loads((output_dir / "metrics.json").read_text(encoding="utf-8"))
@@ -472,6 +481,9 @@ def benchmark(features, labels, gallery_ids, query_ids, sae, repair, config,
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary_predictions, predictions_path)
+            dictionary = getattr(sae, "dictionary", None)
+            parameter_bytes = _parameter_bytes(sae) + _parameter_bytes(repair)
+            buffer_bytes = _buffer_bytes(sae) + _buffer_bytes(repair)
             metrics = {
                 "protocol": config["protocol"], "identity": identity, "seed": int(seed),
                 "measurement_identity": measurement_identity,
@@ -492,7 +504,14 @@ def benchmark(features, labels, gallery_ids, query_ids, sae, repair, config,
                 "backend_setup_seconds": backend_setup_seconds, "index_build_seconds": build_seconds,
                 "index": index_info, "index_bytes": index_info["index_bytes"],
                 "gallery_label_bytes": int(np.asarray(labels)[gallery_ids].nbytes),
-                "model_parameter_bytes": _parameter_bytes(sae) + _parameter_bytes(repair),
+                "model_parameter_bytes": parameter_bytes,
+                "model_buffer_bytes": buffer_bytes,
+                "model_tensor_bytes": parameter_bytes + buffer_bytes,
+                "model_memory_scope": "parameters and resident buffers; excludes gradients and optimizer state",
+                "landmark_synthesis": dictionary is not None,
+                "landmark_dictionary_anchors": 0 if dictionary is None else len(dictionary.features),
+                "landmark_dictionary_buffer_bytes": _buffer_bytes(dictionary),
+                "landmark_dictionary_parameter_bytes": _parameter_bytes(dictionary),
                 "sae_parameters": 0 if sae is None else sum(p.numel() for p in sae.parameters()),
                 "repair_parameters": 0 if repair is None else sum(p.numel() for p in repair.parameters()),
                 "protected_full_path": sae is None,

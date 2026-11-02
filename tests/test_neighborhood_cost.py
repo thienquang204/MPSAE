@@ -154,11 +154,11 @@ class NeighborhoodCostTests(unittest.TestCase):
         self.assertEqual(actual.shape, (2, 3, 4))
         torch.testing.assert_close(actual, self.reference(*profiles), atol=3e-7, rtol=3e-6)
 
-    def test_mixed_presets_default_to_point_two_and_controls_remain_angular(self):
+    def test_all_method_presets_use_angular_ot(self):
         for variant in VARIANTS:
             config = MMRSAEConfig(input_dim=6, hidden_dim=16, k=2, variant=variant)
-            self.assertEqual(config.mixture_weight, 0. if variant == "mmrsae-rel" else .2)
-        for baseline in ("mpsae", "csr"):
+            self.assertEqual(config.mixture_weight, 0.)
+        for baseline in ("mpsae", "csr", "csrv2"):
             config = MMRSAEConfig(input_dim=6, hidden_dim=16, k=2, variant=baseline)
             self.assertEqual(config.mixture_weight, 0.)
 

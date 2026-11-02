@@ -64,7 +64,7 @@ COPY transfer_experiments.py transfer_representations.py transfer_data.py transf
 COPY mpsae_repair.py mpsae_repair_experiment.py repair_data.py repair_runtime.py repair_benchmark.py \
      prepare_splits.py compare_predictions.py make_plan.py check_reference.py \
      experiments.json run_matrix.csv run_mpsae_repair.sh ./
-COPY mmrsae.py mmrsae_gpu.py mmrsae_data.py mmrsae_imagenet.py mmrsae_reporting.py export_rn18_embeddings.py run_mmrsae_imagenet.sh ./
+COPY mmrsae.py mmrsae_dictionary.py dlmmsae.py mmrsae_probe.py mmrsae_gpu.py mmrsae_data.py mmrsae_imagenet.py mmrsae_reporting.py export_rn18_embeddings.py run_mmrsae_imagenet.sh ./
 
 RUN chmod +x /app/container_pipeline.sh /app/run_csr_vs_mmpot_imagenet.sh \
     /app/run_all_experiments_container.sh /app/run_transfer_experiments.sh \

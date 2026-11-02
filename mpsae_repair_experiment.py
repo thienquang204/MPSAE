@@ -279,7 +279,7 @@ class ResearchRun:
                     auxiliary_budget=auxiliary_budget(cfg["model"]["k"], cfg["model"]["hidden_dim"], step, total, spec["auxiliary"]),
                     bank=bank, relation_weight=spec["rel_weight"],
                     ot_weight=transport["weight"] if spec["ot_cost"] != "off" else 0.,
-                    mixture_weight=transport["mixture_weight"] if spec["ot_cost"] == "mixed" else 0.,
+                    mixture_weight=0.,
                     teacher_temperature=banks["teacher_temperature"], student_temperature=banks["student_temperature"],
                     anchor_chunk_size=banks["anchor_chunk_size"],
                     mass=transport["mass"], eta=transport["entropy"], max_iters=transport["max_iterations"],
@@ -291,7 +291,7 @@ class ResearchRun:
     def bank(self, arm):
         from mpsae_repair import LandmarkBank
         spec = self.config["arms"][arm]
-        if not (spec["rel_weight"] or spec["ot_cost"] == "mixed"):
+        if not spec["rel_weight"]:
             return None
         ids = self.splits["anchor_indices"]
         return LandmarkBank(ids, self.tensor(ids))
@@ -327,11 +327,6 @@ class ResearchRun:
                 problems.append("at least 99% of diagnostic queries have no landmark support overlap")
             if result.get("gradient_relation_selected_near_zero_fraction", 1.) >= .99:
                 problems.append("at least 99% of selected relation-gradient entries are near zero")
-        if self.config["arms"][arm]["ot_cost"] == "mixed":
-            old, new = result.get("gradient_old_ot_norm", 0.), result.get("gradient_new_ot_norm", 0.)
-            result["weighted_new_to_old_gradient_ratio"] = new / max(old, 1e-30)
-            if old > 1e-12 and new < .01 * old:
-                problems.append("weighted neighborhood gradient is below 1% of old-cost gradient")
         result["diagnostics_acceptable"] = not problems
         result["investigate"] = problems
         atomic_json(path, result)

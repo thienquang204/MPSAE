@@ -135,14 +135,14 @@ def validate_config(config):
             raise ValueError(f"repair.{name} must lie in [0,1]")
     if not 0 < config["transport"]["mass"] < 1 or config["transport"]["entropy"] <= 0:
         raise ValueError("This solver profile requires partial mass in (0,1) and positive entropy")
-    if not 0 <= config["transport"]["mixture_weight"] <= 1:
-        raise ValueError("Transport mixture weight must lie in [0,1]")
+    if config["transport"]["mixture_weight"] != 0:
+        raise ValueError("Repair/MMRSAE objectives use angular OT only; transport.mixture_weight must be 0")
     if set(config["arms"]) != set("WCRMOSNFA"):
         raise ValueError("The declared arm matrix must contain W,C,R,M,O,S,N,F,A")
     for arm, spec in config["arms"].items():
         if set(spec) != {"repair", "mask", "rel_weight", "ot_cost", "auxiliary"}:
             raise ValueError(f"Arm {arm} has missing or unsupported fields")
-        if spec["ot_cost"] not in {"old", "off", "mixed"} or spec["auxiliary"] not in {"4k", "wide", "anneal"}:
+        if spec["ot_cost"] not in {"angular", "off"} or spec["auxiliary"] not in {"4k", "wide", "anneal"}:
             raise ValueError(f"Unsupported loss or auxiliary policy in arm {arm}")
         if spec["mask"] and not spec["repair"]:
             raise ValueError(f"Arm {arm}: erasure requires repair")
@@ -150,15 +150,15 @@ def validate_config(config):
             raise ValueError(f"Arm {arm}: repair and mask must be boolean switches")
         _number(spec, "rel_weight")
     expected_arms = {
-        "W": (False, False, 0., "old", "4k"),
-        "C": (False, False, 0., "old", "4k"),
-        "R": (True, False, 0., "old", "4k"),
-        "M": (True, True, 0., "old", "4k"),
-        "O": (True, True, 1., "old", "4k"),
+        "W": (False, False, 0., "angular", "4k"),
+        "C": (False, False, 0., "angular", "4k"),
+        "R": (True, False, 0., "angular", "4k"),
+        "M": (True, True, 0., "angular", "4k"),
+        "O": (True, True, 1., "angular", "4k"),
         "S": (True, True, 1., "off", "4k"),
-        "N": (True, True, 1., "mixed", "4k"),
-        "F": (True, True, 1., "mixed", "wide"),
-        "A": (True, True, 1., "mixed", "anneal"),
+        "N": (True, True, 1., "angular", "4k"),
+        "F": (True, True, 1., "angular", "wide"),
+        "A": (True, True, 1., "angular", "anneal"),
     }
     arm_fields = ("repair", "mask", "rel_weight", "ot_cost", "auxiliary")
     for arm, expected in expected_arms.items():
@@ -245,7 +245,9 @@ def build_plan(config, candidate="N"):
                          "final_batch_rows": source["expected_rows"] - (full_batches - 1) * config["confirmation"]["batch_size"],
                          "requires_positive_locked_gate": True, "initialization": "matched fresh initialization; no pilot checkpoint"},
         "transfer": {"default": "deferred", "requires": "positive confirmation, compatible exact parent, separately budgeted reduced adapter"},
-        "notes": ["Updates are not GPU hours; record actual wall time before expanding.",
+        "notes": ["All enabled OT objectives use angular cost; landmark KL is separate.",
+                  "O and N now have identical loss components; their historical arm labels are retained.",
+                  "Updates are not GPU hours; record actual wall time before expanding.",
                   "S inherits W's old-OT history in the pilot; fresh confirmation S receives no OT.",
                   "Official validation is not opened by pilot selection.",
                   "The full nine-budget curve and existing 570-head transfer grid are not launched."],

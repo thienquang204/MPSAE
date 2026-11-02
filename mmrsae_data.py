@@ -22,7 +22,7 @@ EMBEDDINGS_REPO = "quangnguyenopt/NSFW"
 FF2048_PARENT = "RAIVNLab/MRL:r50_mrl0_e0_ff2048.pt"
 IMAGENET_REPO = "ILSVRC/imagenet-1k"
 COUNTS = {"train": 1_281_167, "validation": 50_000}
-DATA_RECIPE = "mmrsae-imagenet-features-v1"
+DATA_RECIPE = "mmrsae-imagenet-features-v2-disjoint-landmarks"
 
 
 @dataclass
@@ -104,7 +104,9 @@ def _select_pools(labels, args):
     available = np.arange(len(labels), dtype=np.int64)
     query_ids, available = _balanced_take(labels, available, dev_size, rng)
     anchors, remainder = _balanced_take(labels, available, anchor_count, rng)
-    fit_ids = available if train_size == 0 else _balanced_take(labels, remainder, train_size, rng)[0]
+    # Synthesis anchors are reserved even for an unlimited fitting pool. This
+    # keeps the same self-free lookup policy for fitting and gallery queries.
+    fit_ids = remainder if train_size == 0 else _balanced_take(labels, remainder, train_size, rng)[0]
     if not len(fit_ids):
         raise ValueError("The fitting/gallery pool is empty")
     return {"fit": fit_ids, "query": query_ids, "anchors": anchors}

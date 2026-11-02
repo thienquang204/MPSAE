@@ -19,6 +19,7 @@ cache_dir="${MMRSAE_CACHE:-$SCRIPT_DIR/data/mmrsae}"
 args=(
     --backbones "${MMRSAE_BACKBONES:-resnet50,resnet18}"
     --k "${MMRSAE_K:-8}"
+    --eval-topk "${MMRSAE_EVAL_TOPK:-auto}"
     --epochs "${MMRSAE_EPOCHS:-10}"
     --max-steps "${MMRSAE_MAX_STEPS:-500}"
     --batch-size "${MMRSAE_BATCH_SIZE:-1024}"
@@ -44,10 +45,15 @@ args=(
 # argument, preserving spaces in paths and names without evaluating text.
 optional_options=(
     MMRSAE_RUN_NAME:--run-name MMRSAE_HIDDEN_DIM:--hidden-dim
+    MMRSAE_ANNEAL_START_K:--anneal-start-k MMRSAE_ANNEAL_FRACTION:--anneal-fraction
     MMRSAE_K_AUX:--k-aux MMRSAE_DEAD_STEPS:--dead-steps
     MMRSAE_LR:--lr MMRSAE_WEIGHT_DECAY:--weight-decay MMRSAE_ADAM_EPS:--adam-eps
     MMRSAE_RELATION_WEIGHT:--relation-weight MMRSAE_OT_WEIGHT:--ot-weight
-    MMRSAE_MIXTURE_WEIGHT:--mixture-weight MMRSAE_REPAIR_RANK:--repair-rank
+    MMRSAE_MIXTURE_WEIGHT:--mixture-weight MMRSAE_REPAIR_RANK:--dictionary-rank
+    MMRSAE_DICTIONARY_TEMPERATURE:--dictionary-temperature MMRSAE_DICTIONARY_BLEND:--dictionary-blend
+    MMRSAE_CONTEXT_WEIGHT:--context-weight MMRSAE_CONTEXT_REFERENCE_COUNT:--context-reference-count
+    MMRSAE_CONTEXT_TEACHER_TEMPERATURE:--context-teacher-temperature
+    MMRSAE_CONTEXT_STUDENT_TEMPERATURE:--context-student-temperature MMRSAE_CONTEXT_NOISE_STD:--context-noise-std
     MMRSAE_CLEAN_PROBABILITY:--clean-probability MMRSAE_ERASE_PROBABILITY:--erase-probability
     MMRSAE_TEACHER_TEMPERATURE:--teacher-temperature MMRSAE_STUDENT_TEMPERATURE:--student-temperature
     MMRSAE_BANK_REFRESH:--bank-refresh MMRSAE_CHECKPOINT_EVERY:--checkpoint-every
@@ -62,6 +68,8 @@ optional_options=(
     MMRSAE_FAISS_TEMP_MEMORY_MIB:--faiss-temp-memory-mib
     MMRSAE_RETRIEVAL_WARMUP:--retrieval-warmup MMRSAE_RETRIEVAL_REPEATS:--retrieval-repeats
     MMRSAE_MAX_VAL:--max-val
+    MMRSAE_PROBE_EPOCHS:--probe-epochs MMRSAE_PROBE_BATCH_SIZE:--probe-batch-size
+    MMRSAE_PROBE_LR:--probe-lr MMRSAE_PROBE_WEIGHT_DECAY:--probe-weight-decay
     MMRSAE_FF2048_TRAIN:--ff2048-train MMRSAE_FF2048_VAL:--ff2048-val
     MMRSAE_FF2048_REVISION:--ff2048-revision
     MMRSAE_FF2048_TRAIN_SHA256:--ff2048-train-sha256 MMRSAE_FF2048_VAL_SHA256:--ff2048-val-sha256
@@ -104,6 +112,11 @@ case "${MMRSAE_DENSE_REFERENCE:-0}" in
     1) args+=(--dense-reference) ;;
     0) ;;
     *) echo "MMRSAE_DENSE_REFERENCE must be 0 or 1" >&2; exit 2 ;;
+esac
+case "${MMRSAE_LINEAR_PROBE:-1}" in
+    1) args+=(--linear-probe) ;;
+    0) args+=(--no-linear-probe) ;;
+    *) echo "MMRSAE_LINEAR_PROBE must be 0 or 1" >&2; exit 2 ;;
 esac
 
 # MMRSAE_VARIANTS (comma-separated) runs several methods sequentially under

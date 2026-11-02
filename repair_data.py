@@ -18,7 +18,7 @@ import tempfile
 import zipfile
 
 
-PROTOCOL = "mpsae-repair-neighborhood-v1"
+PROTOCOL = "mpsae-repair-angular-v2"
 
 
 def sha256_file(path, chunk_size=8 * 1024 * 1024):

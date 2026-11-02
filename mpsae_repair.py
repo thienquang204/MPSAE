@@ -1,4 +1,4 @@
-"""Isolated research kernels for mpsae-repair-neighborhood-v1.
+"""Research kernels shared by angular-OT MMRSAE and its repair profile.
 
 The historical paper runner remains unchanged.  This module requires only
 PyTorch, and deliberately keeps labels, data ordering and selection gates out
@@ -68,6 +68,7 @@ class ResearchSAE(nn.Module):
 
 
 class RepairModule(nn.Module):
+    """Historical sparse-start repair, retained for the staged research profile."""
     def __init__(self, input_dim: int, hidden_dim: int, rank: int = 32,
                  alpha: float = 1.0, seed: int = 1227):
         super().__init__()
@@ -81,6 +82,10 @@ class RepairModule(nn.Module):
         self.U = nn.Parameter(u)
         self.V = nn.Parameter(torch.zeros(rank, hidden_dim))
         self.register_buffer("alpha", torch.tensor(float(alpha)))
+
+    def initial_code(self, sae, x, k, *, pre=None):
+        pre = sae.preactivations(x) if pre is None else pre
+        return sae.keep_topk(pre, k)
 
     def forward(self, sae, x, start, k):
         # The starting code has at most k nonzeros. COO SpMM avoids a dense
@@ -100,8 +105,13 @@ def indexed_decode(z, dictionary, k):
     return torch.sparse.mm(sparse, dictionary)
 
 
+def encoding_start(sae, repair, x, k):
+    """Shared first stage for fitting, bank construction and timed retrieval."""
+    return sae.encode(x, k) if repair is None else repair.initial_code(sae, x, k)
+
+
 def encode_repaired(sae, repair, x, k):
-    initial = sae.encode(x, k)
+    initial = encoding_start(sae, repair, x, k)
     return initial if repair is None else repair(sae, x, initial, k)
 
 
@@ -135,6 +145,23 @@ def backtrack_alpha(sae, x, k, alpha, max_halvings: int = 30):
                                   "fixed_iht_max_mse_increase": float((errors - initial_errors).max())}
         alpha *= .5
     raise RuntimeError("fixed-IHT alpha backtracking did not establish measured descent")
+
+
+def mask_dense_start(z, generator, clean_probability=.2, erase_probability=.25):
+    """Corrupt dense positive coefficients without selecting any Top-K support."""
+    if generator is None:
+        raise ValueError("masking requires a dedicated reproducible generator")
+    if not 0 <= clean_probability <= 1 or not 0 <= erase_probability <= 1:
+        raise ValueError("invalid masking probabilities")
+    clean = torch.rand((len(z), 1), generator=generator, device=generator.device).to(z.device) < clean_probability
+    erase = torch.rand(z.shape, generator=generator, device=generator.device).to(z.device) < erase_probability
+    erased = (~clean) & erase & z.gt(0)
+    stats = {"forced_clean_row_fraction": clean.float().mean(),
+             "unchanged_start_fraction": (~erased.any(1)).float().mean(),
+             "mask_erase_fraction": erased.sum() / z.gt(0).sum().clamp_min(1),
+             "mask_erased_coefficients": erased.sum(),
+             "mask_positive_coefficients": z.gt(0).sum()}
+    return z * (~erased), stats
 
 
 def mask_start(z, k, generator, clean_probability=.2, erase_probability=.25):
@@ -174,13 +201,18 @@ def reconstruction_terms(sae, x, k, aux_budget=None, *, repair=None,
                          mask_generator=None, mask=False, update_activity=True,
                          k_aux=512, clean_probability=.2, erase_probability=.25):
     pre = sae.preactivations(x)
+    dictionary_first = bool(getattr(sae, "dictionary_first", False))
     raw = {name: sae.keep_topk(pre, budget) for name, budget in
            (("raw_k", k), ("raw_2k", 2*k), ("raw_4k", 4*k))}
     aux_budget = min(aux_budget or 4*k, sae.decoder.shape[0])
     wide = raw["raw_4k"] if aux_budget == min(4*k, sae.decoder.shape[0]) else sae.keep_topk(pre, aux_budget)
     stats = {}
     starts = [raw["raw_k"], raw["raw_2k"]]
-    if mask:
+    if dictionary_first and mask:
+        masked_pre, stats = mask_dense_start(F.relu(pre), mask_generator,
+                                             clean_probability, erase_probability)
+        starts = [sae.keep_topk(masked_pre, budget) for budget in (k, 2*k)]
+    elif mask:
         if repair is None:
             raise ValueError("masked starts require repair")
         masked = [mask_start(z, budget, mask_generator, clean_probability, erase_probability)
@@ -202,7 +234,8 @@ def reconstruction_terms(sae, x, k, aux_budget=None, *, repair=None,
     reconstruction = indexed_decode(small, sae.decoder, k) + sae.pre_bias
     main = F.mse_loss(reconstruction, x)
     nested = F.mse_loss(indexed_decode(wide, sae.decoder, aux_budget) + sae.pre_bias, x)
-    # The dead mask is read immediately after RAW K update, as in MPSAE.
+    # Current MMRSAE counts clean constructed views; legacy methods count raw
+    # encoder views. The read/update ordering remains shared with MPSAE.
     if update_activity:
         sae.update_activity(raw["raw_k"])
         dead = sae.inactive_steps > sae.dead_steps
@@ -330,6 +363,8 @@ class LandmarkBank:
                  student_temperature=.1, anchor_chunk=128):
         if self.codes is None:
             raise RuntimeError("refresh the clean student bank before its first use")
+        if self.k != k:
+            raise ValueError("Landmark bank K differs from training K; refresh the bank before loss")
         if min(teacher_temperature, student_temperature) <= 0:
             raise ValueError("profile temperatures must be positive")
         ids = torch.as_tensor(row_ids, device=self.anchor_ids.device, dtype=torch.long)
@@ -658,6 +693,12 @@ def matching_gap_from_cost(cost, *, mass=.9, eta=.2, max_iters=100, tol=1e-4,
 def mixed_matching_gap(z1, z2, z3, *, profiles=None, mixture_weight=0., mass=.9,
                        eta=.2, max_iters=100, tol=1e-4, microbatch=32,
                        require_feasible=True, max_refine_iters=2000, diagnostics=False):
+    """OT helper retaining mixed-cost reference checks.
+
+    Active model objectives call this with mixture_weight=0; research_loss and
+    MMRSAEConfig reject nonzero mixtures. Neighborhood kernels remain available
+    for historical mathematical/reference tests, outside the training methods.
+    """
     if not 0 <= mixture_weight <= 1 or microbatch < 2:
         raise ValueError("invalid mixture weight or OT microbatch")
     if mixture_weight and profiles is None:
@@ -753,6 +794,8 @@ def research_loss(sae, x, k, *, repair=None, mask=False, mask_generator=None,
     """``allow_empty_codes`` keeps training through all-zero final codes, as
     the original MPSAE runner does; their count is reported, the objective is
     unchanged (an all-zero view has zero normalized direction in the OT cost)."""
+    if mixture_weight != 0:
+        raise ValueError("Repair/MMRSAE training uses angular OT only; mixture_weight must be 0")
     reconstruction, stats, views = reconstruction_terms(sae, x, k, auxiliary_budget,
         repair=repair, mask=mask, mask_generator=mask_generator, update_activity=update_activity,
         k_aux=k_aux, clean_probability=clean_probability, erase_probability=erase_probability)
@@ -766,7 +809,7 @@ def research_loss(sae, x, k, *, repair=None, mask=False, mask_generator=None,
     relation = x.new_zeros(())
     gap = x.new_zeros(())
     # Skip disabled mechanisms entirely; C does not even need a bank.
-    if relation_weight or (ot_weight and mixture_weight):
+    if relation_weight:
         if bank is None or row_ids is None:
             raise ValueError("relational arms require a refreshed bank and row IDs")
         profiles = bank.profiles(x, row_ids, views["final_k"], views["final_2k"], k=k,
@@ -778,7 +821,7 @@ def research_loss(sae, x, k, *, repair=None, mask=False, mask_generator=None,
     components = {"reconstruction": reconstruction, "relation": relation_weight*relation}
     if ot_weight:
         gap, solver_stats, context = mixed_matching_gap(views["final_k"], views["final_2k"],
-              views["raw_4k"], profiles=profiles, mixture_weight=mixture_weight, mass=mass,
+              views["raw_4k"], mixture_weight=0., mass=mass,
               eta=eta, max_iters=max_iters, tol=tol, microbatch=microbatch,
               require_feasible=require_feasible, max_refine_iters=max_refine_iters, diagnostics=diagnostics)
         cost_fields = {"cost0_mean", "costnbr_mean", "costmix_std", "cost0_min", "cost0_max",

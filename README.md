@@ -1,5 +1,46 @@
 # MMRSAE: ImageNet sparse retrieval experiments
 
+The current MMRSAE architecture synthesizes an embedding from a fixed training
+landmark dictionary before a tied SAE applies Top-K. The input dictionary is
+saved with the model and also used at inference; there is no post-SAE repair.
+Its comparison uses angular OT and multi-K accuracy. Templates include nine methods:
+`mmrsae`, `mmrsae-rel`, `mmrsae-wide`, `mmrsae-annealed`, `mpsae`, `csr`,
+`csrv2`, `dlmmsae`, and `dlmmsae-annealed`. Each checkpoint is evaluated at inference K=2..512 for RN18 and
+2..2048 for RN50 (`MMRSAE_EVAL_TOPK=auto`), producing `top1_by_k.png/.pdf` and
+per-K tables. Landmark KL stays separate from angular OT. CSRv2,
+MMRSAE-annealed (MMRSAEv2), and DLMMSAE-annealed anneal the actual training K by half-cosine;
+their auxiliary budget follows 4K(t). Landmark keys refresh whenever K changes.
+The current protocol is `mmrsae-imagenet-context-distillation-v4`; checkpoints
+from earlier protocol/source versions cannot resume under this recipe. Dictionary
+temperature and initial context blend default to 0.1. See
+[MMRSAE_IMAGENET.md](MMRSAE_IMAGENET.md) for the full recipe and output schema.
+
+DLMMSAE adds a direct loss on the synthesized context before residual blending
+or SAE Top-K. It distills the clean input's cosine relationship distribution
+over a fixed training reference set Q, separate from synthesis landmarks A.
+The student lookup receives Gaussian feature noise with standard deviation
+0.02 times each row's RMS; Q self-matches are excluded consistently from both
+distributions. Fixed keys need no EMA encoder or queue. The context weight
+defaults to 1 only for DLMMSAE. This supplies a direct query-adapter gradient;
+it does not guarantee that the learned context blend stays nonzero or improve
+accuracy without measurement.
+
+Endpoint evaluation now also fits a separate supervised linear classifier for
+each requested K and for full-parent features, using fitting labels only and
+keeping the backbone/SAE frozen. Classification Top-1 is reported separately
+from 1-NN retrieval. Set `MMRSAE_LINEAR_PROBE=0` or `--no-linear-probe` to skip
+that evaluation. Representation training GPU-hours exclude these classifiers,
+diagnostics, checkpoint I/O and retrieval; their synchronized measurement is
+stored separately from the broader elapsed `fit_seconds`.
+
+Reports include accuracy versus K, measured active dimensions, retrieval batch
+time and training GPU-hours, plus per-method backbone comparisons. PNG/PDFs,
+per-K CSVs and `overview.md` are written under `runs/mmrsae/reports/`.
+Enable `MMRSAE_DENSE_REFERENCE=1` for full-representation retrieval reference
+lines when the dense gallery fits in GPU memory. The full-parent classification
+reference is already included with linear probes. Missing measurements remain
+missing; these plots do not import numbers or methods from the example papers.
+
 **Docker Compose: configure once, then run.** On a Linux GPU server with Docker
 Compose, an NVIDIA driver compatible with CUDA 13.0.2, and NVIDIA Container
 Toolkit already installed:
@@ -159,8 +200,8 @@ For manual MMRSAE fits, initialize a separate file with
 environment can use `bash run_imagenet.sh --env local.env --local init`; edit
 its local paths, then use `bash run_imagenet.sh --env local.env run`.
 The chosen execution mode is saved in the file. The lower-level launchers
-remain available below. These commands document intended usage; this server
-update received source review only and has not been executed.
+remain available below. These commands document server usage; full ImageNet
+training and GPU performance measurements still require server execution.
 
 The current method family is **MMRSAE**. Its default workflow runs one manually
 selected variant and budget on ResNet-50 and ResNet-18, sequentially, using
@@ -185,9 +226,9 @@ experiment. `--plan`, `--preflight-only`, and `--prepare-only` expose the
 preparation steps separately. Official validation requires `--evaluation official`.
 
 See [MMRSAE_IMAGENET.md](MMRSAE_IMAGENET.md) for variants, parameter settings,
-data provenance, CUDA failure behavior, W&B and checkpoint reuse. This change
-was made through source inspection and editing only; no program, test,
-installation, download, training or benchmark was run. The legacy workflows
+data provenance, CUDA failure behavior, W&B and checkpoint reuse. CPU checks
+are recorded in [VALIDATION.md](VALIDATION.md); they do not establish ImageNet
+accuracy or GPU throughput. The legacy workflows
 below remain available through explicit scopes and retain their historical
 MPSAE method names.
 

@@ -1,8 +1,20 @@
 # MPSAE with sparse repair and teacher neighborhoods
 
+**Historical sparse-start and mixed-cost specification.** On 2 November 2026,
+current MMRSAE moved to landmark-context synthesis before a tied SAE/Top-K,
+with no post-SAE repair. The fixed training landmark dictionary is saved for
+inference. MMRSAEv2 (`mmrsae-annealed`) now uses half-cosine
+training-K annealing, with B=4K(t), rather than the auxiliary-only schedule
+below. Its clean supports are nested. All active OT costs are angular;
+landmark KL remains separate. The staged `repair` profile retains sparse-start
+repair under `mpsae-repair-angular-v2`; O and N select identical components.
+The earlier mixed-cost formulas are retained for historical reference. Current
+equations, multi-K evaluation and comparison are in
+[MMRSAE_IMAGENET.md](MMRSAE_IMAGENET.md).
+
 **Research specification and implementation guide — 29 October 2026**
 
-**Status:** this document specifies a proposed extension and controlled experiment. This checkout implements it through `mpsae_repair.py`, `mpsae_repair_experiment.py`, and `run_mpsae_repair.sh`, with `EXPERIMENT_SCOPE=repair` for Docker. The current review used source inspection only; it does not establish runtime success or report ImageNet results. The separate default `mmrsae` workflow performs manual fits with these components, rather than the staged control study below.
+**Status:** this document records the earlier proposed extension and controlled experiment. The sparse-start components remain in `mpsae_repair.py`, `mpsae_repair_experiment.py`, and `run_mpsae_repair.sh`, with `EXPERIMENT_SCOPE=repair` for Docker and the angular-only correction noted above. The original review used source inspection only; it did not establish runtime success or report ImageNet results. The separate default `mmrsae` workflow now uses landmark-first v3 instead of the sparse-start architecture below.
 
 ## 1. The proposal in plain language
 

@@ -1,5 +1,17 @@
 # Experiment plan: MPSAE repair, neighborhood cost, and auxiliary annealing
 
+**Historical sparse-start and mixed-cost experiment design.** As of 2 November
+2026, active repair/MMRSAE objectives use angular OT only. `experiments.json`
+declares `mpsae-repair-angular-v2`; O and N have identical components, so their
+difference no longer tests neighborhood OT. This staged study retains its
+sparse-start architecture. The current MMRSAE runner instead synthesizes a
+landmark-context embedding before tied SAE/Top-K, with nested clean supports
+and no post-SAE repair. Fixed input landmarks remain part of the inference model.
+MMRSAE-annealed (MMRSAEv2) now anneals actual training K by half-cosine like
+CSRv2/MPSAEv2; its default auxiliary budget is 4K(t). Auxiliary-only annealing
+below is historical. See [MMRSAE_IMAGENET.md](MMRSAE_IMAGENET.md) for the current
+`mmrsae-imagenet-landmark-first-v3` protocol and multi-K comparison.
+
 **Version:** mpsae-repair-neighborhood-v1  
 **Date:** 29 October 2026  
 **Primary aim:** decide which components justify their accuracy, encoding, and training costs using a small, reproducible sequence of tests.

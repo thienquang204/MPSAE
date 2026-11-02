@@ -1,7 +1,19 @@
 **MMRSAE and its MPSAE baseline: comparison with MRL and CSR**
 
-**Current family name: MMRSAE.** The repair/neighborhood method and its
-variants are now exposed as the `MMRSAE` class in [mmrsae.py](mmrsae.py).
+**2 November 2026 implementation update.** Current MMRSAE synthesizes an
+embedding from a fixed training landmark dictionary before a tied SAE applies
+Top-K. Its dictionary is saved for inference; post-SAE repair is removed.
+`mmrsae-annealed` (MMRSAEv2) now anneals actual training K by the same half-cosine
+strategy as CSRv2/MPSAEv2; auxiliary B defaults to 4K(t). Clean view supports
+are nested. All active MMRSAE/repair OT losses use angular cost only, with
+landmark KL separate. Sparse-start repair, nonnested repaired supports,
+auxiliary-only annealing and mixed-cost descriptions below are historical;
+the staged `repair` study retains its sparse-start architecture and angular
+loss profile. The current comparison includes CSRv2 and multi-K inference. See
+[MMRSAE_IMAGENET.md](MMRSAE_IMAGENET.md) for the active protocol.
+
+**Historical MMRSAE design, before landmark-first v3.** The earlier
+repair/neighborhood method used these family names:
 `mmrsae` combines masked sparse repair, direct neighborhood KL and mixed OT;
 `mmrsae-rel` omits OT; `mmrsae-wide` and `mmrsae-annealed` change the auxiliary
 raw reconstruction budget while keeping served K fixed. These names identify

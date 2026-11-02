@@ -1,6 +1,7 @@
 """Manually tunable, GPU-only ImageNet experiments for the MMRSAE family.
 
-One selected variant and K are fitted per requested backbone. There is no
+One selected variant and target K are fitted per requested backbone, then
+the same checkpoint is evaluated at each requested inference K. There is no
 automatic ablation matrix, candidate selection, transfer task, or CPU fallback.
 All downloads, GPU checks and fitting happen only when this entry point runs.
 """
@@ -8,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+from contextlib import contextmanager
 import hashlib
 import json
 import math
@@ -26,10 +28,11 @@ from wandb_tracking import (add_wandb_arguments, finish_wandb, init_wandb,
                             log_wandb_metrics, update_wandb_summary)
 
 
-PROTOCOL = "mmrsae-imagenet-manual-v1"
+PROTOCOL = "mmrsae-imagenet-context-distillation-v4"
 # MMRSAE presets plus the repair-free mpsae/csr baselines (mmrsae.METHODS).
-VARIANTS = ("mmrsae", "mmrsae-rel", "mmrsae-wide", "mmrsae-annealed", "mpsae", "csr")
-SOURCE_FILES = ("mmrsae_imagenet.py", "mmrsae.py", "mmrsae_data.py", "mmrsae_gpu.py",
+VARIANTS = ("mmrsae", "mmrsae-rel", "mmrsae-wide", "mmrsae-annealed", "mpsae", "csr", "csrv2",
+            "dlmmsae", "dlmmsae-annealed")
+SOURCE_FILES = ("mmrsae_imagenet.py", "mmrsae.py", "mmrsae_dictionary.py", "dlmmsae.py", "mmrsae_probe.py", "mmrsae_data.py", "mmrsae_gpu.py",
                 "mpsae_repair.py", "repair_data.py", "repair_runtime.py", "repair_benchmark.py",
                 "sparse_gpu_retrieval.py", "retrieval_timing.py", "wandb_tracking.py",
                 "csrc/sparse_retrieval.cpp", "csrc/sparse_retrieval.cu")
@@ -40,8 +43,26 @@ def build_parser():
     parser.add_argument("--backbones", default="resnet50,resnet18")
     parser.add_argument("--variant", choices=VARIANTS, default="mmrsae")
     parser.add_argument("--k", type=int, default=8)
+    parser.add_argument("--eval-topk", default="auto",
+                        help="Comma-separated inference budgets, or auto: 2,4,8,16,... up to parent dimension; training K is always included")
+    parser.add_argument("--anneal-start-k", type=int,
+                        help="CSRv2/MMRSAE/DLMMSAE annealed initial training K; default min(hidden_dim,max(64,4*K))")
+    parser.add_argument("--anneal-fraction", type=float, default=.7,
+                        help="Fraction of annealed-method updates used for half-cosine training-K decay")
     parser.add_argument("--hidden-dim", type=int, default=8192)
-    parser.add_argument("--repair-rank", type=int, default=32)
+    parser.add_argument("--dictionary-rank", "--repair-rank", dest="repair_rank", type=int, default=32,
+                        help="Rank of the landmark-query adapter; --repair-rank is a compatibility alias")
+    parser.add_argument("--dictionary-temperature", type=float, default=.1)
+    parser.add_argument("--dictionary-blend", type=float, default=.1,
+                        help="Initial trainable landmark-context mixture, strictly between 0 and 1")
+    parser.add_argument("--context-weight", type=float,
+                        help="DLMMSAE raw-context relational KL weight; default 1 for DLMMSAE, 0 otherwise")
+    parser.add_argument("--context-reference-count", type=int, default=1024,
+                        help="Fixed training references Q, separate from synthesis landmarks A")
+    parser.add_argument("--context-teacher-temperature", type=float, default=.1)
+    parser.add_argument("--context-student-temperature", type=float, default=.1)
+    parser.add_argument("--context-noise-std", type=float, default=.02,
+                        help="DLMMSAE lookup-query Gaussian noise, relative to each input row RMS; 0 disables")
     parser.add_argument("--mask", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--clean-probability", type=float, default=.2)
     parser.add_argument("--erase-probability", type=float, default=.25)
@@ -66,7 +87,6 @@ def build_parser():
     parser.add_argument("--anchor-count", type=int, default=1024)
     parser.add_argument("--anchor-chunk-size", type=int, default=128)
     parser.add_argument("--bank-refresh", type=int, default=25)
-    parser.add_argument("--alpha-power-iterations", type=int, default=50)
 
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--max-steps", type=int, default=500, help="Per-backbone update cap; 0 runs all requested epochs")
@@ -120,6 +140,12 @@ def build_parser():
     parser.add_argument("--timed-retrieval", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--dense-reference", action=argparse.BooleanOptionalAction, default=False,
                         help="Also measure the full frozen parent; requires its dense gallery to fit on the GPU")
+    parser.add_argument("--linear-probe", action=argparse.BooleanOptionalAction, default=True,
+                        help="Fit a separate training-only linear classifier per inference K and a full-parent reference")
+    parser.add_argument("--probe-epochs", type=int, default=10)
+    parser.add_argument("--probe-batch-size", type=int, default=1024)
+    parser.add_argument("--probe-lr", type=float, default=.1)
+    parser.add_argument("--probe-weight-decay", type=float, default=1e-4)
     parser.add_argument("--output-dir", type=Path, default=Path("runs/mmrsae"))
     parser.add_argument("--run-name", help="One trial name; use a different name after changing learning settings")
     actions = parser.add_mutually_exclusive_group()
@@ -139,7 +165,8 @@ def validate_args(args):
     if not backbones or len(set(backbones)) != len(backbones) or any(name not in ("resnet18", "resnet50") for name in backbones):
         raise ValueError("--backbones must be a unique comma-separated list of resnet18,resnet50")
     for name in ("k", "hidden_dim", "repair_rank", "anchor_count", "anchor_chunk_size", "bank_refresh",
-                 "alpha_power_iterations", "epochs", "batch_size", "checkpoint_every", "log_every",
+                 "epochs", "batch_size", "checkpoint_every", "log_every",
+                 "probe_epochs", "probe_batch_size",
                  "encode_batch_size", "query_batch_size", "gallery_chunk_size",
                  "score_buffer_mib", "retrieval_warmup", "retrieval_repeats", "ot_iters", "ot_max_refine_iters"):
         if getattr(args, name) < 1:
@@ -154,14 +181,26 @@ def validate_args(args):
             raise ValueError(f"--{name.replace('_', '-')} must be nonnegative")
     if args.k > args.hidden_dim or args.ot_microbatch < 2 or args.batch_size < 2:
         raise ValueError("Require K <= hidden dimension and batch/OT group sizes >=2")
+    if args.context_reference_count < 3:
+        raise ValueError("--context-reference-count must be at least 3 (two alternatives after self exclusion)")
+    for backbone in backbones:
+        evaluation_budgets(args, 2048 if backbone == "resnet50" else 512)
+    if args.anneal_start_k is not None and not args.k <= args.anneal_start_k <= args.hidden_dim:
+        raise ValueError("--anneal-start-k must be between K and hidden dimension")
+    if not math.isfinite(args.anneal_fraction) or not 0 < args.anneal_fraction <= 1:
+        raise ValueError("--anneal-fraction must be in (0,1]")
+    if args.mixture_weight not in (None, 0):
+        raise ValueError("MMRSAE uses angular OT only; --mixture-weight must be 0")
     if args.evaluation == "dev" and args.dev_size < 1:
         raise ValueError("--dev-size must be positive for development evaluation")
-    for name in ("lr", "adam_eps", "teacher_temperature", "student_temperature", "ot_eta", "ot_tol",
-                 "contrastive_temperature"):
+    for name in ("lr", "adam_eps", "teacher_temperature", "student_temperature", "dictionary_temperature", "ot_eta", "ot_tol",
+                 "contrastive_temperature", "context_teacher_temperature", "context_student_temperature", "probe_lr"):
         value = getattr(args, name)
         if not math.isfinite(value) or value <= 0:
             raise ValueError(f"{name} must be finite and positive")
-    for name in ("weight_decay", "relation_weight", "ot_weight", "contrastive_weight"):
+    if not math.isfinite(args.dictionary_blend) or not 0 < args.dictionary_blend < 1:
+        raise ValueError("--dictionary-blend must be strictly between 0 and 1")
+    for name in ("weight_decay", "relation_weight", "ot_weight", "contrastive_weight", "context_weight", "context_noise_std", "probe_weight_decay"):
         value = getattr(args, name)
         if value is not None and (not math.isfinite(value) or value < 0):
             raise ValueError(f"{name} must be finite and nonnegative")
@@ -182,6 +221,23 @@ def validate_args(args):
     return backbones
 
 
+def evaluation_budgets(args, input_dim):
+    """Inference budgets for one trained checkpoint, capped only by SAE width."""
+    if args.eval_topk == "auto":
+        limit = min(input_dim, args.hidden_dim)
+        budgets = [2 ** power for power in range(1, limit.bit_length()) if 2 ** power <= limit]
+    else:
+        try:
+            budgets = [int(item.strip()) for item in args.eval_topk.split(",")]
+        except ValueError as error:
+            raise ValueError("--eval-topk must be auto or comma-separated positive integers") from error
+        if not budgets or len(set(budgets)) != len(budgets):
+            raise ValueError("--eval-topk requires unique budgets")
+        if any(k < 1 or k > args.hidden_dim for k in budgets):
+            raise ValueError("Evaluation K must be between 1 and hidden_dim")
+    return sorted(set(budgets + [args.k]))
+
+
 def retrieval_config(args):
     return {"query_batch_size": args.query_batch_size, "gallery_chunk_size": args.gallery_chunk_size,
             "score_buffer_mib": args.score_buffer_mib, "faiss_temp_memory_mib": args.faiss_temp_memory_mib,
@@ -200,7 +256,11 @@ def method_config(args, input_dim):
         mass=args.ot_mass, eta=args.ot_eta, max_iters=args.ot_iters, max_refine_iters=args.ot_max_refine_iters,
         tol=args.ot_tol, microbatch=args.ot_microbatch, k_aux=args.k_aux, dead_steps=args.dead_steps,
         clean_probability=args.clean_probability, erase_probability=args.erase_probability,
-        anchor_chunk_size=args.anchor_chunk_size, allow_empty_codes=args.allow_empty_codes)
+        anchor_chunk_size=args.anchor_chunk_size, allow_empty_codes=args.allow_empty_codes,
+        dictionary_temperature=args.dictionary_temperature, dictionary_blend=args.dictionary_blend,
+        context_weight=args.context_weight, context_teacher_temperature=args.context_teacher_temperature,
+        context_student_temperature=args.context_student_temperature, context_noise_std=args.context_noise_std,
+        anneal_start_k=args.anneal_start_k, anneal_fraction=args.anneal_fraction)
 
 
 def serializable(value):
@@ -267,28 +327,68 @@ def evaluate(args, bundle, model, output, checkpoint_path, identity, step, *, de
     from repair_benchmark import benchmark
     suffix = f"step_{step:07d}" if intermediate else "endpoint"
     directory = output / ("parent" if dense else "retrieval") / suffix
-    config = {"protocol": PROTOCOL, "model": {"input_dim": model.config.input_dim,
-              "hidden_dim": args.hidden_dim, "k": args.k}, "retrieval": retrieval_config(args)}
     benchmark_identity = {"experiment": identity, "checkpoint_sha256": identity["data_sha256"] if dense else sha256_file(checkpoint_path),
                           "query_source": canonical_hash(bundle.provenance["identity"]),
                           "method": "full_parent" if dense else args.variant, "pool": args.evaluation,
                           "step": 0 if dense else step, "seed": args.seed}
-    result = benchmark(bundle.train, bundle.train_labels, bundle.gallery_ids, bundle.query_ids,
-        None if dense else model.sae, None if dense else model.repair, config, directory, args.seed,
-        identity=benchmark_identity, device=next(model.parameters()).device,
-        query_features=bundle.query, query_labels=bundle.query_labels,
-        timed=args.timed_retrieval and not intermediate)
-    result.update({"family": "MMRSAE" if not dense else "full_parent", "variant": args.variant if not dense else None,
+    metadata = {"family": "MMRSAE" if not dense else "full_parent", "variant": args.variant if not dense else None,
                    "evaluation_partition": args.evaluation, "step": step,
+                   "training_k": args.k, "ot_cost": "angular" if not dense and model.config.ot_weight else "none",
                    "interpretation": "manual development tuning" if args.evaluation == "dev" else
-                   "official validation; any tuning or repeated inspection of these scores must be disclosed"})
+                   "official validation; any tuning or repeated inspection of these scores must be disclosed"}
+    budgets = [args.k] if dense or intermediate else evaluation_budgets(args, model.config.input_dim)
+    per_topk = {}
+    for k in budgets:
+        config = {"protocol": PROTOCOL, "model": {"input_dim": model.config.input_dim,
+                  "hidden_dim": args.hidden_dim, "k": k}, "retrieval": retrieval_config(args)}
+        target = directory if dense else directory / f"k_{k}"
+        result = benchmark(bundle.train, bundle.train_labels, bundle.gallery_ids, bundle.query_ids,
+            None if dense else model.sae, None if dense else model.repair, config, target, args.seed,
+            identity=benchmark_identity, device=next(model.parameters()).device,
+            query_features=bundle.query, query_labels=bundle.query_labels,
+            timed=args.timed_retrieval and not intermediate)
+        result.update(metadata)
+        atomic_json(target / "result.json", result)
+        if not dense:
+            per_topk[str(k)] = result
+            # Persist completed points even if a later budget fails or the job stops.
+            atomic_json(directory / "result.json", {**metadata, "per_topk": per_topk,
+                "evaluation_topk": budgets, "complete": False,
+                "budget_evaluation": "single_checkpoint_multi_k"})
+        log_wandb_metrics("parent" if dense else f"retrieval/k_{k}", result, step_metric="step")
+    if not dense:
+        # Keep endpoint-K fields for existing consumers, and expose every measured K.
+        result = {**per_topk[str(args.k)], "per_topk": per_topk, "evaluation_topk": budgets,
+                  "complete": True, "budget_evaluation": "single_checkpoint_multi_k"}
     atomic_json(directory / "result.json", result)
     log_wandb_metrics("parent" if dense else "retrieval", result, step_metric="step")
     update_wandb_summary({"parent" if dense else "retrieval": result})
     return result
 
 
-def diagnostic(args, bundle, model, bank, output, step, total):
+def refresh_training_bank(args, model, bank, step, total, *, force=False, log=True):
+    """Keep clean landmark keys at the budget used by the next loss.
+
+    ``step`` is a completed-update count and may equal ``total`` for endpoint
+    diagnostics. A changed training K requires fresh K/2K keys even between
+    periodic refreshes; a resumed matching bank retains its saved age.
+    """
+    if total < 1 or not 0 <= step <= total:
+        raise ValueError("Bank refresh position must be in [0, total_updates]")
+    if bank is None:
+        return None
+    k = model.config.training_k(min(step, total - 1), total)
+    if not force and bank.codes is not None and bank.k == k:
+        return None
+    refresh = bank.refresh(model.sae, model.repair, k,
+                           batch_size=args.encode_batch_size, step=step)
+    record = {"step": step, "training_k": k, **refresh}
+    if log:
+        log_wandb_metrics("bank", record, step_metric="step")
+    return record
+
+
+def diagnostic(args, bundle, model, bank, output, step, total, *, context_bank=None):
     import torch
     if total < 1 or not 0 <= step <= total:
         raise ValueError("Diagnostic position must be in [0, total_updates]")
@@ -296,11 +396,14 @@ def diagnostic(args, bundle, model, bank, output, step, total):
     ids = bundle.fit_ids[:min(64, len(bundle.fit_ids))]
     before = model.sae.inactive_steps.clone()
     generator = torch.Generator(device="cpu").manual_seed(args.seed + 9001)
+    context_generator = torch.Generator(device="cpu").manual_seed(args.seed + 9002)
     # Endpoint reports use completed-update counts, while the loss schedule
     # accepts zero-based update indices. Reuse the final update's budget.
     loss_step = min(step, total - 1)
+    refresh_training_bank(args, model, bank, step, total)
     _, stats, views = model.loss(tensor_rows(bundle.train, ids, next(model.parameters()).device),
         bank=bank, row_ids=ids, mask_generator=generator, step=loss_step, total_steps=total,
+        context_bank=context_bank, context_generator=context_generator,
         diagnostics=True, update_activity=False)
     if not torch.equal(before, model.sae.inactive_steps):
         raise RuntimeError("Diagnostic mutated SAE activity counters")
@@ -312,9 +415,6 @@ def diagnostic(args, bundle, model, bank, output, step, total):
     warnings = []
     if report.get("zero_overlap_fraction", 0.) >= .99:
         warnings.append("Almost all diagnostic codes have no landmark overlap; neighborhood learning may be ineffective")
-    old, new = report.get("gradient_old_ot_norm", 0.), report.get("gradient_new_ot_norm", 0.)
-    if old > 1e-12 and new < .01 * old and model.config.mixture_weight > 0 and model.config.ot_weight > 0:
-        warnings.append("Neighborhood OT gradient is below 1% of old-cost gradient on this diagnostic batch")
     if report.get("final_zero_code_fraction", 0.) > 0:
         warnings.append(f"{report['final_zero_code_fraction']:.2%} of diagnostic codes are all zero (support collapse)")
     elif report.get("final_nnz_below_k_fraction", 0.) > 0:
@@ -346,6 +446,56 @@ def training_batches(ids, seed, epoch, batch_size, offset=0):
         yield ordinal, ids[order[first:last]]
 
 
+TRAINING_TIME_SCOPE = (
+    "single GPU synchronized wall time: training batch transfer, forward/loss, backward, "
+    "optimizer and training key refresh; excludes initialization, diagnostics, logging, "
+    "checkpoint I/O, feature preparation and all evaluation"
+)
+
+
+class TrainingTimer:
+    """Accumulate only explicit training regions, including completed CUDA work."""
+
+    def __init__(self, device, seconds=0., *, synchronize=None, clock=None):
+        if not math.isfinite(seconds) or seconds < 0:
+            raise ValueError("Training seconds must be finite and nonnegative")
+        self.seconds = float(seconds)
+        if synchronize is None:
+            import torch
+            synchronize = lambda: torch.cuda.synchronize(device)
+        self.synchronize = synchronize
+        self.clock = time.perf_counter if clock is None else clock
+
+    @contextmanager
+    def measure(self):
+        self.synchronize()
+        started = self.clock()
+        try:
+            yield
+        finally:
+            self.synchronize()
+            self.seconds += self.clock() - started
+
+
+def context_reference_ids(args, bundle):
+    """Deterministic training-only Q; its teacher distribution never sees dev/val."""
+    import numpy as np
+    anchors = np.asarray(bundle.anchor_ids, dtype=np.int64)
+    for name in ("fit_ids", "gallery_ids"):
+        if np.intersect1d(anchors, getattr(bundle, name)).size:
+            raise ValueError(f"DLMMSAE synthesis landmarks must be disjoint from {name}")
+    if args.evaluation == "dev" and np.intersect1d(anchors, bundle.query_ids).size:
+        raise ValueError("DLMMSAE synthesis landmarks must be disjoint from development queries")
+    candidates = np.asarray(bundle.fit_ids, dtype=np.int64)
+    if len(np.unique(candidates)) != len(candidates):
+        raise ValueError("DLMMSAE fitting IDs must be unique")
+    count = args.context_reference_count
+    if count < 3 or count > len(candidates):
+        raise ValueError("DLMMSAE context reference count must be in [3, number of fitting rows]")
+    rng = np.random.default_rng(np.random.SeedSequence([args.data_seed, 9131]))
+    return np.sort(rng.choice(candidates, size=count, replace=False))
+
+
 def fit_and_evaluate(args, backbone, bundle, output, code, gpu, *, failure_context=None):
     import numpy as np
     import torch
@@ -357,6 +507,14 @@ def fit_and_evaluate(args, backbone, bundle, output, code, gpu, *, failure_conte
     total = per_epoch * args.epochs
     if args.max_steps:
         total = min(total, args.max_steps)
+    reference_ids = context_reference_ids(args, bundle) if cfg.context_weight else None
+    context_identity = None if reference_ids is None else {
+        "source": "fixed_fitting_rows_disjoint_from_synthesis_landmarks",
+        "count": len(reference_ids), "seed_stream": [args.data_seed, 9131],
+        "ids_sha256": hashlib.sha256(reference_ids.astype("<i8").tobytes()).hexdigest(),
+        "self_match_policy": "exclude each query's own ID from aligned teacher/student support",
+        "keys": "fixed_original_embeddings_no_momentum_encoder",
+    }
     fit_recipe = {"protocol": PROTOCOL, "family": "MMRSAE", "backbone": backbone,
                   "method": cfg.to_dict(), "data_sha256": canonical_hash(bundle.provenance["identity"]),
                   "fit_ids_sha256": hashlib.sha256(np.asarray(bundle.fit_ids, dtype=np.int64).tobytes()).hexdigest(),
@@ -365,7 +523,9 @@ def fit_and_evaluate(args, backbone, bundle, output, code, gpu, *, failure_conte
                   "singleton_tail": "merged into previous batch; no discarded samples",
                   "optimizer": {"name": "Adam", "lr": args.lr, "betas": [.9, .999],
                                 "eps": args.adam_eps, "weight_decay": args.weight_decay},
-                  "bank_refresh": args.bank_refresh, "alpha_power_iterations": args.alpha_power_iterations,
+                  "bank_refresh": args.bank_refresh,
+                  "context_reference": context_identity,
+                  "bank_budget_policy": "refresh before loss whenever training K changes",
                   "evaluation": args.evaluation, "code": code,
                   "precision": {"dtype": "float32", "amp": False, "tf32": False},
                   "runtime": {"torch": str(torch.__version__), "cuda": torch.version.cuda,
@@ -376,27 +536,40 @@ def fit_and_evaluate(args, backbone, bundle, output, code, gpu, *, failure_conte
     optimizer = torch.optim.Adam(list(named.values()), lr=args.lr, betas=(.9, .999),
                                  eps=args.adam_eps, weight_decay=args.weight_decay)
     masks = torch.Generator(device="cpu").manual_seed(args.seed + 101)
+    context_generator = torch.Generator(device="cpu").manual_seed(args.seed + 202)
     bank = (LandmarkBank(bundle.anchor_ids, tensor_rows(bundle.train, bundle.anchor_ids, device),
                          allow_empty_codes=cfg.allow_empty_codes) if model.needs_bank else None)
+    context_bank = None
+    if model.needs_context:
+        from dlmmsae import ContextReferenceBank
+        context_bank = ContextReferenceBank(reference_ids,
+            tensor_rows(bundle.train, reference_ids, device), anchor_ids=bundle.anchor_ids)
     checkpoint = output / "last.pt"
-    next_step, elapsed, calibration = 0, 0., None
+    next_step, elapsed, dictionary_initialization = 0, 0., None
+    training_timer = TrainingTimer(device)
     if checkpoint.exists():
         saved = load_checkpoint(checkpoint, expected_identity=fit_recipe)
         model.load_state_dict(saved["model"], strict=True)
         restore_adam(optimizer, named, saved["optimizer"])
         restore_rng(saved["rng"], mask_generator=masks)
+        if context_bank is not None:
+            if saved.get("context_bank") is None or saved.get("context_rng") is None:
+                raise ValueError("Checkpoint is missing DLMMSAE context references or perturbation RNG")
+            context_bank.load_state_dict(saved["context_bank"])
+            context_generator.set_state(saved["context_rng"].cpu())
         if bank is not None:
             if saved["bank"] is None:
                 raise ValueError("Checkpoint is missing its landmark bank")
             bank.load_state_dict(saved["bank"])
         next_step = int(saved["next_step"])
         elapsed = float(saved["fit_seconds"])
-        calibration = saved["calibration"]
+        training_timer = TrainingTimer(device, float(saved["training_seconds"]))
+        dictionary_initialization = saved["dictionary_initialization"]
         del saved
         print(f"Resuming {backbone}/{args.variant} at update {next_step}/{total}", flush=True)
     else:
-        calibration = model.initialize_repair(tensor_rows(bundle.train, bundle.fit_ids[:32], device),
-                                               iterations=args.alpha_power_iterations)
+        dictionary_initialization = model.initialize_dictionary(
+            tensor_rows(bundle.train, bundle.anchor_ids, device), anchor_ids=bundle.anchor_ids)
     if not 0 <= next_step <= total:
         raise ValueError("Checkpoint position is outside the requested training recipe")
     train_log = output / "training.jsonl"
@@ -407,19 +580,24 @@ def fit_and_evaluate(args, backbone, bundle, output, code, gpu, *, failure_conte
 
     def save(position):
         torch.cuda.synchronize(device)
-        save_checkpoint(checkpoint, {"format": "mmrsae-imagenet-v1", "identity": fit_recipe,
+        save_checkpoint(checkpoint, {"format": "mmrsae-imagenet-v4", "identity": fit_recipe,
             "model": model.state_dict(), "optimizer": pack_adam(optimizer, named),
             "rng": rng_state(mask_generator=masks), "bank": None if bank is None else bank.state_dict(),
+            "context_bank": None if context_bank is None else context_bank.state_dict(),
+            "context_rng": None if context_bank is None else context_generator.get_state(),
+            "training_seconds": training_timer.seconds, "training_time_scope": TRAINING_TIME_SCOPE,
             "next_step": position, "next_epoch": position // per_epoch,
             "next_batch": position % per_epoch, "fit_seconds": elapsed + time.perf_counter() - started,
-            "calibration": calibration})
+            "dictionary_initialization": dictionary_initialization})
 
-    if bank is not None and bank.codes is None:
-        bank.refresh(model.sae, model.repair, args.k, batch_size=args.encode_batch_size, step=next_step)
+    with training_timer.measure():
+        refresh_record = refresh_training_bank(args, model, bank, next_step, total, log=False)
+    if refresh_record is not None:
+        log_wandb_metrics("bank", refresh_record, step_metric="step")
     if not checkpoint.exists():
         save(0)
     if next_step == 0 and not (output / "diagnostic_0000000.json").exists():
-        diagnostic(args, bundle, model, bank, output, 0, total)
+        diagnostic(args, bundle, model, bank, output, 0, total, context_bank=context_bank)
     # Baseline evaluation is optional, never an automatic backbone training job.
     dense = evaluate(args, bundle, model, output, checkpoint, fit_recipe, next_step, dense=True) if args.dense_reference else None
     epoch = next_step // per_epoch
@@ -429,31 +607,37 @@ def fit_and_evaluate(args, backbone, bundle, output, code, gpu, *, failure_conte
                                                        offset=next_step % per_epoch):
                 if next_step >= total:
                     break
-                features = tensor_rows(bundle.train, ids, device)
-                optimizer.zero_grad(set_to_none=True)
-                loss, stats, views = model.loss(features, bank=bank, row_ids=ids, mask_generator=masks,
-                                                step=next_step, total_steps=total)
-                loss.backward()
-                for name, parameter in named.items():
-                    if parameter.grad is not None and not bool(torch.isfinite(parameter.grad).all()):
-                        raise FloatingPointError(f"Nonfinite gradient in {name}; update rejected")
-                optimizer.step()
+                refresh_records = []
+                with training_timer.measure():
+                    refresh_records.append(refresh_training_bank(args, model, bank, next_step, total, log=False))
+                    features = tensor_rows(bundle.train, ids, device)
+                    optimizer.zero_grad(set_to_none=True)
+                    loss, stats, views = model.loss(features, bank=bank, row_ids=ids, mask_generator=masks,
+                        context_bank=context_bank, context_generator=context_generator,
+                        step=next_step, total_steps=total)
+                    loss.backward()
+                    for name, parameter in named.items():
+                        if parameter.grad is not None and not bool(torch.isfinite(parameter.grad).all()):
+                            raise FloatingPointError(f"Nonfinite gradient in {name}; update rejected")
+                    optimizer.step()
+                    if bank is not None and ((next_step + 1) % args.bank_refresh == 0 or next_step + 1 == total):
+                        refresh_records.append(refresh_training_bank(args, model, bank, next_step + 1, total, force=True, log=False))
+                for refresh_record in refresh_records:
+                    if refresh_record is not None:
+                        log_wandb_metrics("bank", refresh_record, step_metric="step")
                 row = {"step": next_step, "epoch": epoch, "batch_number": batch_number,
                        "examples": len(ids), "lr": optimizer.param_groups[0]["lr"],
+                       "training_seconds": training_timer.seconds,
                        "seconds": elapsed + time.perf_counter() - started, **serializable(stats)}
                 write_log(train_log, row)
                 next_step += 1
                 del features, loss, stats, views
-                if bank is not None and (next_step % args.bank_refresh == 0 or next_step == total):
-                    refresh = bank.refresh(model.sae, model.repair, args.k,
-                                           batch_size=args.encode_batch_size, step=next_step)
-                    log_wandb_metrics("bank", {"step": next_step, **refresh}, step_metric="step")
                 if next_step % args.log_every == 0 or next_step == total:
                     torch.cuda.synchronize(device)
                     row.update({"gpu_allocated_mib": torch.cuda.memory_allocated(device) / 2**20,
                                 "gpu_peak_allocated_mib": torch.cuda.max_memory_allocated(device) / 2**20})
                     log_wandb_metrics("train", row, step_metric="step")
-                    print(f"{backbone} {args.variant} K={args.k} update={next_step}/{total} "
+                    print(f"{backbone} {args.variant} K={row['training_k']} target_K={args.k} update={next_step}/{total} "
                           f"loss={row['loss_total']:.6f} nnz_min={row['final_nnz_min']} "
                           f"zero_codes={row['zero_final_codes']} GPU={row['gpu_allocated_mib']:.0f}MiB", flush=True)
                 at_epoch_end = next_step % per_epoch == 0
@@ -464,14 +648,28 @@ def fit_and_evaluate(args, backbone, bundle, output, code, gpu, *, failure_conte
             epoch += 1
         # Full diagnostics and retrieval are endpoint work, not repeated each
         # update. They cannot pick an earlier training checkpoint automatically.
-        final_diagnostic = diagnostic(args, bundle, model, bank, output, total, total)
+        final_diagnostic = diagnostic(args, bundle, model, bank, output, total, total, context_bank=context_bank)
         torch.cuda.synchronize(device)
         fit_seconds = elapsed + time.perf_counter() - started
         result = evaluate(args, bundle, model, output, checkpoint, fit_recipe, total)
+        classification = None
+        if args.linear_probe:
+            from mmrsae_probe import evaluate_linear_probes
+            classification = evaluate_linear_probes(args, bundle, model, output,
+                checkpoint_identity=sha256_file(checkpoint))
         summary = {"protocol": PROTOCOL, "family": "MMRSAE", "variant": args.variant, "backbone": backbone,
                    "fit_identity": fit_recipe, "complete": True, "updates": next_step, "fit_seconds": fit_seconds,
                    "fit_time_scope": "training, key refresh, diagnostics, checkpoint I/O and any requested intermediate/parent evaluations; final retrieval reported separately",
-                   "calibration": calibration, "retrieval": result, "full_parent": dense,
+                   "training_seconds": training_timer.seconds,
+                   "training_gpu_hours": training_timer.seconds / 3600.,
+                   "training_time_scope": TRAINING_TIME_SCOPE,
+                   "training_device_name": gpu["device_name"], "training_gpu_count": 1,
+                   "context_reference": context_identity,
+                   "dictionary_initialization": dictionary_initialization,
+                   "retrieval": result, "full_parent": dense,
+                   "classification": classification,
+                   "evaluation_topk": result["evaluation_topk"],
+                   "budget_evaluation": "single_checkpoint_multi_k", "ot_cost": "angular" if cfg.ot_weight else "none",
                    "diagnostics": final_diagnostic, "checkpoint_sha256": sha256_file(checkpoint),
                    "peak_torch_gpu_mib": torch.cuda.max_memory_allocated(device) / 2**20,
                    "source": bundle.provenance, "initialization": "fresh MMRSAE; resumed only from this exact trial",
@@ -479,6 +677,8 @@ def fit_and_evaluate(args, backbone, bundle, output, code, gpu, *, failure_conte
                    "precision": "float32; AMP and TF32 disabled", "automatic_model_selection": False}
         atomic_json(output / "summary.json", summary)
         update_wandb_summary({"complete": 1, "updates": next_step, "fit_seconds": fit_seconds,
+                              "training_gpu_hours": summary["training_gpu_hours"],
+                              "classification": classification,
                               "retrieval": result, "peak_torch_gpu_mib": summary["peak_torch_gpu_mib"]})
         return summary
     except BaseException as error:
@@ -505,11 +705,19 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     backbones = validate_args(args)
     if args.plan:
-        rows = args.train_size or (1281167 - (args.dev_size if args.evaluation == "dev" else 0))
+        rows = args.train_size or (1281167 - args.anchor_count - (args.dev_size if args.evaluation == "dev" else 0))
         batches = batch_count(rows, args.batch_size)
         updates = min(batches * args.epochs, args.max_steps) if args.max_steps else batches * args.epochs
         print(json.dumps({"protocol": PROTOCOL, "family": "MMRSAE", "backbones": backbones,
                           "variant": args.variant, "K": args.k, "fits": len(backbones),
+                          "evaluation_topk": {name: evaluation_budgets(args, 2048 if name == "resnet50" else 512) for name in backbones},
+                          "budget_evaluation": "single_checkpoint_multi_k",
+                          "ot_cost": "none" if args.variant in ("csr", "csrv2", "mmrsae-rel") or args.ot_weight == 0 else "angular",
+                          "context_distillation": args.variant.startswith("dlmmsae") and args.context_weight != 0,
+                          "training_time_scope": TRAINING_TIME_SCOPE,
+                          "linear_probe": {"enabled": args.linear_probe, "epochs": args.probe_epochs,
+                              "one_classifier_per_inference_k": True, "full_parent_classifier": True,
+                              "cost_scope": "separate from SAE training GPU hours"},
                           "updates_per_fit": updates, "total_updates": updates * len(backbones),
                           "evaluation": args.evaluation, "settings": serializable(vars(args)),
                           "action": "plan only; no downloads, GPU initialization or training",
@@ -523,8 +731,12 @@ def main(argv=None):
     for backbone in backbones:
         method_config(args, 2048 if backbone == "resnet50" else 512)
     largest_dim = 2048 if "resnet50" in backbones else 512
-    expected_gallery = args.train_size or (1281167 - (args.dev_size if args.evaluation == "dev" else 0))
-    gpu = preflight(args.device, {"model": {"hidden_dim": args.hidden_dim, "k": args.k, "rank": args.repair_rank},
+    expected_gallery = args.train_size or (1281167 - args.anchor_count - (args.dev_size if args.evaluation == "dev" else 0))
+    max_eval_k = max(max(evaluation_budgets(args, 2048 if name == "resnet50" else 512)) for name in backbones)
+    gpu = preflight(args.device, {"model": {"hidden_dim": args.hidden_dim, "k": max_eval_k,
+                    "rank": args.repair_rank, "anchor_count": args.anchor_count,
+                    "context_reference_count": args.context_reference_count if args.variant.startswith("dlmmsae") and args.context_weight != 0 else 0,
+                    "landmark_dictionary": args.variant not in ("mpsae", "csr", "csrv2")},
                    "retrieval": retrieval_config(args), "dense_reference": args.dense_reference},
                     gallery_rows_estimate=expected_gallery, input_dim=largest_dim)
     if args.preflight_only:
