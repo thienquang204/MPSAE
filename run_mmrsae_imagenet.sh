@@ -119,10 +119,9 @@ case "${MMRSAE_LINEAR_PROBE:-1}" in
     *) echo "MMRSAE_LINEAR_PROBE must be 0 or 1" >&2; exit 2 ;;
 esac
 
-# MMRSAE_VARIANTS (comma-separated) runs several methods sequentially under
-# identical settings; otherwise the single MMRSAE_VARIANT is used. A failed
-# method is reported and the remaining methods still run.
-IFS=',' read -r -a variants <<< "${MMRSAE_VARIANTS:-${MMRSAE_VARIANT:-mmrsae}}"
+# Run the four selected methods unless a list or single variant is specified.
+# An explicit CLI --variant takes precedence and runs exactly once.
+IFS=',' read -r -a variants <<< "${MMRSAE_VARIANTS:-${MMRSAE_VARIANT:-csr,csrv2,dlmmsae,dlmmsaev2}}"
 # Planning/preparation modes fit nothing, so they produce no report.
 report_dir="${MMRSAE_OUTPUT:-$SCRIPT_DIR/runs/mmrsae}"
 make_report="${MMRSAE_REPORT:-1}"
@@ -132,18 +131,32 @@ for argument in "$@"; do
         --plan|--preflight-only) make_report=0 ;;
         --prepare-only) make_report=0 ;;
         --output-dir=*) report_dir="${argument#--output-dir=}" ;;
+        --variant=*) variants=("${argument#--variant=}") ;;
     esac
     [[ "$previous" == "--output-dir" ]] && report_dir="$argument"
+    [[ "$previous" == "--variant" ]] && variants=("$argument")
     previous="$argument"
+done
+# Resolve and validate the entire selection before starting any GPU work.
+selected_variants=()
+declare -A seen_variants=()
+for variant in "${variants[@]}"; do
+    variant="${variant// /}"
+    [[ "$variant" != "dlmmsae-annealed" ]] || variant=dlmmsaev2
+    case "$variant" in
+        csr|csrv2|dlmmsae|dlmmsaev2) ;;
+        *) echo "Unsupported benchmark method '$variant'; choose csr,csrv2,dlmmsae,dlmmsaev2" >&2; exit 2 ;;
+    esac
+    [[ -z "${seen_variants[$variant]:-}" ]] || { echo "Duplicate benchmark method: $variant" >&2; exit 2; }
+    seen_variants[$variant]=1
+    selected_variants+=("$variant")
 done
 # Data preparation belongs to the Python runner, after GPU preflight. The
 # default reads prepared archives; --embedding-source legacy explicitly enables
 # the old RN18 exporter with the same resolved CLI/environment settings.
 failed=()
-for variant in "${variants[@]}"; do
-    variant="${variant// /}"
-    [[ -n "$variant" ]] || continue
-    (( ${#variants[@]} == 1 )) || echo "=== MMRSAE method: $variant ===" >&2
+for variant in "${selected_variants[@]}"; do
+    (( ${#selected_variants[@]} == 1 )) || echo "=== MMRSAE method: $variant ===" >&2
     "$python_bin" "$SCRIPT_DIR/mmrsae_imagenet.py" "${args[@]}" --variant "$variant" "$@" || failed+=("$variant")
 done
 # Tables and figures for every comparable group in the output directory,

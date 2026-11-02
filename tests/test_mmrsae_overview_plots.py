@@ -60,7 +60,7 @@ class OverviewDataTests(unittest.TestCase):
 
     def test_new_method_styles_are_distinct_and_stable(self):
         self.assertIn("dlmmsae", reporting.METHODS)
-        self.assertIn("dlmmsae-annealed", reporting.METHODS)
+        self.assertIn("dlmmsaev2", reporting.METHODS)
         self.assertEqual(len(set(reporting._style(method) for method in reporting.METHODS)), len(reporting.METHODS))
 
     def test_classification_and_retrieval_use_independent_values_and_dimensions(self):
@@ -115,7 +115,7 @@ class OverviewReportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="overview_") as directory:
             root = Path(directory)
             self.fixture(root, "dlmmsae")
-            self.fixture(root, "dlmmsae-annealed")
+            self.fixture(root, "dlmmsaev2")
             with contextlib.redirect_stdout(io.StringIO()):
                 result = reporting.report(root)
             group = next(iter(result.values()))
@@ -150,6 +150,23 @@ class OverviewReportTests(unittest.TestCase):
             self.assertTrue(all(row["classification_top1"] is None for row in rows))
             self.assertTrue(all(row["training_gpu_hours"] is None for row in rows))
             self.assertEqual(reporting.compute_rows(rows), [])
+
+    def test_only_selected_methods_are_reported_and_old_annealed_name_is_readable(self):
+        with tempfile.TemporaryDirectory(prefix="overview_") as directory:
+            root = Path(directory)
+            for method in ("csr", "csrv2", "dlmmsae", "dlmmsae-annealed",
+                           "mmrsae", "mmrsae-rel", "mmrsae-wide", "mmrsae-annealed", "mpsae"):
+                self.fixture(root, method)
+            group = next(iter(reporting.collect(root).values()))
+            self.assertEqual(set(group["trials"]), {"csr", "csrv2", "dlmmsae", "dlmmsaev2"})
+            rows = reporting.budget_rows(group)
+            self.assertEqual({row["method"] for row in rows}, set(reporting.METHODS))
+            self.assertEqual(len(rows), 4 * 2 * 3)
+            self.assertTrue(all(row["top1"] == 60. + row["K"] / 100 for row in rows))
+            source = json.loads((root / "dlmmsae-annealed/trial.json").read_text())
+            self.assertEqual(source["settings"]["variant"], "dlmmsae-annealed")
+            self.assertEqual(reporting._label("dlmmsaev2"), "DLMMSAEv2")
+            self.assertEqual(reporting._label("csrv2"), "CSRv2")
 
 
 if __name__ == "__main__":

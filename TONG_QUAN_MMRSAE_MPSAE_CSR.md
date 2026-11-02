@@ -1,5 +1,11 @@
 # Thống kê code và ý tưởng MMRSAE, MPSAE, CSR
 
+> **Benchmark update, 2 November 2026:** The active comparison now contains
+> only CSR, CSRv2, DLMMSAE and DLMMSAEv2 (`csr,csrv2,dlmmsae,dlmmsaev2`).
+> DLMMSAEv2 replaces the name `dlmmsae-annealed` and uses CSRv2's exact K
+> schedule. The inventory and workload counts below describe earlier ablations.
+> See [MMRSAE_IMAGENET.md](MMRSAE_IMAGENET.md) for the current benchmark.
+
 > **Architecture update, 2 November 2026:** Current MMRSAE now synthesizes a
 > landmark-context embedding before tied SAE/Top-K, with no post-SAE repair.
 > The fixed input landmark dictionary remains in the inference model. Clean

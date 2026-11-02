@@ -182,7 +182,7 @@ class DLMMSAEMethodTests(unittest.TestCase):
 
     def test_new_variants_defaults_and_invalid_context_settings(self):
         self.assertIn("dlmmsae", METHODS)
-        self.assertIn("dlmmsae-annealed", METHODS)
+        self.assertIn("dlmmsaev2", METHODS)
         for method in METHODS:
             config = MMRSAEConfig(input_dim=3, hidden_dim=16, k=2, variant=method)
             self.assertEqual(config.context_weight, 1. if method.startswith("dlmmsae") else 0.)
@@ -225,7 +225,7 @@ class DLMMSAEMethodTests(unittest.TestCase):
 
     def test_annealed_schedule_changes_real_codes_and_matches_fixed_endpoint(self):
         fixed, bank, x = self.fixture()
-        annealed, _, _ = self.fixture(variant="dlmmsae-annealed")
+        annealed, _, _ = self.fixture(variant="dlmmsaev2")
         schedule = [annealed.config.training_k(step, 10) for step in range(10)]
         self.assertEqual(schedule[0], 8)
         self.assertEqual(schedule[6:], [2] * 4)
@@ -249,7 +249,7 @@ class DLMMSAEMethodTests(unittest.TestCase):
             torch.testing.assert_close(left.grad, right.grad, rtol=0., atol=0.)
 
     def test_resume_preserves_noise_mask_optimizer_and_annealing(self):
-        model, bank, x = self.fixture(variant="dlmmsae-annealed", mask=True, context_noise_std=.08)
+        model, bank, x = self.fixture(variant="dlmmsaev2", mask=True, context_noise_std=.08)
         masks = torch.Generator().manual_seed(661)
         context_rng = torch.Generator().manual_seed(662)
 

@@ -1,4 +1,4 @@
-**MMRSAE: manual ImageNet retrieval experiments**
+**DLMMSAE / CSR: selected ImageNet benchmark**
 
 MMRSAE names the current method family: a landmark dictionary synthesizes a
 contextual embedding before a tied sparse autoencoder applies Top-K. There is
@@ -10,9 +10,13 @@ strict paper studies, and staged repair study retain their historical names.
 
 The Python runner trains **one chosen variant at one target K and one seed for each
 of ResNet-50 and ResNet-18, sequentially**, then evaluates each checkpoint at
-multiple inference budgets. The supplied environment templates run nine methods:
-`mmrsae`, `mmrsae-rel`, `mmrsae-wide`, `mmrsae-annealed`, `mpsae`, `csr`, `csrv2`,
-`dlmmsae`, and `dlmmsae-annealed`.
+multiple inference budgets. The launcher and environment templates run four methods:
+`csr`, `csrv2`, `dlmmsae`, and `dlmmsaev2` (CSR, CSRv2, DLMMSAE, DLMMSAEv2).
+The benchmark CLI only selects these methods; its single-method default is
+`dlmmsae`. `dlmmsae-annealed` remains an input/read alias for `dlmmsaev2`.
+Reports include only this four-method comparison and label old annealed results
+as DLMMSAEv2 without modifying their stored files. Earlier ablation methods
+remain in the model library for archival use.
 It runs only ImageNet. It does not
 start the transfer suite, a parameter sweep, attribution arms, or promotion
 gates. Parameters are set by hand and recorded with each run. This is an
@@ -73,23 +77,18 @@ change itself establishes no accuracy or speed advantage.
 The historical `RepairModule` and staged `EXPERIMENT_SCOPE=repair` study retain
 their sparse-start architecture. They are separate from this current runner.
 
-The supplied presets are:
+The selected benchmark methods are:
 
 | Variant | Sparse representation and training K | Neighborhood KL | Transport | Auxiliary reconstruction budget B |
 |---|---|---|---|---|
-| `mmrsae` | Landmark synthesis, then tied SAE Top-K; fixed training K | Enabled | Angular cost only | min(h, 4K), clean SAE scores |
-| `mmrsae-rel` | Same | Enabled | Disabled | 4K |
-| `mmrsae-wide` | Same | Enabled | Angular cost only | min(h, max(64, 8K)) |
-| `mmrsae-annealed` (MMRSAEv2) | Same architecture; half-cosine training-K annealing | Enabled | Angular cost only | min(h, 4K(t)), clean SAE scores |
-| `dlmmsae` | Landmark-first SAE plus direct raw-context relational distillation; fixed training K | Enabled, plus context KL over separate Q | Angular cost only | min(h, 4K) |
-| `dlmmsae-annealed` | DLMMSAE with half-cosine training-K annealing | Enabled, plus context KL over separate Q | Angular cost only | min(h, 4K(t)) |
-| `mpsae` (baseline) | Plain tied SAE Top-K, no landmark synthesis or masking | Disabled | Angular cost only | min(h, 4K), raw scores |
 | `csr` (baseline) | Plain tied SAE; CSR NCL (gamma 0.1 for ResNet-50, 1.0 for ResNet-18, temperature 0.2) | Disabled | Disabled | min(h, 4K), raw scores |
 | `csrv2` (baseline) | CSR with half-cosine training-K annealing, then fixed target K | Disabled | Disabled | 4 times the current training K |
+| `dlmmsae` | Landmark-first SAE plus direct raw-context relational distillation; fixed training K | Enabled, plus context KL over separate Q | Angular cost only | min(h, 4K) |
+| `dlmmsaev2` | DLMMSAE with the same CSRv2 half-cosine training-K formula | Enabled, plus context KL over separate Q | Angular cost only | min(h, 4K(t)) |
 
-The three baselines share the SAE initialization, optimizer, data order, target budget
-and endpoint retrieval with the MMRSAE presets. They serve the plain Top-K code.
-MMRSAE adds computation and parameters, so equal update counts do not mean equal
+The CSR baselines share the SAE initialization, optimizer, data order, target budget
+and endpoint retrieval with DLMMSAE. They serve the plain Top-K code.
+DLMMSAE adds computation and parameters, so equal update counts do not mean equal
 compute budgets. Report encoding time and fitting cost alongside accuracy.
 
 **DLMMSAE context objective.** [dlmmsae.py](dlmmsae.py) implements a separate
@@ -197,15 +196,15 @@ include both training K and inference K. Unmeasured budgets are never filled
 with copied accuracy. Completed points survive an interrupted evaluation.
 Intermediate epoch evaluations still measure only the training target K.
 
-`csrv2`, `mmrsae-annealed`, and `dlmmsae-annealed` use the historical half-cosine training-K schedule
+`csrv2` and `dlmmsaev2` call the same function implementing CSRv2's half-cosine training-K schedule
 over the first 70% of updates by default:
 `MMRSAE_ANNEAL_START_K=64` to the target `MMRSAE_K=8`, followed by a fixed phase.
 An unset start uses min(h,max(64,4K)). With A=max(1,ceil(fraction*total_updates)),
 zero-based update t uses the rounded value
 `target_K + (start_K-target_K)*(1+cos(pi*t/(A-1)))/2` until t=A-1, then target K.
 When A=1 the target budget applies immediately. This is actual training-K
-annealing, matching the CSRv2/MPSAEv2 strategy; the old linear auxiliary-B
-schedule is no longer used by `mmrsae-annealed`.
+annealing, matching the CSRv2 strategy. Learning rate stays fixed; B follows
+the current training K rather than having an independent annealing formula.
 
 For example, target K=8 and start K=64 give main K(t)=64->8, intermediate
 2K(t)=128->16 and clean 4K(t)=256->32, capped by h. The default auxiliary
@@ -265,8 +264,8 @@ bash run_mmrsae_imagenet.sh --plan
 ENV_FILE=mmrsae.local.env bash run_mmrsae_imagenet.sh --plan
 bash run_mmrsae_imagenet.sh --preflight-only
 bash run_mmrsae_imagenet.sh --prepare-only
-bash run_mmrsae_imagenet.sh --backbones resnet18 --variant mmrsae-rel \
-  --k 16 --lr 4e-5 --max-steps 500 --run-name rn18_rel_k16
+bash run_mmrsae_imagenet.sh --backbones resnet18 --variant dlmmsaev2 \
+  --k 16 --lr 4e-5 --max-steps 500 --run-name rn18_dlmmsaev2_k16
 ```
 
 These are usage examples, not commands executed during implementation. The
@@ -279,11 +278,12 @@ require the CUDA retrieval check. No CPU execution mode is provided.
 | Manual setting | Default | Interpretation |
 |---|---|---|
 | `MMRSAE_BACKBONES` / `--backbones` | `resnet50,resnet18` | Comma-separated selected architectures |
-| `MMRSAE_VARIANT` / `--variant` | `mmrsae` | One preset, no automatic sweep |
+| `MMRSAE_VARIANT` / `--variant` | `dlmmsae` | Single selected method; CLI override runs exactly once |
+| `MMRSAE_VARIANTS` | `csr,csrv2,dlmmsae,dlmmsaev2` | Launcher comparison list, run sequentially |
 | `MMRSAE_K` / `--k` | 8 | Training target K; included in the inference evaluation grid |
 | `MMRSAE_EVAL_TOPK` / `--eval-topk` | auto | Inference budget grid; each point uses the same trained checkpoint |
-| `MMRSAE_ANNEAL_START_K` / `--anneal-start-k` | min(h,max(64,4K)) | CSRv2, MMRSAEv2 and DLMMSAE-annealed initial training budget; templates explicitly select 64 |
-| `MMRSAE_ANNEAL_FRACTION` / `--anneal-fraction` | 0.7 | Fraction of CSRv2, MMRSAEv2 and DLMMSAE-annealed fitting used for cosine decay |
+| `MMRSAE_ANNEAL_START_K` / `--anneal-start-k` | min(h,max(64,4K)) | CSRv2 and DLMMSAEv2 initial training budget; templates explicitly select 64 |
+| `MMRSAE_ANNEAL_FRACTION` / `--anneal-fraction` | 0.7 | Fraction of CSRv2 and DLMMSAEv2 fitting used for cosine decay |
 | `MMRSAE_HIDDEN_DIM` / `--hidden-dim` | 8192 | Dictionary width |
 | `MMRSAE_REPAIR_RANK` / `--dictionary-rank` (alias `--repair-rank`) | 32 | Landmark-query adapter rank; the environment name is retained for compatibility |
 | `MMRSAE_DICTIONARY_TEMPERATURE` / `--dictionary-temperature` | 0.1 | Softmax temperature for input landmark lookup |
@@ -315,7 +315,7 @@ require the CUDA retrieval check. No CPU execution mode is provided.
 | `MMRSAE_EMBEDDINGS_REVISION` / `--embeddings-revision` | `main` | Resolved once to an immutable commit in the cache |
 
 One method has a ceiling of 1,000 fitting updates across two backbones; the
-nine-method templates therefore allow 18 representation fits and 9,000 fitting updates. This count
+four-method templates therefore allow 8 representation fits and 4,000 fitting updates. This count
 excludes linear classifiers, data preparation, encoding, search and initialization. Smaller steps
 or one backbone reduce fitting cost; `--no-timed-retrieval` avoids repeated
 timed searches while retaining endpoint accuracy. Full-parent dense reference

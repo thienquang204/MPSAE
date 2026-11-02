@@ -1,4 +1,4 @@
-"""Manually tunable, GPU-only ImageNet experiments for the MMRSAE family.
+"""GPU-only ImageNet benchmark: CSR, CSRv2, DLMMSAE and DLMMSAEv2.
 
 One selected variant and target K are fitted per requested backbone, then
 the same checkpoint is evaluated at each requested inference K. There is no
@@ -22,6 +22,7 @@ import time
 import traceback
 
 from repair_data import atomic_json, canonical_hash, exclusive_lock, sha256_file
+from mmrsae_methods import BENCHMARK_METHODS, canonical_method
 from repair_runtime import (epoch_batches, load_checkpoint, named_parameters, pack_adam,
                             restore_adam, restore_rng, rng_state, save_checkpoint)
 from wandb_tracking import (add_wandb_arguments, finish_wandb, init_wandb,
@@ -29,10 +30,8 @@ from wandb_tracking import (add_wandb_arguments, finish_wandb, init_wandb,
 
 
 PROTOCOL = "mmrsae-imagenet-context-distillation-v4"
-# MMRSAE presets plus the repair-free mpsae/csr baselines (mmrsae.METHODS).
-VARIANTS = ("mmrsae", "mmrsae-rel", "mmrsae-wide", "mmrsae-annealed", "mpsae", "csr", "csrv2",
-            "dlmmsae", "dlmmsae-annealed")
-SOURCE_FILES = ("mmrsae_imagenet.py", "mmrsae.py", "mmrsae_dictionary.py", "dlmmsae.py", "mmrsae_probe.py", "mmrsae_data.py", "mmrsae_gpu.py",
+VARIANTS = BENCHMARK_METHODS
+SOURCE_FILES = ("mmrsae_imagenet.py", "mmrsae_methods.py", "mmrsae.py", "mmrsae_dictionary.py", "dlmmsae.py", "mmrsae_probe.py", "mmrsae_data.py", "mmrsae_gpu.py",
                 "mpsae_repair.py", "repair_data.py", "repair_runtime.py", "repair_benchmark.py",
                 "sparse_gpu_retrieval.py", "retrieval_timing.py", "wandb_tracking.py",
                 "csrc/sparse_retrieval.cpp", "csrc/sparse_retrieval.cu")
@@ -41,12 +40,12 @@ SOURCE_FILES = ("mmrsae_imagenet.py", "mmrsae.py", "mmrsae_dictionary.py", "dlmm
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--backbones", default="resnet50,resnet18")
-    parser.add_argument("--variant", choices=VARIANTS, default="mmrsae")
+    parser.add_argument("--variant", type=canonical_method, choices=VARIANTS, default="dlmmsae")
     parser.add_argument("--k", type=int, default=8)
     parser.add_argument("--eval-topk", default="auto",
                         help="Comma-separated inference budgets, or auto: 2,4,8,16,... up to parent dimension; training K is always included")
     parser.add_argument("--anneal-start-k", type=int,
-                        help="CSRv2/MMRSAE/DLMMSAE annealed initial training K; default min(hidden_dim,max(64,4*K))")
+                        help="CSRv2/DLMMSAEv2 initial training K; default min(hidden_dim,max(64,4*K))")
     parser.add_argument("--anneal-fraction", type=float, default=.7,
                         help="Fraction of annealed-method updates used for half-cosine training-K decay")
     parser.add_argument("--hidden-dim", type=int, default=8192)

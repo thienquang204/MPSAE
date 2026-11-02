@@ -1,5 +1,20 @@
 # Validation status for MMRSAE and the repair research profile
 
+The November 2, 2026 selected-comparison update limits the benchmark and
+reports to CSR, CSRv2, DLMMSAE and DLMMSAEv2. The 131-check CPU suite passed
+128 checks on its first run; the three new Bash launcher checks initially
+failed because the Windows test environment lacked MSYS coreutils on PATH.
+After correcting the test environment, all six selected-benchmark checks
+passed, covering those three launcher cases as well as canonical naming,
+restricted CLI/report method lists, and step-for-step agreement with the
+original CSRv2 formula on both backbone dimensions. Thus all 131 distinct
+checks passed across the suite and the targeted rerun. Report regression tests
+also verify that old `dlmmsae-annealed` results are read as `dlmmsaev2`, the
+other ablations are excluded, and source result files remain unchanged.
+Launcher checks use `--plan` only; no GPU job or data download was started.
+Historical ablation implementations remain in the model library. The existing
+source-identity guard still prevents silently resuming a different code recipe.
+
 The November 2, 2026 DLMMSAE and overview-plot update passed **124 CPU tests**
 under `tests/` in the existing `machinelearning` environment. The 30 added tests
 cover direct context KL, frozen/disjoint reference banks and self-ID exclusion,

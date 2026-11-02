@@ -18,6 +18,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from mmrsae_dictionary import LandmarkConditionedSAE
+from mmrsae_methods import canonical_method
 
 from mpsae_repair import (
     LandmarkBank,
@@ -31,19 +32,25 @@ from mpsae_repair import (
 )
 
 
-VARIANTS = ("mmrsae", "mmrsae-rel", "mmrsae-wide", "mmrsae-annealed", "dlmmsae", "dlmmsae-annealed")
+VARIANTS = ("mmrsae", "mmrsae-rel", "mmrsae-wide", "mmrsae-annealed", "dlmmsae", "dlmmsaev2")
+# Historical ablations remain available to the library; the benchmark CLI is
+# restricted to mmrsae_methods.BENCHMARK_METHODS.
 # Comparison methods without repair: MPSAE, fixed-K CSR and cosine-annealed CSRv2.
 BASELINES = ("mpsae", "csr", "csrv2")
 METHODS = VARIANTS + BASELINES
 
 
 def cosine_annealed_k(step, total_steps, start_k, target_k, anneal_fraction=.7):
-    """Same half-cosine training-K schedule as the historical CSRv2 runner."""
+    """CSRv2's exact half-cosine formula, shared by CSRv2 and DLMMSAEv2."""
+    if total_steps < 1:
+        raise ValueError("total_steps must be positive")
     anneal_steps = max(1, math.ceil(total_steps * anneal_fraction))
     if anneal_steps == 1 or step >= anneal_steps - 1:
         return target_k
-    decay = .5 * (1 + math.cos(math.pi * step / (anneal_steps - 1)))
-    return min(start_k, max(target_k, round(target_k + (start_k - target_k) * decay)))
+    progress = step / (anneal_steps - 1)
+    cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
+    value = target_k + (start_k - target_k) * cosine_decay
+    return min(start_k, max(target_k, int(round(value))))
 
 
 def nonnegative_contrastive_loss(codes: torch.Tensor, temperature: float = 0.2) -> torch.Tensor:
@@ -117,6 +124,7 @@ class MMRSAEConfig:
     architecture: str = field(init=False)
 
     def __post_init__(self):
+        object.__setattr__(self, "variant", canonical_method(self.variant))
         if self.variant not in METHODS:
             raise ValueError(f"Unknown MMRSAE variant {self.variant!r}; choose {METHODS}")
         baseline = self.variant in BASELINES
@@ -194,12 +202,12 @@ class MMRSAEConfig:
             raise ValueError("dictionary_blend must be strictly between 0 and 1")
         if self.auxiliary_mode not in ("baseline", "wide"):
             raise ValueError("auxiliary_mode must be baseline or wide; MMRSAE anneals training K")
-        if self.variant in ("mmrsae-annealed", "dlmmsae-annealed") and self.auxiliary_mode != "baseline":
+        if self.variant in ("mmrsae-annealed", "dlmmsaev2") and self.auxiliary_mode != "baseline":
             raise ValueError("Annealed dictionary SAE uses auxiliary budget 4 * training K")
 
     @property
     def is_dlmmsae(self) -> bool:
-        return self.variant in ("dlmmsae", "dlmmsae-annealed")
+        return self.variant in ("dlmmsae", "dlmmsaev2")
 
     @property
     def has_dictionary(self) -> bool:
@@ -209,7 +217,7 @@ class MMRSAEConfig:
         return asdict(self)
 
     def training_k(self, step, total_steps):
-        if self.variant in ("csrv2", "mmrsae-annealed", "dlmmsae-annealed"):
+        if self.variant in ("csrv2", "mmrsae-annealed", "dlmmsaev2"):
             return cosine_annealed_k(step, total_steps, self.anneal_start_k,
                                      self.k, self.anneal_fraction)
         return self.k

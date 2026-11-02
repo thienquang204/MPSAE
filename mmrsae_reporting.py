@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Tables and figures for every MMRSAE ImageNet output directory.
+"""Tables and figures for CSR, CSRv2, DLMMSAE and DLMMSAEv2.
 
 Trials are grouped by everything that defines a comparable experiment except
 the method (settings without ``variant``, plus the implementation identity), so
 a figure never mixes training K, data sizes, evaluation pools or code versions. Each
 group gets ``reports/<group>/`` with results.csv/results.md and PNG+PDF figures:
 top-1 versus inference K, endpoint top-1 by method, training loss, and support
-health. Failed or partial fits are reported from whatever they wrote; nothing here is trained,
+health. Other ablation methods are filtered out, and the legacy DLMMSAE annealed
+name is displayed as DLMMSAEv2. Failed or partial fits are reported from whatever they wrote; nothing here is trained,
 evaluated or downloaded, and it runs on CPU after any launcher invocation.
 """
 from __future__ import annotations
@@ -21,13 +22,12 @@ from pathlib import Path
 import sys
 
 from repair_data import atomic_json, canonical_hash
+from mmrsae_methods import BENCHMARK_METHODS, METHOD_LABELS, canonical_method
 
 # Fixed method order and color slots: color follows the method, never its rank.
-METHODS = ("mmrsae", "mmrsae-rel", "mmrsae-wide", "mmrsae-annealed", "mpsae", "csr", "csrv2",
-           "dlmmsae", "dlmmsae-annealed")
-COLORS = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#7953a8",
-          "#ad284f", "#176b76")
-MARKERS = ("o", "s", "^", "D", "v", "P", "X", "*", "h")
+METHODS = BENCHMARK_METHODS
+COLORS = ("#008300", "#7953a8", "#ad284f", "#176b76")
+MARKERS = ("P", "X", "*", "h")
 OTHER_COLOR = "#8c8b84"
 BACKBONES = ("resnet50", "resnet18")
 INK, INK_MUTED, GRID, SURFACE = "#1f1e1b", "#5f5e58", "#e4e3de", "#fcfcfb"
@@ -38,7 +38,8 @@ def _finite(value):
 
 
 def _label(method):
-    return method.upper().replace("-ANNEALED", " annealed").replace("-REL", " rel").replace("-WIDE", " wide")
+    method = canonical_method(method)
+    return METHOD_LABELS.get(method, method.upper())
 
 
 def _backbone_label(backbone):
@@ -114,6 +115,9 @@ def collect(output_dir):
             continue
         settings = dict(trial["settings"])
         method = settings.pop("variant", trial_path.parent.name.split("_k")[0])
+        method = canonical_method(method)
+        if method not in METHODS:
+            continue
         hardware = _hardware(_read_json(trial_path.parent / "gpu_preflight.json") or {})
         key = canonical_hash({"settings": settings, "code": trial.get("code"), "hardware": hardware})
         label = f"{settings.get('evaluation', 'dev')}_k{settings.get('k', '?')}_{key[:8]}"
@@ -649,7 +653,7 @@ def plot_metric_panels(plt, group, target, stem, panels, title):
             if overlaps:
                 plotted = sum(len(names) for names in drawn.values())
                 notes = ["all methods identical" if len(names) == plotted else
-                         textwrap.fill(f"identical ({len(names)}): " + ", ".join(names), 34)
+                         textwrap.fill(f"identical ({len(names)}): " + ", ".join(_label(name) for name in names), 34)
                          for names in overlaps]
                 ax.text(.03, .45, "\n".join(notes), transform=ax.transAxes, fontsize=6.5,
                         color=INK_MUTED, va="center", linespacing=1.3)

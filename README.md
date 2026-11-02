@@ -1,19 +1,24 @@
-# MMRSAE: ImageNet sparse retrieval experiments
+# DLMMSAE: ImageNet comparison with CSR
 
 The current MMRSAE architecture synthesizes an embedding from a fixed training
 landmark dictionary before a tied SAE applies Top-K. The input dictionary is
 saved with the model and also used at inference; there is no post-SAE repair.
-Its comparison uses angular OT and multi-K accuracy. Templates include nine methods:
-`mmrsae`, `mmrsae-rel`, `mmrsae-wide`, `mmrsae-annealed`, `mpsae`, `csr`,
-`csrv2`, `dlmmsae`, and `dlmmsae-annealed`. Each checkpoint is evaluated at inference K=2..512 for RN18 and
+The selected benchmark includes exactly four methods:
+`csr`, `csrv2`, `dlmmsae`, and `dlmmsaev2`. Each checkpoint is evaluated at inference K=2..512 for RN18 and
 2..2048 for RN50 (`MMRSAE_EVAL_TOPK=auto`), producing `top1_by_k.png/.pdf` and
-per-K tables. Landmark KL stays separate from angular OT. CSRv2,
-MMRSAE-annealed (MMRSAEv2), and DLMMSAE-annealed anneal the actual training K by half-cosine;
+per-K tables. DLMMSAE uses angular OT with separate landmark/context KL. CSRv2
+and DLMMSAEv2 call the same CSRv2 half-cosine training-K function;
 their auxiliary budget follows 4K(t). Landmark keys refresh whenever K changes.
 The current protocol is `mmrsae-imagenet-context-distillation-v4`; checkpoints
 from earlier protocol/source versions cannot resume under this recipe. Dictionary
 temperature and initial context blend default to 0.1. See
 [MMRSAE_IMAGENET.md](MMRSAE_IMAGENET.md) for the full recipe and output schema.
+
+`dlmmsaev2` is the new name for `dlmmsae-annealed`. Existing results with the
+old name are displayed as DLMMSAEv2; reports filter out the other ablation
+methods. Historical model implementations and saved run data remain available.
+The launcher defaults to all four methods; an explicit `--variant dlmmsaev2`
+runs that method once. The Python runner alone defaults to `dlmmsae`.
 
 DLMMSAE adds a direct loss on the synthesized context before residual blending
 or SAE Top-K. It distills the clean input's cosine relationship distribution
@@ -203,8 +208,8 @@ The chosen execution mode is saved in the file. The lower-level launchers
 remain available below. These commands document server usage; full ImageNet
 training and GPU performance measurements still require server execution.
 
-The current method family is **MMRSAE**. Its default workflow runs one manually
-selected variant and budget on ResNet-50 and ResNet-18, sequentially, using
+The current comparison is **CSR, CSRv2, DLMMSAE and DLMMSAEv2**. The launcher
+runs these methods and the selected budget on ResNet-50 and ResNet-18 sequentially, using
 ImageNet only. It includes automatic data preparation, resumable feature and
 training state, W&B monitoring, and mandatory GPU retrieval checks before data
 work. Default fitting is capped at 500 updates per backbone on 128,000 training
@@ -221,7 +226,7 @@ The lower-level Docker launcher defaults to `EXPERIMENT_SCOPE=mmrsae`. Existing 
 defaults; explicit exported environment settings override them. The new scope
 does not invoke transfer or the staged ablation study. For direct execution
 in an existing environment use `ENV_FILE=your.local.env bash run_mmrsae_imagenet.sh`; CLI overrides
-such as `--backbones resnet18 --variant mmrsae-rel --k 16` select one manual
+such as `--backbones resnet18 --variant dlmmsaev2 --k 16` select one manual
 experiment. `--plan`, `--preflight-only`, and `--prepare-only` expose the
 preparation steps separately. Official validation requires `--evaluation official`.
 
