@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Tables and figures for CSR, CSRv2, MPSAE and MPSAEv2.
 
-Trials are grouped by everything that defines a comparable experiment except
-the method (settings without ``variant``, plus the implementation identity), so
-a figure never mixes training K, data sizes, evaluation pools or code versions. Each
+Trials are grouped by the experiment settings that define a comparable result
+(mmrsae_methods.EXPERIMENT_KEYS: K, data sizes, epochs, evaluation pool, seeds,
+inference budgets, probe) and the GPU model, so a figure never mixes those.
+Code versions and machine paths are not part of the grouping: baselines placed
+in the output directory are compared with methods trained later from changed
+code; each row records its code version in the "Code" column. Each
 group gets ``reports/<group>/`` with results.csv/results.md and PNG+PDF figures:
 top-1 versus inference K, endpoint top-1 by method, training loss, and support
 health. Other ablation methods are filtered out, and the MPSAE annealed alias
@@ -22,12 +25,12 @@ from pathlib import Path
 import sys
 
 from repair_data import atomic_json, canonical_hash
-from mmrsae_methods import BENCHMARK_METHODS, METHOD_LABELS, canonical_method
+from mmrsae_methods import BENCHMARK_METHODS, METHOD_LABELS, canonical_method, comparable_settings
 
 # Fixed method order and color slots: color follows the method, never its rank.
 METHODS = BENCHMARK_METHODS
-COLORS = ("#008300", "#7953a8", "#ad284f", "#176b76")
-MARKERS = ("P", "X", "*", "h")
+COLORS = ("#008300", "#7953a8", "#ad284f", "#176b76", "#2a78d6", "#eda100")
+MARKERS = ("P", "X", "*", "h", "o", "D")
 OTHER_COLOR = "#8c8b84"
 BACKBONES = ("resnet50", "resnet18")
 INK, INK_MUTED, GRID, SURFACE = "#1f1e1b", "#5f5e58", "#e4e3de", "#fcfcfb"
@@ -96,7 +99,7 @@ def _read_log(path):
 
 
 def _style(method):
-    if method in METHODS:
+    if method in METHODS and METHODS.index(method) < len(COLORS):
         slot = METHODS.index(method)
         return COLORS[slot], MARKERS[slot]
     return OTHER_COLOR, "x"
@@ -119,7 +122,8 @@ def collect(output_dir):
         if method not in METHODS:
             continue
         hardware = _hardware(_read_json(trial_path.parent / "gpu_preflight.json") or {})
-        key = canonical_hash({"settings": settings, "code": trial.get("code"), "hardware": hardware})
+        key = canonical_hash({"settings": comparable_settings(settings),
+                              "device": hardware.get("device_name")})
         label = f"{settings.get('evaluation', 'dev')}_k{settings.get('k', '?')}_{key[:8]}"
         group = groups.setdefault(label, {"label": label, "settings": settings,
                                           "hardware": hardware, "trials": {}})
@@ -153,7 +157,8 @@ def collect(output_dir):
             if score(candidate) <= score(old):
                 continue
         group["trials"][method] = {"directory": str(trial_path.parent), "backbones": backbones,
-                                   "mtime": trial_path.stat().st_mtime}
+                                   "mtime": trial_path.stat().st_mtime,
+                                   "code": canonical_hash(trial.get("code"))[:8]}
     return groups
 
 
@@ -196,7 +201,7 @@ def result_rows(group):
                 "train_max_zero_codes": max((row.get("zero_final_codes", 0) for row in entry["log"]), default=None),
                 "train_min_nnz": min((row.get("final_nnz_min") for row in entry["log"]
                                       if row.get("final_nnz_min") is not None), default=None),
-                "failure": failure.get("error"), "directory": trial["directory"],
+                "failure": failure.get("error"), "directory": trial["directory"], "code": trial.get("code"),
                 **_timing_fields(retrieval),
             })
     return rows
@@ -253,7 +258,8 @@ def write_tables(rows, target, settings):
                ("actual_nnz_mean", "Gallery nnz"), ("empty_query_codes", "Empty queries"),
                ("empty_gallery_codes", "Empty gallery"), ("train_max_zero_codes", "Max zero codes/batch"),
                ("full_parent_top1", "Full parent 1-NN"), ("retrieval_batch_ms", "Search ms/batch"),
-               ("training_gpu_hours", "Train GPU-hours"), ("updates", "Updates"), ("fit_seconds", "Fit (s)")]
+               ("training_gpu_hours", "Train GPU-hours"), ("updates", "Updates"), ("fit_seconds", "Fit (s)"),
+               ("code", "Code")]
     lines = [f"# MMRSAE results: {target.name}", "",
              f"K={settings.get('k')}, evaluation={settings.get('evaluation')}, "
              f"train_size={settings.get('train_size')}, dev_size={settings.get('dev_size')}, "

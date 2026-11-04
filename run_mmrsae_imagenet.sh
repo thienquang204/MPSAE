@@ -128,9 +128,10 @@ case "${MMRSAE_LINEAR_PROBE:-1}" in
     *) echo "MMRSAE_LINEAR_PROBE must be 0 or 1" >&2; exit 2 ;;
 esac
 
-# Run the four selected methods unless a list or single variant is specified.
-# An explicit CLI --variant takes precedence and runs exactly once.
-IFS=',' read -r -a variants <<< "${MMRSAE_VARIANTS:-${MMRSAE_VARIANT:-csr,csrv2,mpsae,mpsaev2}}"
+# Train the new methods; csr/csrv2 come from the published baselines below.
+# List them in MMRSAE_VARIANTS to train them again. An explicit CLI --variant
+# takes precedence and runs exactly once.
+IFS=',' read -r -a variants <<< "${MMRSAE_VARIANTS:-${MMRSAE_VARIANT:-mpsae,mpsaev2}}"
 # Planning/preparation modes fit nothing, so they produce no report.
 report_dir="${MMRSAE_OUTPUT:-$SCRIPT_DIR/runs/mmrsae}"
 make_report="${MMRSAE_REPORT:-1}"
@@ -147,15 +148,16 @@ for argument in "$@"; do
     previous="$argument"
 done
 # Resolve and validate the entire selection before starting any GPU work.
+# The supported list is mmrsae_methods.BENCHMARK_METHODS: a method added there
+# is accepted here, trained, skipped when complete and compared in reports.
+supported=" $(cd "$SCRIPT_DIR" && "$python_bin" -c 'from mmrsae_methods import BENCHMARK_METHODS; print(" ".join(BENCHMARK_METHODS))') "
 selected_variants=()
 declare -A seen_variants=()
 for variant in "${variants[@]}"; do
     variant="${variant// /}"
     [[ "$variant" != "mpsae-annealed" ]] || variant=mpsaev2
-    case "$variant" in
-        csr|csrv2|mpsae|mpsaev2) ;;
-        *) echo "Unsupported benchmark method '$variant'; choose csr,csrv2,mpsae,mpsaev2" >&2; exit 2 ;;
-    esac
+    [[ "$supported" == *" $variant "* ]] \
+        || { echo "Unsupported benchmark method '$variant'; choose one of:$supported" >&2; exit 2; }
     [[ -z "${seen_variants[$variant]:-}" ]] || { echo "Duplicate benchmark method: $variant" >&2; exit 2; }
     seen_variants[$variant]=1
     selected_variants+=("$variant")
@@ -185,6 +187,13 @@ for variant in "${selected_variants[@]}"; do
     "$python_bin" "$SCRIPT_DIR/mmrsae_imagenet.py" "${args[@]}" --variant "$variant" "$@" || failed+=("$variant")
     archive_results
 done
+# Before comparing, put the published baseline fits (csr, csrv2) into the
+# output directory when they are missing; MMRSAE_BASELINES_REPO= disables it.
+baselines_repo="${MMRSAE_BASELINES_REPO-Lukita/almost_cvpr}"
+if [[ "$make_report" == 1 && -n "$baselines_repo" ]]; then
+    "$python_bin" "$SCRIPT_DIR/mmrsae_baselines.py" --output-dir "$report_dir" --repo "$baselines_repo" \
+        || echo "MMRSAE baseline download failed; the report compares local fits only" >&2
+fi
 # Tables and figures for every comparable group in the output directory,
 # including partial or failed fits. A reporting error never hides fit status.
 case "$make_report" in

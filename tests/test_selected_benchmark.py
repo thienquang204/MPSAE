@@ -102,8 +102,12 @@ class LauncherSelectionTests(unittest.TestCase):
             remaining = remaining[offset:].strip()
         return plans
 
-    def test_launcher_without_method_settings_plans_exactly_four_methods(self):
-        self.assertEqual(self.variants(self.launch()), list(BENCHMARK_METHODS))
+    def test_launcher_without_method_settings_trains_only_the_new_methods(self):
+        # csr/csrv2 come from the published baseline fits, fetched before the report.
+        self.assertEqual(self.variants(self.launch()), ["mpsae", "mpsaev2"])
+
+    def test_explicit_list_can_still_train_every_benchmark_method(self):
+        self.assertEqual(self.variants(self.launch(selection=",".join(BENCHMARK_METHODS))), list(BENCHMARK_METHODS))
 
     def test_explicit_cli_selection_overrides_list_once_in_both_forms(self):
         selection = ",".join(BENCHMARK_METHODS)

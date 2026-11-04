@@ -22,7 +22,7 @@ import time
 import traceback
 
 from repair_data import atomic_json, canonical_hash, exclusive_lock, sha256_file
-from mmrsae_methods import BENCHMARK_METHODS, canonical_method
+from mmrsae_methods import BENCHMARK_METHODS, canonical_method, comparable_settings
 from repair_runtime import (epoch_batches, load_checkpoint, named_parameters, pack_adam,
                             restore_adam, restore_rng, rng_state, save_checkpoint)
 from wandb_tracking import (add_wandb_arguments, finish_wandb, init_wandb,
@@ -730,26 +730,21 @@ def fit_and_evaluate(args, backbone, bundle, output, code, gpu, *, failure_conte
         raise
 
 
-# Settings that define a comparable result. A completed fit matching these is
-# not trained again, even after unrelated code or default changes.
-EXPERIMENT_KEYS = ("variant", "k", "hidden_dim", "epochs", "max_steps", "batch_size", "train_size",
-                   "anchor_count", "evaluation", "max_val", "seed", "data_seed", "eval_topk",
-                   "linear_probe", "probe_epochs")
-
-
 def completed_backbones(args, backbones):
-    """Map each requested backbone to an existing directory holding its completed fit."""
-    wanted = {key: serializable(getattr(args, key, None)) for key in EXPERIMENT_KEYS}
-    if args.evaluation == "dev":
-        wanted["dev_size"] = args.dev_size
+    """Map each requested backbone to an existing directory holding its completed fit.
+
+    A fit counts when its method and experiment settings (mmrsae_methods.
+    EXPERIMENT_KEYS) match, even after unrelated code or default changes.
+    """
+    wanted = comparable_settings(serializable(vars(args)))
     found = {}
     for trial_path in sorted(Path(args.output_dir).glob("*/trial.json")):
         try:
             settings = json.loads(trial_path.read_text(encoding="utf-8"))["settings"]
         except (OSError, ValueError, KeyError, TypeError):
             continue
-        settings = dict(settings, variant=canonical_method(settings.get("variant", "")))
-        if any(settings.get(key) != value for key, value in wanted.items()):
+        if (canonical_method(settings.get("variant", "")) != args.variant
+                or comparable_settings(settings) != wanted):
             continue
         for backbone in backbones:
             try:
