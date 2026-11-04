@@ -141,6 +141,8 @@ def build_parser():
     parser.add_argument("--timed-retrieval", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--dense-reference", action=argparse.BooleanOptionalAction, default=False,
                         help="Also measure the full frozen parent; requires its dense gallery to fit on the GPU")
+    parser.add_argument("--rerun-completed", action="store_true",
+                        help="Train again even when a completed fit with the same experiment settings exists")
     parser.add_argument("--linear-probe", action=argparse.BooleanOptionalAction, default=True,
                         help="Fit a separate training-only linear classifier per inference K and a full-parent reference")
     parser.add_argument("--probe-epochs", type=int, default=10)
@@ -728,10 +730,41 @@ def fit_and_evaluate(args, backbone, bundle, output, code, gpu, *, failure_conte
         raise
 
 
+# Settings that define a comparable result. A completed fit matching these is
+# not trained again, even after unrelated code or default changes.
+EXPERIMENT_KEYS = ("variant", "k", "hidden_dim", "epochs", "max_steps", "batch_size", "train_size",
+                   "anchor_count", "evaluation", "max_val", "seed", "data_seed", "eval_topk",
+                   "linear_probe", "probe_epochs")
+
+
+def completed_backbones(args, backbones):
+    """Map each requested backbone to an existing directory holding its completed fit."""
+    wanted = {key: serializable(getattr(args, key, None)) for key in EXPERIMENT_KEYS}
+    if args.evaluation == "dev":
+        wanted["dev_size"] = args.dev_size
+    found = {}
+    for trial_path in sorted(Path(args.output_dir).glob("*/trial.json")):
+        try:
+            settings = json.loads(trial_path.read_text(encoding="utf-8"))["settings"]
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        settings = dict(settings, variant=canonical_method(settings.get("variant", "")))
+        if any(settings.get(key) != value for key, value in wanted.items()):
+            continue
+        for backbone in backbones:
+            try:
+                summary = json.loads((trial_path.parent / backbone / "summary.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if summary.get("complete") and backbone not in found:
+                found[backbone] = trial_path.parent
+    return found
+
+
 def trial_settings(args):
     # Logging destinations and output paths do not change learned parameters.
     # They remain in configuration.json but may change when resuming locally.
-    ignored = {"output_dir", "run_name", "backbones", "plan", "preflight_only", "prepare_only",
+    ignored = {"output_dir", "run_name", "backbones", "plan", "preflight_only", "prepare_only", "rerun_completed",
                "log_every", "checkpoint_every", "eval_every", "device"}
     return {key: serializable(value) for key, value in vars(args).items()
             if key not in ignored and not key.startswith("wandb_")}
@@ -764,6 +797,15 @@ def main(argv=None):
                           "action": "plan only; no downloads, GPU initialization or training",
                           "automatic_ablation": False, "transfer_tasks": False}, indent=2))
         return 0
+
+    if not args.rerun_completed:
+        done = completed_backbones(args, backbones)
+        for backbone, directory in done.items():
+            print(f"Skipping {args.variant}/{backbone}: already completed with these settings in {directory}",
+                  flush=True)
+        backbones = [backbone for backbone in backbones if backbone not in done]
+        if not backbones:
+            return 0
 
     import torch
     from mmrsae_gpu import preflight

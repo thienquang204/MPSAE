@@ -117,6 +117,11 @@ case "${MMRSAE_DENSE_REFERENCE:-0}" in
     0) ;;
     *) echo "MMRSAE_DENSE_REFERENCE must be 0 or 1" >&2; exit 2 ;;
 esac
+case "${MMRSAE_RERUN_COMPLETED:-0}" in
+    1) args+=(--rerun-completed) ;;
+    0) ;;
+    *) echo "MMRSAE_RERUN_COMPLETED must be 0 or 1" >&2; exit 2 ;;
+esac
 case "${MMRSAE_LINEAR_PROBE:-1}" in
     1) args+=(--linear-probe) ;;
     0) args+=(--no-linear-probe) ;;
@@ -158,16 +163,34 @@ done
 # Data preparation belongs to the Python runner, after GPU preflight. The
 # default reads prepared archives; --embedding-source legacy explicitly enables
 # the old RN18 exporter with the same resolved CLI/environment settings.
+# Completed fits are copied (results, logs, weights-only final model) into a
+# compact archive after every method, before the next one starts. With
+# MMRSAE_PRUNE=1 (default) their encoded caches and probe checkpoints are then
+# deleted, so disk use stays near one method's working set.
+archive_dir="${MMRSAE_ARCHIVE_DIR:-${report_dir%/}_archive}"
+case "${MMRSAE_PRUNE:-1}" in
+    1) prune=(--prune) ;;
+    0) prune=() ;;
+    *) echo "MMRSAE_PRUNE must be 0 or 1" >&2; exit 2 ;;
+esac
+case "${MMRSAE_ARCHIVE:-$make_report}" in
+    1) archive_results() { "$python_bin" "$SCRIPT_DIR/mmrsae_archive.py" --output-dir "$report_dir" \
+           --archive-dir "$archive_dir" "${prune[@]}" || echo "MMRSAE archive failed; fit results are unaffected" >&2; } ;;
+    0) archive_results() { :; } ;;
+    *) echo "MMRSAE_ARCHIVE must be 0 or 1" >&2; exit 2 ;;
+esac
 failed=()
 for variant in "${selected_variants[@]}"; do
     (( ${#selected_variants[@]} == 1 )) || echo "=== MMRSAE method: $variant ===" >&2
     "$python_bin" "$SCRIPT_DIR/mmrsae_imagenet.py" "${args[@]}" --variant "$variant" "$@" || failed+=("$variant")
+    archive_results
 done
 # Tables and figures for every comparable group in the output directory,
 # including partial or failed fits. A reporting error never hides fit status.
 case "$make_report" in
     1) "$python_bin" "$SCRIPT_DIR/mmrsae_reporting.py" --output-dir "$report_dir" \
-           || echo "MMRSAE report generation failed; fit results are unaffected" >&2 ;;
+           || echo "MMRSAE report generation failed; fit results are unaffected" >&2
+       archive_results ;;
     0) ;;
     *) echo "MMRSAE_REPORT must be 0 or 1" >&2; exit 2 ;;
 esac
