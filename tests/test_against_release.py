@@ -24,17 +24,24 @@ from mpsae.model import build_sae  # noqa: E402
 DIM, HIDDEN, BATCH, K, K_AUX = 12, 64, 16, 3, 8
 
 
+import torch  # noqa: E402  (after importorskip)
+
+
 def _paired_models(torch, *, seed=1227):
     """One of ours and one of theirs, sharing identical parameters."""
     ours = build_sae(DIM, HIDDEN, seed=seed, dead_threshold=30)
     theirs = released.CSR(n_latents=HIDDEN, topk=K, auxk=K_AUX, normalize=False,
                           n_inputs=DIM, dead_threshold=30)
-    theirs.load_state_dict({
-        "pre_bias": ours.pre_bias.detach().clone(),
-        "encoder.weight": ours.encoder.weight.detach().clone(),
-        "latent_bias": ours.latent_bias.detach().clone(),
-        "stats_last_nonzero": ours.stats_last_nonzero.detach().clone(),
-    }, strict=True)
+    # Copied in place rather than through load_state_dict: the released module
+    # holds its decoder as a TiedTranspose wrapping the same Linear, so its
+    # state_dict carries a `decoder.linear.weight` alias that ours has no
+    # counterpart for. Assigning the three real tensors keeps the tie intact.
+    with torch.no_grad():
+        theirs.pre_bias.copy_(ours.pre_bias)
+        theirs.encoder.weight.copy_(ours.encoder.weight)
+        theirs.latent_bias.copy_(ours.latent_bias)
+        theirs.stats_last_nonzero.copy_(ours.stats_last_nonzero)
+    assert theirs.decoder.weight.data_ptr() == theirs.encoder.weight.data_ptr()
     return ours, theirs
 
 
@@ -85,21 +92,31 @@ def test_auxiliary_latents_match_including_the_inplace_mask(torch, batch):
     assert torch.allclose(mine, theirs_aux, atol=1e-6)
 
 
-def test_auxiliary_gradient_matches_when_nothing_is_dead_yet(torch, batch):
-    """A plain ``pre * mask`` would zero this gradient; the release does not.
+def test_auxiliary_gradient_matches_the_release_in_both_regimes(torch, batch):
+    """Before anything is dead, and after.
 
-    For the first ten or so steps no latent has crossed the threshold, so the
-    masked tensor is all zeros and Top-K selects arbitrary positions. The
-    release still back-propagates an unweighted scatter to those positions.
+    The two regimes are genuinely different: early on the mask is all zeros, so
+    the term is inert and contributes no gradient; later it revives specific
+    latents. Our multiply and the release's in-place ``.data`` write must agree
+    in both, which is what licenses not mutating the shared pre-activations.
     """
-    ours, _ = _paired_models(torch)
-    pre = ours.pre_activations(batch)
-    ours.count_activity(pre, K)
-    assert not bool(ours.dead_mask().any())
-    latents = ours.auxiliary_latents(pre, K_AUX)
-    assert torch.equal(latents, torch.zeros_like(latents))
-    grad, = torch.autograd.grad(latents.sum(), ours.encoder.weight, allow_unused=True)
-    assert grad is not None and bool(grad.abs().sum() > 0)
+    for steps, expect_gradient in ((1, False), (40, True)):
+        ours, theirs = _paired_models(torch)
+        for _ in range(steps):
+            pre = ours.pre_activations(batch)
+            ours.count_activity(pre, K)
+            theirs.top_k(theirs.encode_pre_act(batch), K)
+        assert bool(ours.dead_mask().any()) is expect_gradient
+
+        mine = ours.auxiliary_latents(ours.pre_activations(batch), K_AUX)
+        _, released_aux = theirs.top_k(theirs.encode_pre_act(batch), K)
+        assert torch.allclose(mine, released_aux, atol=1e-6)
+
+        my_grad, = torch.autograd.grad(mine.sum(), ours.encoder.weight, allow_unused=True)
+        their_grad, = torch.autograd.grad(released_aux.sum(), theirs.encoder.weight,
+                                          allow_unused=True)
+        assert torch.allclose(my_grad, their_grad, atol=1e-6)
+        assert bool(my_grad.abs().sum() > 0) is expect_gradient
 
 
 def test_normalized_mse_matches(torch, batch):
@@ -111,9 +128,25 @@ def test_normalized_mse_matches(torch, batch):
         released.normalized_mse(prediction, target, criterion).nan_to_num(0), atol=1e-6)
 
 
-def test_normalized_mse_absorbs_a_constant_target(torch):
+def test_normalized_mse_handles_a_constant_target_exactly_as_released(torch):
+    """``nan_to_num(0)`` catches 0/0, not x/0 -- and neither does the release.
+
+    With a constant target the batch-mean predictor is exact, so the
+    denominator is zero. If the numerator is zero too the result is NaN and
+    becomes 0; otherwise it is +inf, and ``nan_to_num``'s default replaces that
+    with the float32 maximum rather than zero. We reproduce the released
+    behaviour rather than improving on it, so the documentation says "absorbs a
+    constant target" only for the 0/0 case.
+    """
     constant = torch.ones(8, 4)
-    assert float(losses.normalized_mse(torch.zeros(8, 4), constant)) == 0.0
+    criterion = torch.nn.MSELoss()
+    for prediction in (constant.clone(), torch.zeros(8, 4)):
+        ours = float(losses.normalized_mse(prediction, constant))
+        theirs = float(released.normalized_mse(prediction, constant, criterion).nan_to_num(0))
+        assert ours == theirs
+    assert float(losses.normalized_mse(constant.clone(), constant)) == 0.0
+    assert float(losses.normalized_mse(torch.zeros(8, 4), constant)) == torch.finfo(
+        torch.float32).max
 
 
 def test_inbatch_cl_matches_the_release(torch):

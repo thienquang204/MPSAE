@@ -158,11 +158,37 @@ def evaluate_at(cell: Cell, bundle: Bundle, model, spec: Backbone, settings: Run
         point.update(probe_top1=probe["top1"], probe_top5=probe.get("top5"),
                      probe_settings=probe.get("settings"))
     if want_timing and settings.measure_timing:
-        timing = evaluate.time_sparse_matmul(
-            gallery, queries, dim=spec.preset.hidden_dim, device=settings.fit.device)
-        point.update(retrieval_ms=timing.get("median_ms"), index_bytes=timing.get("index_bytes"),
-                     timing=timing)
+        # Retrieval cost is a secondary metric: it reports the trade-off CSR
+        # argues for, but no accuracy depends on it. It refuses to run outside
+        # CUDA, and a wall-clock measurement can fail for reasons that have
+        # nothing to do with the fit, so it must never take the run down.
+        try:
+            timing = evaluate.time_sparse_matmul(
+                gallery, queries, dim=spec.preset.hidden_dim, device=settings.fit.device)
+        except Exception as error:
+            get_logger(cell.slug).warning("retrieval timing skipped (%s: %s)",
+                                          type(error).__name__, error)
+        else:
+            point.update(retrieval_ms=_milliseconds(timing),
+                         index_bytes=_index_bytes(timing), timing=timing)
     return point
+
+
+def _milliseconds(timing: dict[str, Any]) -> float | None:
+    """Per-batch latency, wherever the timing harness recorded it."""
+    for key in ("milliseconds_per_batch", "median_ms"):
+        if isinstance(timing.get(key), (int, float)):
+            return float(timing[key])
+    median = (timing.get("cuda_seconds") or {}).get("median")
+    return float(median) * 1000.0 if isinstance(median, (int, float)) else None
+
+
+def _index_bytes(timing: dict[str, Any]) -> int | None:
+    for source in (timing, timing.get("index") or {}):
+        value = source.get("index_bytes") if isinstance(source, dict) else None
+        if isinstance(value, (int, float)):
+            return int(value)
+    return None
 
 
 # ------------------------------------------------------------------ one cell

@@ -168,11 +168,26 @@ def inspect_npz(path: str | Path) -> dict[str, Any]:
             if not member.endswith(".npy"):
                 continue
             with archive.open(member) as handle:
-                version = np.lib.format.read_magic(handle)
-                shape, fortran, dtype = np.lib.format._read_array_header(handle, version)
+                shape, fortran, dtype = _read_npy_header(handle)
             info[member[:-4]] = {"shape": tuple(shape), "dtype": dtype.str,
                                  "fortran_order": bool(fortran)}
     return info
+
+
+def _read_npy_header(handle) -> tuple[tuple[int, ...], bool, Any]:
+    """Shape, order and dtype of a ``.npy`` stream, reading only its header.
+
+    Dispatches on the format version through the documented
+    ``read_array_header_*`` entry points. The private ``_read_array_header``
+    these used to share was removed in NumPy 2.
+    """
+    import numpy as np
+
+    major, minor = np.lib.format.read_magic(handle)
+    reader = getattr(np.lib.format, f"read_array_header_{major}_{minor}", None)
+    if reader is None:
+        raise ValueError(f"unsupported .npy format version {major}.{minor}")
+    return reader(handle)
 
 
 def open_npz_memmap(path: str | Path, cache_dir: str | Path, *,

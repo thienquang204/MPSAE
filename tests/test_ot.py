@@ -60,18 +60,51 @@ def test_an_all_zero_code_costs_one_not_nan(torch):
     assert bool(torch.isfinite(cost).all())
 
 
-def test_solver_returns_a_feasible_plan(torch):
+def test_solver_plan_is_structurally_valid(torch):
+    """Shape contracts that hold whatever the stopping criterion decided."""
     _, (z1, z2, z3) = _views(torch)
     cost = ot.angular_cost(z1, z2, z3)
     plan, slacks, stats = ot.greenkhorn(cost, MASS, ETA, ITERS, TOL)
     n = len(cost)
-    assert stats["mass_error"] <= TOL
-    assert stats["cap_violation"] <= TOL
     assert float(plan.min()) >= 0.0
+    assert stats["cap_violation"] <= TOL
     for axis, slack in zip(((1, 2), (0, 2), (0, 1)), slacks):
         marginal = plan.sum(axis)
         assert float(marginal.max()) <= 1 / n + TOL
         assert torch.allclose(marginal + slack, torch.full((n,), 1 / n), atol=10 * TOL)
+
+
+def test_the_bare_solver_stops_on_kl_not_absolute_error(torch):
+    """Documents a real units mismatch, so nobody "fixes" it by accident.
+
+    ``greenkhorn`` stops when the worst constraint's **KL** divergence falls
+    below ``tol``, while ``matching_gap_from_cost`` accepts a plan on the
+    **absolute** mass error. For small deviations KL is roughly
+    ``delta^2 / (2*mass)``, so a KL of 1e-4 corresponds to an absolute error
+    near ``sqrt(2*0.9*1e-4)`` -- about 1.3e-2, two orders above the same
+    numeric tolerance. The first pass therefore never satisfies the acceptance
+    test and refinement is the normal path, not an exception.
+
+    This is inherited verbatim from the pre-rewrite implementation, so the
+    published behaviour depends on it. Changing it would change results.
+    """
+    _, (z1, z2, z3) = _views(torch)
+    cost = ot.angular_cost(z1, z2, z3)
+    _, _, stats = ot.greenkhorn(cost, MASS, ETA, ITERS, TOL)
+    assert stats["constraint_error"] <= TOL        # converged, in KL
+    assert stats["mass_error"] > TOL               # but not in absolute terms
+    assert stats["mass_error"] < (2 * MASS * TOL) ** 0.5 * 2
+
+
+def test_the_production_path_is_feasible(torch):
+    """What the objective actually consumes, after refinement."""
+    _, (z1, z2, z3) = _views(torch)
+    cost = ot.angular_cost(z1, z2, z3)
+    _, stats, _ = ot.matching_gap_from_cost(cost, mass=MASS, eta=ETA,
+                                            max_iters=ITERS, tol=TOL)
+    assert stats["mass_error"] <= TOL
+    assert stats["cap_violation"] <= TOL
+    assert stats["refinement_iterations"] > 0
 
 
 def test_gap_is_nonnegative_and_finite(torch):
@@ -101,13 +134,16 @@ def test_gradient_is_the_envelope_gradient(torch):
     gap, _, delta = ot.matching_gap_from_cost(cost, mass=MASS, eta=ETA, max_iters=ITERS, tol=TOL)
     grad, = torch.autograd.grad(gap, cost)
     assert torch.allclose(grad, delta, atol=1e-6)
+    # delta = s*J - P*, so off the diagonal it is exactly -P* and is therefore
+    # nonpositive, while every diagonal cell is raised by exactly mass/n. The
+    # plan is not re-solved here: matching_gap_from_cost may have refined, and
+    # a fresh solve would be a different P*.
     n = len(cost)
     diagonal = torch.arange(n)
-    # The reference plan puts mass/n on each diagonal cell and nothing else.
-    assert torch.allclose(delta[diagonal, diagonal, diagonal]
-                          + ot.greenkhorn(cost.detach(), MASS, ETA, ITERS, TOL)[0]
-                          [diagonal, diagonal, diagonal],
-                          torch.full((n,), MASS / n), atol=1e-5)
+    off_diagonal = delta.clone()
+    off_diagonal[diagonal, diagonal, diagonal] -= MASS / n
+    assert float(off_diagonal.max()) <= 1e-6
+    assert float(-off_diagonal.sum()) == pytest.approx(MASS, abs=1e-3)
 
 
 def test_gradient_reaches_all_three_views(torch):

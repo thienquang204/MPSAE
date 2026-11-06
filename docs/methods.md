@@ -62,8 +62,11 @@ L = L(k) + 0.125·L(4k) + (1/32)·NMSE_aux + γ·L_reg
   "multi-TopK" term from Gao et al.'s TopK SAE.
 * `NMSE_aux` is the AuxK revival term: the dead latents reconstruct
   `x − x̂.detach() + b_pre.detach()`, normalised by the error of a batch-mean
-  predictor, with `nan_to_num(0)` to absorb a constant target in the first
-  steps. `k_aux = 512`.
+  predictor, with `k_aux = 512`. The released `nan_to_num(0)` catches only the
+  `0/0` case — a constant target reconstructed exactly. A constant target
+  reconstructed *inexactly* divides by zero and `nan_to_num`'s default maps
+  `+inf` to the float32 maximum rather than to zero. We reproduce that rather
+  than improve on it; with real embeddings the denominator is never zero.
 * `L_reg` is where the methods differ.
 
 ## The five methods

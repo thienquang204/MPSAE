@@ -262,15 +262,24 @@ def _synthesise_embeddings(spec: Backbone, options: PipelineOptions, *, split: s
     which is enough to prove the retrieval and probe paths are wired correctly.
     These archives are not science and are labelled as such in the manifest.
     """
+    import zlib
+
     import numpy as np
 
     from .embed import finalize_archive
 
     rows = classes * (per_class if split == "train" else max(2, per_class // 8))
-    generator = np.random.default_rng(abs(hash((spec.name, split))) % (2**32))
-    centres = generator.normal(scale=1.0, size=(classes, spec.dim)).astype(np.float32)
+    # The class centres must be shared by both splits, or a validation query
+    # has no counterpart in the gallery and 1-NN sits at chance -- which would
+    # make the rehearsal unable to tell a working retrieval path from a broken
+    # one. zlib.crc32 rather than hash(): the latter is salted per process.
+    base = zlib.crc32(spec.name.encode())
+    centres = np.random.default_rng(base).normal(
+        scale=1.0, size=(classes, spec.dim)).astype(np.float32)
+    noise = np.random.default_rng(base + (0 if split == "train" else 1))
     labels = np.repeat(np.arange(classes), rows // classes).astype(np.int64)
-    features = centres[labels] + generator.normal(scale=0.35, size=(len(labels), spec.dim)).astype(np.float32)
+    features = centres[labels] + noise.normal(
+        scale=0.35, size=(len(labels), spec.dim)).astype(np.float32)
     name = "1K_train_{}.npz" if split == "train" else "1K_val_{}.npz"
     out_path = options.paths.embeddings / spec.name / name.format(spec.name)
     return finalize_archive(out_path, features, labels, manifest={

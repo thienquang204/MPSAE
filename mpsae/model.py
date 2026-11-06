@@ -109,19 +109,21 @@ class SparseAutoencoder(nn.Module):
     def auxiliary_latents(self, pre: torch.Tensor, k_aux: int) -> torch.Tensor:
         """Top-``k_aux`` over dead latents only, for the AuxK revival term.
 
-        The release writes ``x.data *= dead_mask``, which changes the values
-        Top-K sees while leaving the autograd graph of ``pre`` untouched: the
-        gradient reaching ``pre`` is an unweighted scatter at the selected
-        indices. The straight-through form below reproduces exactly that, both
-        in value and in gradient, without mutating a tensor that we reuse for
-        the other views. A plain ``pre * mask`` would differ whenever fewer
-        than ``k_aux`` latents are dead -- which is the case for the first ten
-        or so steps, when nothing has yet crossed the threshold.
+        The release writes ``x.data *= dead_mask``, an untracked in-place write
+        on the pre-activations. We cannot do that: the release recomputes the
+        pre-activations for each of its three forward passes, whereas we share
+        one tensor across all the views, and mutating it would corrupt them.
+
+        Multiplying instead is equivalent, including in the gradient. A masked
+        position holds exactly zero, so ReLU's derivative there is zero and no
+        gradient would reach it either way -- which also covers the first ten
+        or so steps, when nothing has yet crossed the threshold and the mask is
+        entirely zero. ``tests/test_against_release.py`` pins both regimes
+        against the released module.
         """
         if k_aux < 1:
             raise ValueError("k_aux must be positive; disable the term by weighting it zero")
-        mask = self.dead_mask().to(pre.dtype)
-        masked = pre + (pre * mask - pre).detach()
+        masked = pre * self.dead_mask().to(pre.dtype)
         latents, _ = self.gate(masked, min(k_aux, pre.shape[-1]))
         return latents
 
