@@ -91,7 +91,7 @@ def load_bundle(spec: Backbone, embeddings_dir: str | Path, cache_dir: str | Pat
         if not path.is_file():
             raise FileNotFoundError(
                 f"missing {split} embeddings for {spec.name}: {path}. Run the embedding "
-                f"stage (pipeline stage S3/S4/S4b) or download the published archive.")
+                f"stage first: ./scripts/pipeline.sh stage embed -- --backbones {spec.name}")
         manifest = read_json(path.with_suffix(".json")) or {}
         expected = manifest.get("sha256")
         features, labels, metadata = open_npz_memmap(path, Path(cache_dir) / "features",

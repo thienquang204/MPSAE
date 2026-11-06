@@ -194,6 +194,16 @@ class CodeSource:
         return int(self.empty_mask(block=block).sum())
 
 
+def _all_rows(features: Any) -> np.ndarray:
+    """``row_ids=None`` means every row, in order.
+
+    That is what the retrieval protocol asks for -- the whole train split is
+    the gallery and the whole validation split the query set -- so the callers
+    say ``None`` rather than each materialising an identical arange.
+    """
+    return np.arange(len(features), dtype=np.int64)
+
+
 def _split_codes(codes: Any) -> tuple[Any, Any]:
     if isinstance(codes, CodeSource):
         raise TypeError("pass the underlying codes, not another CodeSource")
@@ -229,7 +239,7 @@ def _l2_normalize(x: torch.Tensor) -> torch.Tensor:
 
 # -------------------------------------------------------------------- encode
 
-def encode_split(sae, features: Any, row_ids: np.ndarray, k: int, *,
+def encode_split(sae, features: Any, row_ids: np.ndarray | None, k: int, *,
                  device: torch.device | str, batch_size: int = DEFAULT_ENCODE_BATCH,
                  cache_dir: str | Path | None = None,
                  identity: dict[str, Any] | None = None,
@@ -257,6 +267,7 @@ def encode_split(sae, features: Any, row_ids: np.ndarray, k: int, *,
         raise ValueError(f"K={k} exceeds hidden_dim={sae.hidden_dim}")
     if batch_size < 1:
         raise ValueError("batch_size must be positive")
+    row_ids = _all_rows(features) if row_ids is None else row_ids
     row_ids = np.asarray(row_ids, dtype=np.int64).reshape(-1)
     if not len(row_ids):
         raise ValueError("refusing to encode an empty row selection")
@@ -416,7 +427,7 @@ def _encode_to_cache(sae, features: Any, row_ids: np.ndarray, k: int, *,
             "stats": result["stats"]}
 
 
-def encode_dense(features: Any, row_ids: np.ndarray, *, device: torch.device | str,
+def encode_dense(features: Any, row_ids: np.ndarray | None, *, device: torch.device | str,
                  batch_size: int = 8192, to_device: bool = False) -> Any:
     """Gather the raw backbone rows for the dense reference measurement.
 
@@ -429,6 +440,7 @@ def encode_dense(features: Any, row_ids: np.ndarray, *, device: torch.device | s
     ``to_device=True`` to keep it on the GPU; that raises if it does not fit.
     """
     device = torch.device(device)
+    row_ids = _all_rows(features) if row_ids is None else row_ids
     row_ids = np.asarray(row_ids, dtype=np.int64).reshape(-1)
     if not len(row_ids):
         raise ValueError("refusing to gather an empty row selection")

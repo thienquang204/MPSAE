@@ -43,7 +43,13 @@ class RunSettings:
     probe_epochs: int = 10
     measure_timing: bool = True
     run_e2: bool = True
-    dense_gate_tolerance: float = 0.05
+    #: Two tiers on the published dense 1-NN. Within ``warn`` the embedding
+    #: recipe is indistinguishable from the published one; beyond ``fail`` it
+    #: demonstrably is not, and training would produce numbers that cannot be
+    #: compared with the published tables. Between the two, say so and let the
+    #: operator decide.
+    dense_gate_warn: float = 0.05
+    dense_gate_fail: float = 0.3
     force: bool = False
 
 
@@ -97,11 +103,12 @@ def dense_reference(spec: Backbone, bundle: Bundle, settings: RunSettings) -> di
     if expected is not None:
         record["published_top1"] = expected
         record["deviation"] = result["top1"] - expected
-        if abs(record["deviation"]) <= settings.dense_gate_tolerance:
+        if abs(record["deviation"]) <= settings.dense_gate_warn:
             log.info("dense 1-NN %.2f%% matches the published %.2f%%", result["top1"], expected)
         else:
-            log.warning("dense 1-NN %.2f%% deviates %+0.2f from the published %.2f%%",
-                        result["top1"], record["deviation"], expected)
+            log.warning("dense 1-NN %.2f%% deviates %+0.2f from the published %.2f%% "
+                        "(warn above %.2f, fail above %.2f)", result["top1"], record["deviation"],
+                        expected, settings.dense_gate_warn, settings.dense_gate_fail)
     else:
         log.info("dense 1-NN %.2f%% (no published value for this backbone)", result["top1"])
     atomic_json(path, record)

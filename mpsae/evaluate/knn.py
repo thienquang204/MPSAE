@@ -242,7 +242,8 @@ def dense_top1(gallery: Any, gallery_labels: Any, queries: Any, query_labels: An
                progress_stage: str = "knn") -> dict[str, Any]:
     """1-NN Top-1 of the raw backbone embedding -- CSR Table 4 "Full Rep.".
 
-    This is the pipeline's correctness gate: FF2048 must reach 71.19 +- 0.05
+    This is the pipeline's correctness gate. FF2048's published "Full Rep."
+    is 71.19; the embed stage warns beyond 0.05 and fails beyond 0.3
     (plan gate G1). A deviation means the embedding recipe is wrong, and every
     sparse number downstream would be measured against the wrong backbone, so
     the caller stops the pipeline rather than training on it.

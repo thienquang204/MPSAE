@@ -212,8 +212,11 @@ def stage_imagenet(options: PipelineOptions) -> dict[str, Any]:
             "smoke mode: no ImageNet download. The embed stage will synthesise archives "
             "instead, which exercises training, evaluation and reporting end to end.")
         return {"skipped": "smoke"}
+    # Its own receipt goes in a nested directory: sharing `state/` would let the
+    # outer stage wrapper overwrite the inner one, losing the dataset revision
+    # that makes the download reproducible.
     return prepare_imagenet(options.paths.imagenet, token=_env("HF_TOKEN"),
-                            state_dir=options.paths.state)
+                            state_dir=options.paths.state / "imagenet")
 
 
 # ----------------------------------------------------------------- stage: ffcv
@@ -307,7 +310,8 @@ def stage_embed(options: PipelineOptions) -> dict[str, Any]:
         produced[name]["dense_reference"] = gate
         if options.smoke:
             log.info("%s: synthetic dense 1-NN %.2f%% (gate not applicable)", name, gate["top1"])
-        elif spec.reference_dense_top1 is not None and abs(gate.get("deviation", 0)) > 0.3:
+        elif (spec.reference_dense_top1 is not None
+              and abs(gate.get("deviation", 0)) > settings.dense_gate_fail):
             raise RuntimeError(
                 f"{name}: dense 1-NN {gate['top1']:.2f}% is {gate['deviation']:+.2f} from the "
                 f"published {spec.reference_dense_top1:.2f}%. The embedding recipe does not "
@@ -364,7 +368,8 @@ def stage_train(options: PipelineOptions) -> dict[str, Any]:
         linear_probe=options.linear_probe, run_e2=options.run_e2,
         force=options.forced("train"),
         fit=FitSettings(device=options.device, max_steps=options.max_steps,
-                        wandb_project=options.wandb_project))
+                        wandb_project=options.wandb_project,
+                        force=options.forced("train")))
     return run_grid(cells, settings, code_version=__version__, dense_gate=False)
 
 

@@ -201,6 +201,7 @@ mpsae/
 csrc/            CUDA inverted index (optional secondary metric)
 scripts/         pipeline.sh, setup_server.sh, capture_golden.py
 tests/reference/ transcribed CSR/CSRv2 source, used only as a test oracle
+docs/            methods, data provenance, pipeline, outputs, server setup
 ```
 
 Outputs land under `work/`: `runs/<backbone>/<method>/k<K>/seed<S>/` holds
@@ -237,6 +238,14 @@ Until that file exists the OT contract tests still run; only the
 bit-for-bit comparison skips.
 
 ---
+
+## Documentation
+
+[`docs/`](docs/README.md) has the detail: [`methods.md`](docs/methods.md) for
+the objectives and the baseline findings, [`data.md`](docs/data.md) for
+provenance, [`pipeline.md`](docs/pipeline.md) for running and debugging,
+[`outputs.md`](docs/outputs.md) for the result schema, and
+[`server.md`](docs/server.md) for GPU setup.
 
 ## Open items
 

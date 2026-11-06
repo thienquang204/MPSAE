@@ -39,6 +39,10 @@ class FitSettings:
     max_steps: int = 0          # 0 = run the full schedule; >0 caps it (smoke runs)
     wandb_project: str | None = None
     compile_model: bool = False
+    #: Retrain even when a completed fit with the same recipe exists. Note this
+    #: discards the checkpoint rather than resuming from it: ``--force train``
+    #: means "do it again", not "do the rest of it".
+    force: bool = False
 
 
 def total_updates(bundle: Bundle, preset: TrainPreset, *, max_steps: int = 0) -> tuple[int, int]:
@@ -122,9 +126,13 @@ def fit(cell: Cell, bundle: Bundle, out_dir: str | Path, settings: FitSettings, 
     summary_path = out_dir / "summary.json"
     finished = read_json(summary_path)
     if finished and finished.get("identity") == signature and finished.get("complete"):
-        log.info("already trained (%d steps, %s)", finished["steps"],
-                 format_duration(finished["train_seconds"]))
-        return finished
+        if not settings.force:
+            log.info("already trained (%d steps, %s)", finished["steps"],
+                     format_duration(finished["train_seconds"]))
+            return finished
+        log.warning("retraining from scratch (--force); discarding the completed fit")
+        for stale in (summary_path, out_dir / "checkpoint.pt", out_dir / "train.jsonl"):
+            stale.unlink(missing_ok=True)
     atomic_json(out_dir / "config.json", {"identity": identity, "signature": signature,
                                           "cell": cell.__dict__, "code_version": code_version,
                                           "backbone": cell.backbone, "method": cell.method,
