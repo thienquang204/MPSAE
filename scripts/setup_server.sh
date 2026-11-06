@@ -28,19 +28,41 @@ if ! command -v nvidia-smi >/dev/null; then
     die "nvidia-smi not found; this project needs a CUDA GPU"
 fi
 nvidia-smi --query-gpu=name,compute_cap,memory.total,driver_version --format=csv
-CAP="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1 | tr -d ' ')"
-echo "compute capability: $CAP"
 
-# Blackwell (sm_120: RTX 5090, RTX PRO 6000) only has kernels in cu128 builds.
-case "$CAP" in
-    12.*|11.*) TORCH_INDEX="https://download.pytorch.org/whl/cu128"; ARCHES="9.0;10.0;12.0" ;;
-    10.*)      TORCH_INDEX="https://download.pytorch.org/whl/cu128"; ARCHES="9.0;10.0" ;;
-    9.*)       TORCH_INDEX="https://download.pytorch.org/whl/cu124"; ARCHES="9.0" ;;
-    8.*)       TORCH_INDEX="https://download.pytorch.org/whl/cu124"; ARCHES="8.0;8.6;8.9" ;;
-    *)         TORCH_INDEX="https://download.pytorch.org/whl/cu124"; ARCHES="$CAP" ;;
-esac
-echo "torch wheel index: $TORCH_INDEX"
-echo "TORCH_CUDA_ARCH_LIST: $ARCHES"
+# Build the arch list from the capabilities actually present. Generating it
+# rather than hard-coding one matters under CUDA 13, whose nvcc rejects the
+# architectures it dropped (sm_50 through sm_70) instead of ignoring them.
+ARCHES="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader \
+          | tr -d ' ' | sort -uV | paste -sd';' -)"
+CAP="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | tr -d ' ' | sort -V | head -1)"
+DRIVER="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1 | cut -d. -f1)"
+cap_at_least() { [ "$(printf '%s\n%s\n' "$1" "$CAP" | sort -V | head -1)" = "$1" ]; }
+
+# Index choice is constrained from both ends: the driver sets the highest CUDA
+# runtime that can load, the GPU sets the lowest toolkit that still has kernels
+# for it. Checked 2026-11: cu128 is frozen at torch 2.11.0, so it is only used
+# where nothing newer can run; cu132 carries the current release.
+if ! cap_at_least 7.5; then
+    # CUDA 13 removed Maxwell, Pascal and Volta entirely.
+    CU=cu126; WHY="sm_$CAP predates CUDA 13, which dropped it"
+elif [ "${DRIVER:-0}" -ge 580 ]; then
+    CU=cu132; WHY="driver $DRIVER supports the CUDA 13 runtime"
+elif cap_at_least 10.0; then
+    if [ "${DRIVER:-0}" -lt 570 ]; then
+        die "Blackwell (sm_$CAP) needs driver >= 570, this box has $DRIVER.
+  Ask the provider for a newer driver image; no wheel works around this."
+    fi
+    CU=cu128; WHY="Blackwell on driver $DRIVER; cu128 is the newest runtime this driver loads"
+    echo "note: cu128 is frozen at torch 2.11.0. A driver >= 580 would get cu132 and torch 2.15." >&2
+else
+    CU=cu126; WHY="driver $DRIVER predates CUDA 13"
+fi
+# An operator who knows better can override, e.g. MPSAE_TORCH_INDEX=.../cu130
+TORCH_INDEX="${MPSAE_TORCH_INDEX:-https://download.pytorch.org/whl/$CU}"
+
+echo "compute capability: $CAP (arch list: $ARCHES)"
+echo "driver:             ${DRIVER:-unknown}"
+echo "torch wheel index:  $TORCH_INDEX  — $WHY"
 
 step "system packages"
 if command -v apt-get >/dev/null; then

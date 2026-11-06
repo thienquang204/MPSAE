@@ -6,14 +6,20 @@
 #   docker run --gpus all --env-file .env -v "$PWD/work:/work" \
 #       -e MPSAE_WORKSPACE=/work mpsae
 #
-# Pick CUDA_TAG for the GPU: 12.8.0 for Blackwell (RTX 5090, RTX PRO 6000),
-# 12.4.1 is enough for H100 and Ada.
-ARG CUDA_TAG=12.8.0
+# CUDA_TAG and TORCH_INDEX must agree, and the host driver must be new enough:
+# CUDA 13.x needs driver >= 580, 12.8 needs >= 570.
+#   default (13.0 / cu132): Ampere through Blackwell, current torch
+#   --build-arg CUDA_TAG=12.8.0 --build-arg TORCH_INDEX=.../cu128  driver 570-579
+#   --build-arg CUDA_TAG=12.6.3 --build-arg TORCH_INDEX=.../cu126  V100 and older,
+#       which CUDA 13 dropped (it compiles only for sm_75 and above)
+ARG CUDA_TAG=13.0.0
 FROM nvidia/cuda:${CUDA_TAG}-devel-ubuntu22.04
 
-ARG TORCH_INDEX=https://download.pytorch.org/whl/cu128
-# Kernels are compiled for H100, Blackwell datacentre and Blackwell consumer.
-ENV TORCH_CUDA_ARCH_LIST="9.0;10.0;12.0" \
+ARG TORCH_INDEX=https://download.pytorch.org/whl/cu132
+# A100, L40S/4090, H100, Blackwell datacentre, Blackwell consumer. Every entry
+# must be an architecture the chosen CUDA_TAG still supports.
+ARG TORCH_CUDA_ARCH_LIST="8.0;8.9;9.0;10.0;12.0"
+ENV TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST}" \
     DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PYTHONUNBUFFERED=1 \

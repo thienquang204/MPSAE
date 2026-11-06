@@ -18,20 +18,54 @@ automates all of this; the reasoning is here so a failure is diagnosable.
 
 ## CUDA and architectures
 
-`TORCH_CUDA_ARCH_LIST` matters for the optional `csrc/` extension; the torch
-wheel matters for everything.
+Two independent constraints, and `setup_server.sh` resolves both:
 
-| GPU | capability | wheel |
+* **the driver sets the ceiling.** CUDA 13.x needs driver branch ≥ 580, CUDA
+  12.8 needs ≥ 570, older 12.x needs ≥ 525. The wheel ships its own runtime, so
+  the host toolkit is irrelevant — only the driver matters.
+* **the GPU sets the floor.** CUDA 13 dropped Maxwell, Pascal and Volta
+  outright: it compiles only for sm_75 and above. A V100 therefore needs a 12.x
+  build no matter how new the driver is.
+
+Wheel indexes, checked 2026-11:
+
+| index | newest torch | note |
 |---|---|---|
-| A100 | sm_80 | cu124 |
-| L40S, 4090 | sm_89 | cu124 |
-| H100 | sm_90 | cu121 or newer |
-| B200 | sm_100 | cu128 |
-| RTX 5090, RTX PRO 6000 | sm_120 | **cu128, torch ≥ 2.7** |
+| `cu126` | 2.14.1 | the fallback for pre-Turing GPUs and old drivers |
+| `cu128` | **2.11.0 — frozen** | only worth using for Blackwell on driver 570–579 |
+| `cu129` | 2.13.0 | |
+| `cu130` | 2.14.1 | first CUDA 13 line |
+| `cu132` | **2.15.0** | current; the default once the driver is ≥ 580 |
 
-A too-old wheel on Blackwell does not fail at import — it fails at the first
-kernel launch, often minutes in. `stage_env` checks the pair up front and
-refuses to continue, and `setup_server.sh` runs a matmul as proof.
+| GPU | capability | picked |
+|---|---|---|
+| V100 | sm_70 | `cu126` (CUDA 13 dropped it) |
+| A100 | sm_80 | `cu132`, else `cu126` |
+| L40S, 4090 | sm_89 | `cu132`, else `cu126` |
+| H100 | sm_90 | `cu132`, else `cu126` |
+| B200 | sm_100 | `cu132`, else `cu128` |
+| RTX 5090, RTX PRO 6000 | sm_120 | `cu132`, else `cu128` |
+
+**So CUDA 13 is the good case**, not a problem: with driver ≥ 580 you get
+`cu132` and the current torch. The awkward case is the opposite one — Blackwell
+on a driver stuck at 57x, which can only load `cu128`, and that index has not
+moved past torch 2.11.0. If the provider offers a newer driver image, take it.
+
+Override the choice when you need to:
+
+```bash
+MPSAE_TORCH_INDEX=https://download.pytorch.org/whl/cu130 ./scripts/setup_server.sh
+```
+
+`TORCH_CUDA_ARCH_LIST` is generated from the capabilities actually present
+rather than hard-coded, because CUDA 13's `nvcc` *rejects* a dropped
+architecture instead of ignoring it. It only affects the optional `csrc/`
+extension.
+
+A mismatched wheel does not fail at import — it fails at the first kernel
+launch, often minutes into a stage. `stage_env` checks the GPU, the runtime and
+the driver branch together before anything downloads, and `setup_server.sh`
+runs a real matmul as proof.
 
 ## FFCV
 

@@ -27,10 +27,40 @@ from .io import atomic_json, human_bytes, read_json
 from .logs import banner, get_logger, log_environment, setup_logging, stage
 
 STAGES = ("env", "imagenet", "ffcv", "embed", "publish", "train", "report")
-#: Compute capabilities we expect to meet, with the toolkit each one needs.
-ARCHITECTURE_NOTES = {"9.0": "H100 -- torch cu121 or newer",
-                      "10.0": "Blackwell datacentre -- torch cu128 or newer",
-                      "12.0": "RTX 5090 / RTX PRO 6000 -- CUDA 12.8+, torch 2.7+ cu128"}
+#: Compute capabilities we expect to meet, and the lowest CUDA runtime that has
+#: kernels for each. CUDA 13 dropped everything below sm_75, so an older card
+#: needs a 12.x build; Blackwell needs 12.8 or any 13.x.
+ARCHITECTURE_NOTES = {"8.0": ("A100", (12, 0)),
+                      "8.9": ("L40S / RTX 4090", (12, 0)),
+                      "9.0": ("H100", (12, 1)),
+                      "10.0": ("Blackwell datacentre", (12, 8)),
+                      "12.0": ("RTX 5090 / RTX PRO 6000", (12, 8))}
+#: CUDA 13 compiles only for sm_75 and above.
+CUDA13_MIN_CAPABILITY = 7.5
+
+
+def _cuda_tuple(version: str | None) -> tuple[int, ...]:
+    try:
+        return tuple(int(part) for part in str(version).split(".")[:2])
+    except (TypeError, ValueError):
+        return ()
+
+
+def _driver_major() -> int | None:
+    """NVIDIA driver branch, which bounds the CUDA runtime that can load."""
+    import subprocess
+
+    try:
+        output = subprocess.run(
+            ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=20, check=True).stdout
+    except Exception:
+        return None
+    first = output.strip().splitlines()[0] if output.strip() else ""
+    try:
+        return int(first.split(".")[0])
+    except ValueError:
+        return None
 
 
 @dataclass
@@ -105,19 +135,41 @@ def stage_env(options: PipelineOptions) -> dict[str, Any]:
     if not facts.get("cuda_available"):
         problems.append("no CUDA device visible to torch; every stage after 'imagenet' needs one")
     for gpu in facts.get("gpus", []):
-        note = ARCHITECTURE_NOTES.get(gpu["capability"])
-        if note:
-            log.info("gpu %s is sm_%s (%s)", gpu["index"],
-                     gpu["capability"].replace(".", ""), note)
+        name, _ = ARCHITECTURE_NOTES.get(gpu["capability"], ("", None))
+        log.info("gpu %s is sm_%s%s", gpu["index"], gpu["capability"].replace(".", ""),
+                 f" ({name})" if name else "")
         if gpu["total_memory"] < 20 << 30:
             log.warning("gpu %s has only %s; expect to lower --embed-batch-size and "
                         "the search block sizes", gpu["index"], human_bytes(gpu["total_memory"]))
+
     if facts.get("torch") and facts.get("gpus"):
-        newest = max(float(gpu["capability"]) for gpu in facts["gpus"])
-        cuda = facts.get("cuda") or "0.0"
-        if newest >= 12.0 and tuple(int(p) for p in cuda.split(".")[:2]) < (12, 8):
-            problems.append(f"sm_{int(newest * 10)} needs CUDA 12.8+, but torch reports {cuda}; "
-                            "install a cu128 build")
+        runtime = _cuda_tuple(facts.get("cuda"))
+        driver = _driver_major()
+        facts["driver_major"] = driver
+        log.info("torch is built against CUDA %s; driver branch %s",
+                 facts.get("cuda"), driver if driver is not None else "unknown")
+        caps = sorted({float(gpu["capability"]) for gpu in facts["gpus"]})
+        for capability in caps:
+            label = f"sm_{int(capability * 10)}"
+            _, needed = ARCHITECTURE_NOTES.get(f"{capability:g}", ("", None))
+            if needed and runtime and runtime < needed:
+                problems.append(
+                    f"{label} needs CUDA {needed[0]}.{needed[1]} or newer, but torch is built "
+                    f"against {facts.get('cuda')}; reinstall with scripts/setup_server.sh")
+            if runtime and runtime[0] >= 13 and capability < CUDA13_MIN_CAPABILITY:
+                problems.append(
+                    f"torch is a CUDA {runtime[0]} build, which dropped {label}; that GPU needs "
+                    "a 12.x build (MPSAE_TORCH_INDEX=https://download.pytorch.org/whl/cu126)")
+        # The driver bounds the runtime that can load at all: CUDA 13 needs the
+        # r580 branch, 12.8 needs r570. This fails at the first kernel launch,
+        # often minutes into a stage, so it is worth catching here.
+        if driver is not None and runtime:
+            required_driver = 580 if runtime[0] >= 13 else (570 if runtime >= (12, 8) else 525)
+            if driver < required_driver:
+                problems.append(
+                    f"driver branch {driver} cannot load a CUDA {facts.get('cuda')} build "
+                    f"(needs >= {required_driver}); either update the driver or install a "
+                    "matching wheel with scripts/setup_server.sh")
 
     needs_ffcv = any(BACKBONES[name].recipe == "csrv2" for name in options.backbones)
     for module, why in (("torch", "training"), ("numpy", "everything"),

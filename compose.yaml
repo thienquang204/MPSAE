@@ -10,9 +10,10 @@ services:
     build:
       context: .
       args:
-        # 12.4.1 is enough for H100/Ada; 12.8.0 is required for Blackwell.
-        CUDA_TAG: "12.8.0"
-        TORCH_INDEX: "https://download.pytorch.org/whl/cu128"
+        # Needs a host driver >= 580. For driver 570-579 use 12.8.0 / cu128;
+        # for pre-Turing GPUs use 12.6.3 / cu126, which CUDA 13 no longer builds for.
+        CUDA_TAG: "13.0.0"
+        TORCH_INDEX: "https://download.pytorch.org/whl/cu132"
     image: mpsae:latest
     env_file: [.env]
     environment:

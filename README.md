@@ -47,10 +47,15 @@ the figures end to end. Its numbers are not science and say so in the manifest.
 
 ### Hardware
 
-x86_64, CUDA ≥ 12.1, ≥ 24 GB VRAM (40–80 GB comfortable), ≥ 64 GB RAM,
-≥ 16 CPU cores, ≥ 500 GB SSD. Blackwell (RTX 5090, RTX PRO 6000, sm_120)
-needs CUDA ≥ 12.8 and torch ≥ 2.7 cu128 — `setup_server.sh` detects this and
-picks the wheel. Details and reasoning in [`docs/server.md`](docs/server.md).
+x86_64, ≥ 24 GB VRAM (40–80 GB comfortable), ≥ 64 GB RAM, ≥ 16 CPU cores,
+≥ 500 GB SSD.
+
+`setup_server.sh` picks the torch wheel from the driver branch and the compute
+capability together, because each bounds a different end: the driver caps the
+CUDA runtime that can load (13.x needs ≥ 580, 12.8 needs ≥ 570), while CUDA 13
+dropped every architecture below sm_75 and so cannot serve a V100. CUDA 13 is
+the preferred case — driver ≥ 580 gets `cu132` and current torch. Override with
+`MPSAE_TORCH_INDEX`. Details in [`docs/server.md`](docs/server.md).
 
 There is **no FAISS dependency**. Its GPU wheels lag new architectures. On
 L2-normalised vectors, maximum inner product is equivalent to minimum L2
