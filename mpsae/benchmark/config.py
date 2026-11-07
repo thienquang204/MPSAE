@@ -1,0 +1,170 @@
+"""Strict, torch-free configuration for an ImageNet + transfer campaign.
+
+Training presets remain in mpsae.config. Campaign options select work; adding
+a benchmark or changing report options never changes a training recipe.
+"""
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, field
+import json
+from pathlib import Path
+import re
+from typing import Any
+
+from ..config import BACKBONES, METHODS, SEEDS, Cell, grid
+from ..io import canonical_hash
+
+DATASET_NAMES = ("eurosat", "flowers102", "sop")
+IMAGENET_DEFAULTS = {"enabled": True, "prepare": True, "train_k": None,
+                     "e1": True, "e2": True, "linear_probe": True, "timing": True}
+DOWNSTREAM_DEFAULTS = {"enabled": True, "datasets": list(DATASET_NAMES),
+                      "train_k": None, "eval_k": None, "mode": "frozen", "revisions": {}}
+EXECUTION_DEFAULTS = {"train_missing": True, "continue_on_error": True,
+                     "retain_codes": False, "max_steps": 0}
+
+
+def _section(value, defaults, name):
+    if not isinstance(value, dict):
+        raise ValueError(f"{name} must be a mapping")
+    unknown = set(value) - set(defaults)
+    if unknown:
+        raise ValueError(f"unknown {name} options: {sorted(unknown)}")
+    result = {**defaults, **value}
+    for key, default in defaults.items():
+        if isinstance(default, bool) and not isinstance(result[key], bool):
+            raise ValueError(f"{name}.{key} must be true or false")
+    return result
+
+
+def _names(value, available, name):
+    if not isinstance(value, (list, tuple)) or not value:
+        raise ValueError(f"{name} must be a nonempty list")
+    if len(set(value)) != len(value) or any(v not in available for v in value):
+        raise ValueError(f"invalid or duplicate {name}: {value}; choose from {list(available)}")
+    return tuple(value)
+
+
+def _integers(value, name, *, minimum=1):
+    if not isinstance(value, (list, tuple)) or not value:
+        raise ValueError(f"{name} must be a nonempty list")
+    if any(isinstance(v, bool) or not isinstance(v, int) or v < minimum for v in value):
+        raise ValueError(f"{name} must contain integers >= {minimum}")
+    if len(set(value)) != len(value):
+        raise ValueError(f"duplicate values in {name}")
+    return tuple(value)
+
+
+@dataclass(frozen=True)
+class Campaign:
+    name: str = "thesis"
+    backbones: tuple[str, ...] = ("ff2048", "rn18")
+    methods: tuple[str, ...] = METHODS
+    seeds: tuple[int, ...] = SEEDS
+    imagenet: dict[str, Any] = field(default_factory=lambda: dict(IMAGENET_DEFAULTS))
+    downstream: dict[str, Any] = field(default_factory=lambda: dict(DOWNSTREAM_DEFAULTS))
+    execution: dict[str, Any] = field(default_factory=lambda: dict(EXECUTION_DEFAULTS))
+
+    @classmethod
+    def from_mapping(cls, payload: dict[str, Any]) -> "Campaign":
+        if not isinstance(payload, dict):
+            raise ValueError("campaign must be a mapping")
+        unknown = set(payload) - {"name", "backbones", "methods", "seeds", "imagenet",
+                                  "downstream", "execution"}
+        if unknown:
+            raise ValueError(f"unknown campaign options: {sorted(unknown)}; fine-tuning is not supported")
+        name = payload.get("name", "thesis")
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", name):
+            raise ValueError("name must be a safe directory name (letters, digits, '_' or '-')")
+        result = cls(name, _names(payload.get("backbones", ["ff2048", "rn18"]), BACKBONES, "backbones"),
+                     _names(payload.get("methods", list(METHODS)), METHODS, "methods"),
+                     _integers(payload.get("seeds", list(SEEDS)), "seeds", minimum=0),
+                     _section(payload.get("imagenet", {}), IMAGENET_DEFAULTS, "imagenet"),
+                     _section(payload.get("downstream", {}), DOWNSTREAM_DEFAULTS, "downstream"),
+                     _section(payload.get("execution", {}), EXECUTION_DEFAULTS, "execution"))
+        if result.downstream["mode"] != "frozen":
+            raise ValueError("only downstream.mode: frozen is supported; no target-data training")
+        if result.imagenet["enabled"] and result.imagenet["e2"] and not result.imagenet["e1"]:
+            raise ValueError("imagenet.e2 requires e1: true (the anchor measurement is reused)")
+        if not result.imagenet["enabled"] and not result.downstream["enabled"]:
+            raise ValueError("enable at least one experiment family")
+        _names(result.downstream["datasets"], DATASET_NAMES, "downstream.datasets")
+        revisions = result.downstream["revisions"]
+        if not isinstance(revisions, dict) or set(revisions) - set(DATASET_NAMES):
+            raise ValueError("downstream.revisions must map dataset names to HF revisions")
+        if any(not isinstance(v, str) or not v.strip() for v in revisions.values()):
+            raise ValueError("dataset revisions must be nonempty strings")
+        maximum = result.execution["max_steps"]
+        if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < 0:
+            raise ValueError("execution.max_steps must be a nonnegative integer")
+        for backbone in result.backbones:
+            result.budgets("imagenet", "train_k", backbone)
+            result.budgets("downstream", "train_k", backbone)
+            result.budgets("downstream", "eval_k", backbone)
+        return result
+
+    def budgets(self, section: str, key: str, backbone: str) -> tuple[int, ...]:
+        spec = BACKBONES[backbone]
+        value = getattr(self, section)[key]
+        if isinstance(value, dict):
+            if set(value) - set(self.backbones) or backbone not in value:
+                raise ValueError(f"{section}.{key} mapping needs exactly the selected backbones")
+            value = value[backbone]
+        if value is None:
+            if section == "imagenet":
+                return spec.k_list
+            if key == "eval_k":
+                return spec.k_list[:6]
+            return (8,) if 8 in spec.k_list else (spec.e2_anchors[0],)
+        values = _integers(value, f"{section}.{key}")
+        if any(k > spec.dim for k in values):
+            raise ValueError(f"{section}.{key} exceeds {backbone}'s input width {spec.dim}")
+        if key == "train_k" and not set(values) <= set(spec.k_list):
+            raise ValueError(f"{section}.{key} for {backbone} must be in {spec.k_list}")
+        return values
+
+    def source_cells(self) -> list[Cell]:
+        cells = []
+        for backbone in self.backbones:
+            budgets = set(self.budgets("imagenet", "train_k", backbone)) if self.imagenet["enabled"] else set()
+            if self.downstream["enabled"]:
+                budgets.update(self.budgets("downstream", "train_k", backbone))
+            cells.extend(grid((backbone,), self.methods, self.seeds, budgets))
+        return cells
+
+    def downstream_cells(self) -> list[Cell]:
+        if not self.downstream["enabled"]:
+            return []
+        return [cell for cell in self.source_cells()
+                if cell.k in self.budgets("downstream", "train_k", cell.backbone)]
+
+    def resolved(self) -> dict[str, Any]:
+        from dataclasses import asdict
+
+        payload = asdict(self)
+        payload["presets"] = {name: asdict(BACKBONES[name].preset) for name in self.backbones}
+        payload["resolved_budgets"] = {name: {
+            "imagenet_train_k": self.budgets("imagenet", "train_k", name),
+            "downstream_train_k": self.budgets("downstream", "train_k", name),
+            "downstream_eval_k": self.budgets("downstream", "eval_k", name)}
+            for name in self.backbones}
+        return payload
+
+    def plan(self) -> dict[str, Any]:
+        sparse = sum(len(self.budgets("downstream", "eval_k", c.backbone))
+                     for c in self.downstream_cells()) * len(self.downstream["datasets"])
+        dense = len(self.backbones) * len(self.downstream["datasets"]) if self.downstream["enabled"] else 0
+        return {"name": self.name, "mode": "frozen", "plan_id": canonical_hash(self.resolved()),
+                "source_cells": len(self.source_cells()), "downstream_sparse_points": sparse,
+                "downstream_dense_points": dense, "config": self.resolved()}
+
+
+def load_campaign(path: str | Path) -> Campaign:
+    path = Path(path)
+    contents = path.read_text(encoding="utf-8")
+    if path.suffix == ".json":
+        payload = json.loads(contents)
+    else:
+        import yaml
+
+        payload = yaml.safe_load(contents)
+    return Campaign.from_mapping(payload)

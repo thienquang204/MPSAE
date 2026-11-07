@@ -19,31 +19,53 @@ applied silently.
 
 ## Run it
 
-On a fresh GPU box, the only thing you edit is `.env`.
+One configuration selects the ImageNet experiments and downstream frozen
+retrieval benchmarks. `.env` holds credentials and environment settings;
+`configs/thesis.yaml` selects the experiments. No downstream fine-tuning runs.
+
+```bash
+cp .env.example .env                         # set HF_TOKEN for ImageNet
+docker compose build
+docker compose run --rm mpsae plan
+docker compose run --rm mpsae                # default: the thesis campaign
+docker compose run --rm mpsae status
+docker compose run --rm mpsae report
+```
+
+The container runs selected fits and evaluations sequentially, reuses compatible
+ImageNet checkpoints, and writes a campaign report from the explicit result
+list. Repeating the command resumes unfinished work. See
+[`docs/benchmark.md`](docs/benchmark.md) for the dataset protocols, result
+identities, figure definitions and server commands.
+
+For a host installation instead of Docker:
 
 ```bash
 cp .env.example .env && $EDITOR .env    # paste HF_TOKEN
 ./scripts/setup_server.sh               # once: CUDA-matched torch, deps, FFCV
-./scripts/pipeline.sh --smoke           # ~15 min rehearsal, synthetic data
-./scripts/pipeline.sh                   # the real run
+./scripts/pipeline.sh --smoke           # separate synthetic campaign workspace
+./scripts/pipeline.sh                   # configs/thesis.yaml
 ```
 
 Useful afterwards:
 
 ```bash
 ./scripts/pipeline.sh status            # what is done, what is outstanding
-./scripts/pipeline.sh plan              # the grid, no side effects, no GPU needed
-./scripts/pipeline.sh stage embed       # one stage
-./scripts/pipeline.sh report            # rebuild tables and figures
-./scripts/pipeline.sh -- --backbones ff2048 --methods csr,mpsae
+./scripts/pipeline.sh plan              # the campaign, no GPU/token needed
+./scripts/pipeline.sh stage embed       # one legacy ImageNet stage
+./scripts/pipeline.sh report            # rebuild the selected campaign's reports
+./scripts/pipeline.sh --config configs/thesis.yaml  # edit scientific selections in YAML
 ```
 
-Interrupting is safe. Every stage writes a receipt to `work/state/` and every
-fit checkpoints, so a restart continues rather than starting over.
+The container sets `MPSAE_CONFIG=configs/thesis.yaml`, so `plan`, `status` and
+`report` use the same campaign when the Docker command is replaced. On a host
+with `MPSAE_CONFIG` unset, `python -m mpsae run` without `--config` retains the
+original ImageNet-only interface. Both use the existing `work/runs/` fit layout;
+campaigns reference those fits rather than training a second copy per dataset.
 
-`--smoke` skips the ImageNet download entirely and synthesises small
-class-structured archives, which exercises training, retrieval, probing and
-the figures end to end. Its numbers are not science and say so in the manifest.
+The smoke configuration synthesises class-structured source and target data
+and runs capped fits, retrieval and reporting in a separate workspace. Its
+numbers are not science and are labelled synthetic in the manifests.
 
 ### Hardware
 
@@ -254,8 +276,9 @@ provenance, [`pipeline.md`](docs/pipeline.md) for running and debugging,
   A sparse-product fast path for small K would cut E2 substantially.
 * `csrc/` is built but the inverted-index search driver is not wired in;
   `evaluate/timing.py` currently measures the paper's `torch.sparse` protocol.
-* Downstream benchmarks in `data_usage.md` (Flowers, DTD, VOC, SPair, SOP,
-  DeepFashion, ROxford/RParis) are not implemented yet. Note that file's DTD
-  test split should be 40 images/class, not 10.
+* Frozen-transfer retrieval for EuroSAT RGB, the HF custom Flowers102 split,
+  and Stanford Online Products is implemented in the campaign path. DTD, VOC,
+  SPair, DeepFashion and ROxford/RParis in `data_usage.md` remain future work.
+  That file's DTD test split should be 40 images/class, not 10.
 * Nothing in this rewrite has executed on a GPU yet. The first real
   `--smoke` run is the actual test.

@@ -1,6 +1,8 @@
-# docker compose run --rm mpsae run
+# docker compose run --rm mpsae
+# docker compose run --rm mpsae plan
 # docker compose run --rm mpsae status
-# docker compose run --rm mpsae --smoke run
+# docker compose run --rm mpsae report
+# docker compose run --rm mpsae --config configs/smoke.yaml --smoke run
 #
 # Credentials come from .env (HF_TOKEN, optionally HF_EMBEDDINGS_REPO and
 # WANDB_*). The workspace is bind-mounted so ImageNet, the embeddings and the
@@ -13,7 +15,7 @@ services:
         # Needs a host driver >= 580. For driver 570-579 use 12.8.0 / cu128;
         # for pre-Turing GPUs use 12.6.3 / cu126, which CUDA 13 no longer builds for.
         CUDA_TAG: "13.0.0"
-        TORCH_INDEX: "https://download.pytorch.org/whl/cu132"
+        TORCH_INDEX: "https://download.pytorch.org/whl/cu130"
     image: mpsae:latest
     env_file: [.env]
     environment:
@@ -21,6 +23,7 @@ services:
       HF_HOME: /work/hf
     volumes:
       - ./work:/work
+      - ./configs:/opt/mpsae/configs:ro
     # ImageNet decoding is CPU-bound; /dev/shm defaults to 64 MB, which stalls
     # the dataloaders long before the GPU is busy.
     shm_size: "16gb"

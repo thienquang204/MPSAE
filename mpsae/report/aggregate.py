@@ -334,14 +334,18 @@ def aggregate_e2(records: Iterable[Mapping[str, Any]], *,
 # -------------------------------------------------------------------- training
 
 def training_summary(root: str | Path, *, max_curve_points: int = 400,
-                     backbones: Sequence[str] | None = None) -> list[dict[str, Any]]:
+                     backbones: Sequence[str] | None = None,
+                     selected_cells: Iterable[tuple[str, str, int, int]] | None = None
+                     ) -> list[dict[str, Any]]:
     """One row per run, read from ``train.jsonl``.
 
     Besides the scalar summary (final losses, mean step time, GPU hours) each
     row carries a down-sampled ``curve``: ``{field: [value, ...]}`` aligned with
     ``curve["step"]``. Keeping the curve here rather than in the figure module
     means the diagnostic plot has no file I/O of its own and the same numbers
-    back both the table and the panels.
+    back both the table and the panels. ``selected_cells`` restricts reading to
+    explicit (backbone, method, K, seed) cells before any log is parsed; a
+    campaign therefore cannot accidentally read a stale or malformed run.
     """
     log = get_logger("report")
     base = runs_dir(root)
@@ -349,8 +353,21 @@ def training_summary(root: str | Path, *, max_curve_points: int = 400,
     if not base.is_dir():
         return rows
     wanted = set(backbones) if backbones else None
+    if selected_cells is None:
+        paths = sorted(base.glob("*/*/k*/seed*/train.jsonl"))
+    else:
+        cells = set(selected_cells)
+        for backbone, method, k, seed in cells:
+            if (backbone not in BACKBONES or method not in METHODS
+                    or isinstance(k, bool) or not isinstance(k, int) or k < 1
+                    or isinstance(seed, bool) or not isinstance(seed, int) or seed < 0):
+                raise ValueError(f"invalid selected training cell: {(backbone, method, k, seed)}")
+        paths = sorted(base / backbone / method / f"k{k}" / f"seed{seed}" / "train.jsonl"
+                       for backbone, method, k, seed in cells)
 
-    for path in sorted(base.glob("*/*/k*/seed*/train.jsonl")):
+    for path in paths:
+        if not path.is_file():
+            continue
         seed_dir = path.parent
         k_match, seed_match = _K_DIR.match(seed_dir.parent.name), _SEED_DIR.match(seed_dir.name)
         if k_match is None or seed_match is None:

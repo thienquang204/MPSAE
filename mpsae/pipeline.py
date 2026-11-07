@@ -15,7 +15,7 @@ operator supplies credentials and nothing else.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 import os
 from pathlib import Path
 import shutil
@@ -175,7 +175,8 @@ def stage_env(options: PipelineOptions) -> dict[str, Any]:
     for module, why in (("torch", "training"), ("numpy", "everything"),
                         ("timm", "timm backbones"), ("huggingface_hub", "downloads"),
                         ("datasets", "ImageNet"), ("matplotlib", "figures"),
-                        *(((("ffcv", "the CSRv2 embedding recipe"),) if needs_ffcv else ()))):
+                        *(((("ffcv", "the CSRv2 embedding recipe"),
+                            ("cupy", "FFCV GPU normalization")) if needs_ffcv else ()))):
         try:
             __import__(module)
         except Exception as error:
@@ -240,7 +241,7 @@ def _embed_one(spec: Backbone, options: PipelineOptions, split: str) -> dict[str
     from .embed import extract_ff2048, extract_timm
 
     if spec.recipe == "mrl":
-        return extract_ff2048(spec, options.paths.imagenet, options.paths.embeddings,
+        return extract_ff2048(spec, options.paths.imagenet, options.paths.embeddings / spec.name,
                               split=split, cache_dir=options.paths.cache,
                               device=options.device, batch_size=options.embed_batch_size,
                               workers=options.workers, hf_token=_env("HF_TOKEN"))
@@ -248,7 +249,7 @@ def _embed_one(spec: Backbone, options: PipelineOptions, split: str) -> dict[str
         f"{'train' if split == 'train' else 'val'}_*.ffcv"), None)
     if ffcv_file is None:
         raise FileNotFoundError(f"no FFCV file for {split} in {options.paths.ffcv}; run the ffcv stage")
-    return extract_timm(spec, ffcv_file, options.paths.embeddings, split=split,
+    return extract_timm(spec, ffcv_file, options.paths.embeddings / spec.name, split=split,
                         cache_dir=options.paths.cache, device=options.device,
                         batch_size=options.embed_batch_size, workers=options.workers,
                         seed=options.embed_seed)
@@ -428,8 +429,7 @@ def run_all(options: PipelineOptions, *, only: str | None = None) -> dict[str, A
     outcomes: dict[str, Any] = {}
     for name in chosen:
         with stage(name, options.paths.state, force=options.forced(name),
-                   identity={"version": __version__, "backbones": list(options.backbones),
-                             "smoke": options.smoke},
+                   identity={"version": __version__, "options": asdict(options)},
                    description=f"stage {name}") as detail:
             if not detail.get("skipped"):
                 detail.update(HANDLERS[name](options) or {})

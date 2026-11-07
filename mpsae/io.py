@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import errno
-import fcntl
 import hashlib
 import json
 import os
@@ -113,11 +112,26 @@ def exclusive_lock(path: str | Path, *, timeout: float | None = None) -> Iterato
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     deadline = None if timeout is None else time.monotonic() + timeout
-    handle = open(path, "a+")
+    handle = open(path, "a+b")
+    acquired = False
+    if os.name == "nt":
+        import msvcrt
+
+        # Windows byte-range locks need an actual byte and an explicit offset.
+        if path.stat().st_size == 0:
+            handle.write(b"\0")
+            handle.flush()
+    else:
+        import fcntl
     try:
         while True:
             try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                if os.name == "nt":
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
                 break
             except OSError as error:
                 if error.errno not in (errno.EACCES, errno.EAGAIN):
@@ -128,7 +142,12 @@ def exclusive_lock(path: str | Path, *, timeout: float | None = None) -> Iterato
         yield
     finally:
         try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            if acquired:
+                if os.name == "nt":
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         finally:
             handle.close()
 

@@ -30,7 +30,7 @@ from pathlib import Path
 import re
 from typing import Any, Mapping, Sequence
 
-from ..config import BACKBONE_ORDER, BACKBONES, BASELINES, METHODS, OURS
+from ..config import BACKBONE_ORDER, BACKBONES, BASELINES, METHODS, OURS, SEEDS
 from ..logs import get_logger
 from . import reference
 from .aggregate import (aggregate_e1, aggregate_e2, load_dense_references, load_runs,
@@ -238,7 +238,8 @@ def _dedup_legend(fig: Any, axes: Sequence[Any], *, ncol: int, y: float = -0.01,
 # --------------------------------------------------------------- E1: accuracy
 
 def figure_e1_curves(rows: Sequence[Mapping[str, Any]], out_dir: str | Path, backbone: str, *,
-                     measured_dense: Mapping[str, Any] | None = None) -> list[Path]:
+                     measured_dense: Mapping[str, Any] | None = None,
+                     seeds: Sequence[int] = SEEDS) -> list[Path]:
     """Accuracy vs K for every method on one backbone. ``rows`` from ``aggregate_e1``.
 
     The std band is the sample std over seeds, not a confidence interval, and
@@ -280,7 +281,8 @@ def figure_e1_curves(rows: Sequence[Mapping[str, Any]], out_dir: str | Path, bac
     caption = (
         "1-NN top-1 on ImageNet-1K as a function of the active dimension K, "
         f"{backbone_label(backbone)}. "
-        "Lines are the mean over seeds 1227/2026/2027 and bands the sample standard deviation "
+        f"Lines are the mean over configured seeds {'/'.join(map(str, seeds))} "
+        "and bands the sample standard deviation "
         "(ddof=1); they are a spread, not a confidence interval, and n is given per series in the "
         "legend. Grey dashed series are values transcribed from the published papers, not measured "
         "by us"
@@ -290,7 +292,8 @@ def figure_e1_curves(rows: Sequence[Mapping[str, Any]], out_dir: str | Path, bac
 
 
 def figure_e1_delta(records: Sequence[Mapping[str, Any]], out_dir: str | Path, backbone: str, *,
-                    control: str = "csr", treatments: Sequence[str] = OURS) -> list[Path]:
+                    control: str = "csr", treatments: Sequence[str] = OURS,
+                    seeds: Sequence[int] = SEEDS) -> list[Path]:
     """Paired per-seed improvement over ``control`` vs K. The claim figure.
 
     ``records`` are the *raw* run records from ``load_runs``, not aggregated
@@ -306,7 +309,8 @@ def figure_e1_delta(records: Sequence[Mapping[str, Any]], out_dir: str | Path, b
     for treatment in treatments:
         if treatment == control:
             continue
-        rows = [row for row in paired_difference(records, treatment=treatment, control=control)
+        rows = [row for row in paired_difference(records, treatment=treatment, control=control,
+                                                 seeds=seeds)
                 if row["backbone"] == backbone]
         if rows:
             series.append((treatment, rows))
@@ -350,7 +354,7 @@ def figure_e1_delta(records: Sequence[Mapping[str, Any]], out_dir: str | Path, b
         "in percentage points. Each marker is the mean of the per-seed differences and each bar "
         "their sample standard deviation (ddof=1); the seed fixes both initialisation and data "
         "order, so a shared seed is a matched pair and the difference cancels that nuisance "
-        "variation. We report no p-values: three seeds cannot support an inference claim. Markers "
+        "variation. These are descriptive differences; no p-values are reported. Markers "
         "are offset slightly in K so overlapping bars stay readable."
     )
     return save_figure(fig, out_dir, f"e1_delta_{backbone}_vs_{control}", caption=caption)
@@ -360,7 +364,8 @@ def figure_e1_delta(records: Sequence[Mapping[str, Any]], out_dir: str | Path, b
 
 def figure_e2_generalisation(rows: Sequence[Mapping[str, Any]], out_dir: str | Path,
                              backbone: str, *,
-                             e1_rows: Sequence[Mapping[str, Any]] | None = None) -> list[Path]:
+                             e1_rows: Sequence[Mapping[str, Any]] | None = None,
+                             seeds: Sequence[int] = SEEDS) -> list[Path]:
     """Small multiples, one panel per E2 anchor K. ``rows`` from ``aggregate_e2``.
 
     ``e1_rows`` (from ``aggregate_e1``) is drawn faintly behind each panel as
@@ -419,8 +424,8 @@ def figure_e2_generalisation(rows: Sequence[Mapping[str, Any]], out_dir: str | P
         f"{backbone_label(backbone)}. CSRv2 §3 states that CSR's multi-TopK loss \"ensures CSR "
         "could generalize to different k at test time\"; neither paper measures it, and this is "
         "that measurement. The faint line behind each panel is the per-K E1 curve of the same "
-        "method — models trained at each K — and is therefore the ceiling a single "
-        "checkpoint is being asked to reach. Means over seeds 1227/2026/2027, bands are sample "
+        "method — models trained at each K — and is a per-K reference, not a guaranteed "
+        f"upper bound. Means over configured seeds {'/'.join(map(str, seeds))}, bands are sample "
         "standard deviations (ddof=1), n in the legend."
     )
     return save_figure(fig, out_dir, f"e2_generalisation_{backbone}", caption=caption)
@@ -561,7 +566,8 @@ def figure_training(rows: Sequence[Mapping[str, Any]], out_dir: str | Path, back
 
 def figure_backbone_summary(rows: Sequence[Mapping[str, Any]], out_dir: str | Path, *,
                             dense: Mapping[str, Mapping[str, Any]] | None = None,
-                            share_y_span: float = 25.0) -> list[Path]:
+                            share_y_span: float = 25.0,
+                            seeds: Sequence[int] = SEEDS) -> list[Path]:
     """One panel per backbone, accuracy vs K, shared legend. ``rows`` from ``aggregate_e1``.
 
     The y-axis is shared only when every backbone's accuracies fall inside
@@ -613,7 +619,8 @@ def figure_backbone_summary(rows: Sequence[Mapping[str, Any]], out_dir: str | Pa
                   strip_counts=True)
     caption = (
         "1-NN top-1 on ImageNet-1K against the active dimension K, for every backbone. Means over "
-        "seeds 1227/2026/2027, bands are sample standard deviations (ddof=1); per-series n is in "
+        f"configured seeds {'/'.join(map(str, seeds))}, bands are sample standard deviations "
+        "(ddof=1); per-series n is in "
         "the accompanying table, since it can differ between panels. The black dashed rule in each "
         "panel is our own dense (un-compressed) 1-NN accuracy for that backbone. "
         + ("The y-axis is shared across panels."
@@ -672,23 +679,49 @@ def figure_efficiency(rows: Sequence[Mapping[str, Any]], out_dir: str | Path,
 # ----------------------------------------------------------------------- driver
 
 def build_all(root: str | Path, out_dir: str | Path, *,
-              backbones: Sequence[str] | None = None) -> dict[str, Any]:
+              backbones: Sequence[str] | None = None,
+              records: Sequence[Mapping[str, Any]] | None = None,
+              dense_references: Mapping[str, Mapping[str, Any]] | None = None,
+              seeds: Sequence[int] = SEEDS) -> dict[str, Any]:
     """Load, aggregate, and write every table and figure. Returns a manifest.
 
     Nothing here raises on missing data. A partially finished grid is the normal
     state of this project, so each figure either renders what exists or records
     why it could not, and one empty panel never takes the report down with it.
+
+    Without ``records`` this preserves the original workspace discovery. A
+    campaign passes explicit raw records and dense references, so old runs and
+    logs outside its plan cannot enter the report. An explicit empty list means
+    no selected runs, never "fall back to every run on disk".
     """
     log = get_logger("report")
     out_dir = Path(out_dir)
-    records = load_runs(root, backbones=backbones)
-    e1 = aggregate_e1(records)
-    e2 = aggregate_e2(records)
-    training = training_summary(root, backbones=backbones)
-    dense = load_dense_references(root)
+    explicit = records is not None
+    seeds = tuple(seeds)
+    if explicit:
+        wanted_backbones = set(backbones) if backbones is not None else None
+        records = [dict(record) for record in records
+                   if record["seed"] in seeds
+                   and (wanted_backbones is None or record["backbone"] in wanted_backbones)]
+        selected_cells = {(record["backbone"], record["method"], record["k"], record["seed"])
+                          for record in records}
+        if len(selected_cells) != len(records):
+            raise ValueError("explicit report selection contains duplicate training cells")
+    else:
+        records = load_runs(root, backbones=backbones)
+        selected_cells = None
+    e1 = aggregate_e1(records, seeds=seeds)
+    e2 = aggregate_e2(records, seeds=seeds)
+    training = training_summary(root, backbones=backbones, selected_cells=selected_cells)
+    if dense_references is not None:
+        dense = {name: dict(payload) for name, payload in dense_references.items()
+                 if backbones is None or name in backbones}
+    else:
+        dense = {} if explicit else load_dense_references(root)
 
     manifest: dict[str, Any] = {
         "root": str(root), "out_dir": str(out_dir), "fonts": None,
+        "selection": "explicit" if explicit else "workspace", "seeds": list(seeds),
         "counts": {"runs": len(records), "runs_with_e1": sum(1 for r in records if r["complete"]),
                    "e1_cells": len(e1), "e2_points": len(e2), "training_logs": len(training)},
         "tables": {}, "figures": {}, "skipped": [],
@@ -703,7 +736,7 @@ def build_all(root: str | Path, out_dir: str | Path, *,
         for treatment in tuple(OURS) + ("csr_multitopk",):
             if treatment == control:
                 continue
-            rows = paired_difference(records, treatment=treatment, control=control)
+            rows = paired_difference(records, treatment=treatment, control=control, seeds=seeds)
             if not rows:
                 manifest["skipped"].append(
                     f"table paired_{treatment}_vs_{control}: no paired seeds")
@@ -733,23 +766,25 @@ def build_all(root: str | Path, out_dir: str | Path, *,
         return manifest
 
     figure_dir = out_dir / "figures"
-    present = [name for name in BACKBONE_ORDER
-               if any(row["backbone"] == name for row in e1)]
-    present += sorted({row["backbone"] for row in e1} - set(present))
+    measured_backbones = {row["backbone"] for row in e1 + e2 + training}
+    present = [name for name in BACKBONE_ORDER if name in measured_backbones]
+    present += sorted(measured_backbones - set(present))
 
     jobs: list[tuple[str, Any]] = [
-        ("backbone_summary", lambda: figure_backbone_summary(e1, figure_dir, dense=dense)),
+        ("backbone_summary", lambda: figure_backbone_summary(e1, figure_dir, dense=dense,
+                                                             seeds=seeds)),
     ]
     for backbone in present:
         jobs.extend([
             (f"e1_curves_{backbone}",
-             lambda b=backbone: figure_e1_curves(e1, figure_dir, b, measured_dense=dense.get(b))),
+             lambda b=backbone: figure_e1_curves(e1, figure_dir, b, measured_dense=dense.get(b),
+                                                seeds=seeds)),
             (f"e1_delta_{backbone}_vs_csr",
-             lambda b=backbone: figure_e1_delta(records, figure_dir, b, control="csr")),
+             lambda b=backbone: figure_e1_delta(records, figure_dir, b, control="csr", seeds=seeds)),
             (f"e1_delta_{backbone}_vs_csrv2",
-             lambda b=backbone: figure_e1_delta(records, figure_dir, b, control="csrv2")),
+             lambda b=backbone: figure_e1_delta(records, figure_dir, b, control="csrv2", seeds=seeds)),
             (f"e2_generalisation_{backbone}",
-             lambda b=backbone: figure_e2_generalisation(e2, figure_dir, b, e1_rows=e1)),
+             lambda b=backbone: figure_e2_generalisation(e2, figure_dir, b, e1_rows=e1, seeds=seeds)),
             (f"e2_nnz_{backbone}",
              lambda b=backbone: figure_e2_nnz(e2, figure_dir, b, e1_rows=e1)),
             (f"efficiency_{backbone}", lambda b=backbone: figure_efficiency(e1, figure_dir, b)),

@@ -86,10 +86,13 @@ step "pytorch"
 python -m pip install --index-url "$TORCH_INDEX" torch torchvision
 
 step "project requirements"
-python -m pip install -r requirements.txt
+python -m pip install -r requirements.txt ninja
 
 if [[ "$WANT_FFCV" == 1 ]]; then
     step "ffcv (CSRv2 embedding recipe)"
+    # NormalizeImage runs on CUDA and FFCV does not declare CuPy itself.
+    CUPY_PACKAGE="$(python -c "import torch; print('cupy-cuda' + torch.version.cuda.split('.')[0] + 'x')")"
+    python -m pip install "$CUPY_PACKAGE"
     # ffcv has no wheels and compiles against libjpeg-turbo/opencv; a failure
     # here is survivable, so report it clearly instead of aborting setup.
     if python -m pip install ffcv; then
@@ -98,7 +101,8 @@ if [[ "$WANT_FFCV" == 1 ]]; then
         cat >&2 <<'MSG'
 ffcv failed to build. The ff2048 backbone (MRL recipe) still works:
 
-    ./scripts/pipeline.sh -- --backbones ff2048
+    # Set backbones: [ff2048] in configs/thesis.yaml, then:
+    ./scripts/pipeline.sh
 
 For the timm backbones, try a conda environment instead:
     conda create -n mpsae python=3.11 -y && conda activate mpsae

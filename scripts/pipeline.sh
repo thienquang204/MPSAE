@@ -1,32 +1,29 @@
 #!/usr/bin/env bash
-# All-in-one launcher. On a fresh GPU box the only thing you supply is .env.
+# One launcher for the ImageNet + frozen-transfer campaign.
 #
-#   cp .env.example .env && $EDITOR .env     # paste HF_TOKEN (and WANDB_API_KEY)
-#   ./scripts/setup_server.sh                # once, installs the environment
-#   ./scripts/pipeline.sh                    # everything: data -> embeddings -> 690 fits -> report
+#   ./scripts/pipeline.sh                         # configs/thesis.yaml
+#   ./scripts/pipeline.sh plan                    # no GPU/token needed
+#   ./scripts/pipeline.sh status
+#   ./scripts/pipeline.sh report
+#   ./scripts/pipeline.sh --smoke                  # configs/smoke.yaml
+#   ./scripts/pipeline.sh --config configs/thesis.yaml --device cuda:0
+#   ./scripts/pipeline.sh stage embed -- --backbones ff2048  # legacy stage
 #
-#   ./scripts/pipeline.sh --smoke            # 15 minutes, proves the plumbing end to end
-#   ./scripts/pipeline.sh status             # what is done, what is left
-#   ./scripts/pipeline.sh plan               # the experiment grid, no side effects
-#   ./scripts/pipeline.sh stage embed        # one stage only
-#   ./scripts/pipeline.sh -- --backbones ff2048 --methods csr,mpsae
-#
-# Safe to interrupt and re-run: every stage keeps a receipt and every fit
-# checkpoints, so a restart continues instead of starting over.
+# Options may appear before or after the command. They are rearranged into
+# argparse's global-options-before-command order; stage NAME and report --out
+# remain command arguments. Credentials are checked by the stages that use them.
 set -Eeuo pipefail
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$HERE"
 
-: "${MPSAE_WORKSPACE:=$HERE/work}"
 : "${MPSAE_ENV_FILE:=$HERE/.env}"
 : "${MPSAE_PYTHON:=python3}"
-# Keeps long runs from fragmenting the allocator across hundreds of fits.
 : "${PYTORCH_CUDA_ALLOC_CONF:=expandable_segments:True}"
-export MPSAE_WORKSPACE PYTORCH_CUDA_ALLOC_CONF
+export PYTORCH_CUDA_ALLOC_CONF
 
-die() { printf '\033[38;5;203merror:\033[0m %s\n' "$*" >&2; exit 1; }
-note() { printf '\033[38;5;245m%s\033[0m\n' "$*" >&2; }
+die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+note() { printf '%s\n' "$*" >&2; }
 
 if [[ -f "$HERE/.venv/bin/activate" ]]; then
     # shellcheck disable=SC1091
@@ -34,39 +31,92 @@ if [[ -f "$HERE/.venv/bin/activate" ]]; then
 elif [[ -n "${CONDA_PREFIX:-}" ]]; then
     note "using conda environment $CONDA_PREFIX"
 fi
-
 command -v "$MPSAE_PYTHON" >/dev/null || die "$MPSAE_PYTHON not found; run scripts/setup_server.sh"
 
-if [[ ! -f "$MPSAE_ENV_FILE" ]]; then
-    die "missing $MPSAE_ENV_FILE
-  cp .env.example .env
-  then paste your Hugging Face token (it must have accepted the ImageNet terms at
-  https://huggingface.co/datasets/ILSVRC/imagenet-1k and, to publish, have write scope)."
-fi
-if ! grep -Eq '^HF_TOKEN=.+' "$MPSAE_ENV_FILE"; then
-    die "HF_TOKEN is empty in $MPSAE_ENV_FILE; ImageNet-1k is gated and cannot be downloaded without it"
+COMMAND=""
+GLOBAL_ARGS=()
+COMMAND_ARGS=()
+HAVE_CONFIG=0
+SMOKE=0
+WORKSPACE="${MPSAE_WORKSPACE:-}"
+while (( $# )); do
+    case "$1" in
+        --) shift ;;
+        run|plan|status|report|stage)
+            if [[ -z "$COMMAND" ]]; then COMMAND="$1"; else COMMAND_ARGS+=("$1"); fi
+            shift ;;
+        --config|--env-file|--workspace|--device|--backbones|--methods|--seeds|--k|--workers|--embed-batch-size|--hf-repo|--wandb-project|--max-steps|--force|--skip|--log-level)
+            (( $# >= 2 )) || die "$1 needs a value"
+            case "$1" in
+                --config) HAVE_CONFIG=1 ;;
+                --env-file) MPSAE_ENV_FILE="$2" ;;
+                --workspace) WORKSPACE="$2" ;;
+            esac
+            GLOBAL_ARGS+=("$1" "$2")
+            shift 2 ;;
+        --config=*) HAVE_CONFIG=1; GLOBAL_ARGS+=("$1"); shift ;;
+        --env-file=*) MPSAE_ENV_FILE="${1#*=}"; GLOBAL_ARGS+=("$1"); shift ;;
+        --workspace=*) WORKSPACE="${1#*=}"; GLOBAL_ARGS+=("$1"); shift ;;
+        --out)
+            (( $# >= 2 )) || die "$1 needs a value"
+            COMMAND_ARGS+=("$1" "$2"); shift 2 ;;
+        --out=*) COMMAND_ARGS+=("$1"); shift ;;
+        --smoke) SMOKE=1; GLOBAL_ARGS+=("$1"); shift ;;
+        --help|-h)
+            if [[ -z "$COMMAND" ]]; then GLOBAL_ARGS+=("$1"); else COMMAND_ARGS+=("$1"); fi
+            shift ;;
+        --*) GLOBAL_ARGS+=("$1"); shift ;;
+        *) COMMAND_ARGS+=("$1"); shift ;;
+    esac
+done
+COMMAND="${COMMAND:-run}"
+if [[ "$HAVE_CONFIG" == 0 && "$COMMAND" != stage ]]; then
+    if [[ "$SMOKE" == 1 ]]; then
+        GLOBAL_ARGS=(--config "$HERE/configs/smoke.yaml" "${GLOBAL_ARGS[@]}")
+    else
+        GLOBAL_ARGS=(--config "${MPSAE_CONFIG:-$HERE/configs/thesis.yaml}" "${GLOBAL_ARGS[@]}")
+    fi
 fi
 
-COMMAND="run"
-case "${1:-}" in
-    status|plan|report) COMMAND="$1"; shift ;;
-    stage) COMMAND="stage"; shift ;;
-    --help|-h) sed -n '2,20p' "$0"; exit 0 ;;
+# Planning/status/reporting do not require a local .env or HF_TOKEN. Planning
+# delegates directly so it does not create a workspace merely to print a plan.
+case "$COMMAND" in
+    plan|status|report)
+        exec "$MPSAE_PYTHON" -m mpsae --env-file "$MPSAE_ENV_FILE" \
+            "${GLOBAL_ARGS[@]}" "$COMMAND" "${COMMAND_ARGS[@]}" ;;
 esac
-[[ "${1:-}" == "--" ]] && shift
 
-mkdir -p "$MPSAE_WORKSPACE"
-note "workspace: $MPSAE_WORKSPACE"
-note "logs:      $MPSAE_WORKSPACE/logs/"
+if [[ -z "$WORKSPACE" ]]; then
+    # Read only this path setting; never source a credential file as shell code.
+    WORKSPACE="$("$MPSAE_PYTHON" - "$MPSAE_ENV_FILE" "$HERE/work" <<'PY'
+from pathlib import Path
+import sys
+value = sys.argv[2]
+path = Path(sys.argv[1])
+if path.is_file():
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if line.startswith("#") or "=" not in line:
+            continue
+        key, candidate = line.split("=", 1)
+        if key.strip() == "MPSAE_WORKSPACE":
+            value = candidate.strip().strip('"').strip("'") or value
+            break
+print(value)
+PY
+)"
+fi
+mkdir -p "$WORKSPACE/logs"
+TRANSCRIPT="$WORKSPACE/logs/console-$(date +%Y%m%d-%H%M%S).log"
+note "base workspace: $WORKSPACE"
+note "console transcript: $TRANSCRIPT"
 
-# Mirror everything to a timestamped transcript as well as the structured log,
-# so a crashed run still has its console output.
-TRANSCRIPT="$MPSAE_WORKSPACE/logs/console-$(date +%Y%m%d-%H%M%S).log"
-mkdir -p "$(dirname "$TRANSCRIPT")"
-
-set -o pipefail
-"$MPSAE_PYTHON" -m mpsae --env-file "$MPSAE_ENV_FILE" --workspace "$MPSAE_WORKSPACE" \
-    "$COMMAND" "$@" 2>&1 | tee -a "$TRANSCRIPT"
+# A failed Python process must keep its exit status after tee and still print
+# the transcript location. The Python log records the effective smoke workspace.
+set +e
+"$MPSAE_PYTHON" -m mpsae --env-file "$MPSAE_ENV_FILE" --workspace "$WORKSPACE" \
+    "${GLOBAL_ARGS[@]}" "$COMMAND" "${COMMAND_ARGS[@]}" 2>&1 | tee -a "$TRANSCRIPT"
 status=${PIPESTATUS[0]}
+set -e
 note "transcript: $TRANSCRIPT"
 exit "$status"

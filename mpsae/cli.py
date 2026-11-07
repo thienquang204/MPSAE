@@ -55,6 +55,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=__version__)
     parser.add_argument("--env-file", default=".env",
                         help="KEY=value file with HF_TOKEN and friends (default: .env)")
+    parser.add_argument("--config", type=Path, default=None,
+                        help="one YAML/JSON campaign for ImageNet and frozen downstream benchmarks")
     parser.add_argument("--workspace", type=Path, default=Path(os.environ.get("MPSAE_WORKSPACE", "work")),
                         help="all inputs, outputs and logs live here")
     parser.add_argument("--device", default=os.environ.get("MPSAE_DEVICE", "cuda:0"))
@@ -147,11 +149,51 @@ def command_plan(options: PipelineOptions) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Environment-based defaults are evaluated while constructing the parser.
+    # Load the requested file first, rather than reparsing stale defaults.
+    bootstrap = argparse.ArgumentParser(add_help=False)
+    bootstrap.add_argument("--env-file", default=".env")
+    preliminary, _ = bootstrap.parse_known_args(argv)
+    loaded = load_dotenv(preliminary.env_file)
     parser = build_parser()
     args = parser.parse_args(argv)
-    loaded = load_dotenv(args.env_file)
-    # Re-parse so values that only exist in .env still reach the defaults.
-    args = parser.parse_args(argv)
+    if args.config is None and args.command != "stage" and os.environ.get("MPSAE_CONFIG"):
+        args.config = Path(os.environ["MPSAE_CONFIG"])
+    if args.config is not None:
+        from .benchmark.config import load_campaign
+        from .benchmark.run import (campaign_status, campaign_workspace, report_campaign,
+                                    run_campaign)
+
+        forbidden = {"--backbones", "--methods", "--seeds", "--k", "--max-steps", "--no-e2",
+                     "--no-probe", "--force", "--skip", "--hf-repo", "--public"}
+        supplied = {part.split("=", 1)[0] for part in (argv if argv is not None else sys.argv[1:])}
+        if forbidden & supplied:
+            parser.error("with --config, select experiments in YAML rather than "
+                         + ", ".join(sorted(forbidden & supplied)))
+        if args.command == "stage":
+            parser.error("campaigns use run/plan/status/report; omit --config for legacy stage commands")
+        try:
+            campaign = load_campaign(args.config)
+        except (ValueError, OSError) as error:
+            parser.error(str(error))
+        if args.command == "plan":
+            print(json.dumps(campaign.plan(), indent=2))
+            return 0
+        if args.command == "status":
+            print(json.dumps(campaign_status(campaign, args.workspace, smoke=args.smoke), indent=2))
+            return 0
+        workspace = campaign_workspace(args.workspace, campaign, args.smoke)
+        setup_logging(workspace / "logs", name=campaign.name, level=args.log_level)
+        if args.command == "report":
+            if args.out is not None:
+                parser.error("campaign report paths are fixed by campaign name/plan; --out is legacy-only")
+            result = report_campaign(campaign, args.workspace, smoke=args.smoke)
+        else:
+            result = run_campaign(campaign, args.workspace, device=args.device,
+                                  workers=args.workers, embed_batch_size=args.embed_batch_size,
+                                  smoke=args.smoke)
+        print(json.dumps(result, indent=2, default=str))
+        return 0
     options = to_options(args)
 
     if args.command == "plan":

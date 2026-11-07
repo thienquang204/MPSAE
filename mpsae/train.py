@@ -14,18 +14,21 @@ from an incompatible state.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from copy import deepcopy
 from pathlib import Path
+import re
 import time
 from typing import Any
 
 from . import methods
 from .config import BACKBONES, Backbone, Cell, TrainPreset
 from .features import Bundle, BatchSource
-from .io import atomic_json, canonical_hash, read_json, truncate_jsonl
+from .io import atomic_json, canonical_hash, read_json, read_jsonl, truncate_jsonl
 from .logs import MetricWriter, Progress, format_duration, get_logger
 from .model import build_sae, parameter_bytes
 
 CHECKPOINT_FORMAT = "mpsae-fit-v2"
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
 @dataclass
@@ -77,6 +80,59 @@ def fit_identity(cell: Cell, bundle: Bundle, preset: TrainPreset, *,
     }
 
 
+def compatible_fit_identity(saved: dict[str, Any], requested: dict[str, Any]) -> bool:
+    """Allow only provenance enrichment caused by the old sidecar-path bug.
+
+    Earlier ``load_bundle`` calls looked for ``archive.json`` instead of the
+    writer's ``archive.npz.json``. Archive digests and row counts were still
+    measured, but recipe/source became None. Reading the sidecar correctly
+    must not invalidate identical training data. This is not a settings-change
+    escape hatch: SHA256, row count, code version, objective, precision, seed,
+    optimizer and the complete remaining identity must all agree.
+    """
+    if canonical_hash(saved) == canonical_hash(requested):
+        return True
+    if not isinstance(saved.get("data"), dict) or not isinstance(requested.get("data"), dict):
+        return False
+    comparable = deepcopy(requested)
+    for split in ("train", "validation"):
+        old = saved["data"].get(split)
+        new = comparable["data"].get(split)
+        if not isinstance(old, dict) or not isinstance(new, dict):
+            continue
+        for key in ("recipe", "source"):
+            if old.get(key) == new.get(key) and (key in old) == (key in new):
+                continue
+            if old.get(key) is not None:
+                return False
+            digest = old.get("sha256")
+            rows = old.get("rows")
+            if (not isinstance(digest, str) or not _SHA256.fullmatch(digest)
+                    or new.get("sha256") != digest
+                    or isinstance(rows, bool) or not isinstance(rows, int) or rows < 1
+                    or new.get("rows") != rows):
+                return False
+            if key in old:
+                new[key] = None
+            else:
+                new.pop(key, None)
+    return canonical_hash(saved) == canonical_hash(comparable)
+
+
+def _existing_identity(record: dict[str, Any], path: Path,
+                       requested: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    """Verify an existing artifact before any output is rewritten."""
+    identity, signature = record.get("identity"), record.get("signature")
+    if (not isinstance(identity, dict) or not isinstance(signature, str)
+            or canonical_hash(identity) != signature):
+        raise RuntimeError(f"{path} has an invalid training identity/signature")
+    if not compatible_fit_identity(identity, requested):
+        raise RuntimeError(
+            f"{path} belongs to a different recipe ({signature} != {canonical_hash(requested)}). "
+            "Move it aside rather than resuming across a settings change.")
+    return identity, signature
+
+
 def _configure_backend() -> None:
     import torch
 
@@ -85,20 +141,20 @@ def _configure_backend() -> None:
     torch.backends.cudnn.allow_tf32 = False
 
 
-def _rng_state() -> dict[str, Any]:
+def _rng_state(device) -> dict[str, Any]:
     import torch
 
     state = {"cpu": torch.get_rng_state()}
-    if torch.cuda.is_available():
+    if device.type == "cuda":
         state["cuda"] = torch.cuda.get_rng_state_all()
     return state
 
 
-def _restore_rng(state: dict[str, Any]) -> None:
+def _restore_rng(state: dict[str, Any], device) -> None:
     import torch
 
     torch.set_rng_state(state["cpu"].cpu() if hasattr(state["cpu"], "cpu") else state["cpu"])
-    if "cuda" in state and torch.cuda.is_available():
+    if "cuda" in state and device.type == "cuda":
         torch.cuda.set_rng_state_all([s.cpu() if hasattr(s, "cpu") else s for s in state["cuda"]])
 
 
@@ -124,45 +180,83 @@ def fit(cell: Cell, bundle: Bundle, out_dir: str | Path, settings: FitSettings, 
                             per_epoch=per_epoch, code_version=code_version)
     signature = canonical_hash(identity)
     summary_path = out_dir / "summary.json"
+    checkpoint_path = out_dir / "checkpoint.pt"
+    config_path = out_dir / "config.json"
     finished = read_json(summary_path)
-    if finished and finished.get("identity") == signature and finished.get("complete"):
+    existing_config = read_json(config_path)
+    # Check before writing config.json, deleting anything, or allocating the
+    # fitting matrix. Rejected resumes must leave their metadata untouched.
+    if existing_config is not None:
+        _existing_identity(existing_config, config_path, identity)
+    saved = None
+    if checkpoint_path.is_file():
+        saved = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        saved_identity, saved_signature = _existing_identity(saved, checkpoint_path, identity)
+        if existing_config is not None and existing_config.get("signature") != saved_signature:
+            raise RuntimeError(f"{out_dir}: config and checkpoint disagree on the recipe")
+        position = saved.get("next_step")
+        if isinstance(position, bool) or not isinstance(position, int) or not 0 <= position <= total:
+            raise RuntimeError(f"{checkpoint_path}: invalid next_step {position!r}")
+    if finished is not None:
+        _, finished_signature = _existing_identity(finished, summary_path, identity)
+        if saved and saved["signature"] != finished_signature:
+            raise RuntimeError(f"{out_dir}: checkpoint and summary disagree on the recipe")
+    if finished and finished.get("complete"):
+        if saved is None:
+            raise FileNotFoundError(f"{out_dir}: completed summary has no checkpoint")
+        if finished.get("steps") != total or saved["next_step"] != total:
+            raise RuntimeError(f"{out_dir}: completed summary and checkpoint disagree on step count")
         if not settings.force:
             log.info("already trained (%d steps, %s)", finished["steps"],
                      format_duration(finished["train_seconds"]))
             return finished
         log.warning("retraining from scratch (--force); discarding the completed fit")
-        for stale in (summary_path, out_dir / "checkpoint.pt", out_dir / "train.jsonl"):
+        for stale in (summary_path, checkpoint_path, out_dir / "train.jsonl"):
             stale.unlink(missing_ok=True)
-    atomic_json(out_dir / "config.json", {"identity": identity, "signature": signature,
+        saved, existing_config = None, None
+    if saved is not None:
+        # Preserve the original identity, including legacy missing provenance,
+        # so resumed checkpoints and their existing evaluation caches keep the
+        # same fit signature. The identical archive bytes were checked above.
+        identity, signature = saved_identity, saved_signature
+    elif existing_config is not None:
+        identity, signature = existing_config["identity"], existing_config["signature"]
+    if existing_config is None:
+        atomic_json(config_path, {"identity": identity, "signature": signature,
                                           "cell": cell.__dict__, "code_version": code_version,
                                           "backbone": cell.backbone, "method": cell.method,
                                           "k": cell.k, "seed": cell.seed,
+                                          # Provenance is outside the numerical identity.
+                                          "backbone_weights": bundle.train.manifest.get("weights"),
+                                          "backbone_preprocessing": {
+                                              key: bundle.train.manifest.get(key)
+                                              for key in ("input_size", "normalize", "preprocessing")},
                                           "total_steps": total, "log_every": settings.log_every})
 
     model = build_sae(spec.dim, preset.hidden_dim, seed=cell.seed,
                       dead_threshold=preset.dead_threshold, device=device)
     optimizer = torch.optim.Adam(model.parameters(), lr=preset.lr, betas=preset.adam_betas,
                                  eps=preset.adam_eps, weight_decay=preset.weight_decay)
-    checkpoint_path = out_dir / "checkpoint.pt"
     next_step, elapsed = 0, 0.0
-    if checkpoint_path.is_file():
-        saved = torch.load(checkpoint_path, map_location=device, weights_only=False)
-        if saved.get("signature") != signature:
-            raise RuntimeError(
-                f"{checkpoint_path} belongs to a different recipe ({saved.get('signature')} "
-                f"!= {signature}). Move it aside rather than resuming across a settings change.")
+    if saved is not None:
         model.load_state_dict(saved["model"], strict=True)
         optimizer.load_state_dict(saved["optimizer"])
-        _restore_rng(saved["rng"])
+        _restore_rng(saved["rng"], device)
         next_step, elapsed = int(saved["next_step"]), float(saved["train_seconds"])
         log.info("resuming at step %d/%d", next_step, total)
     else:
         # Seed the global streams once, as the release does before training.
         torch.manual_seed(cell.seed)
-        if torch.cuda.is_available():
+        if device.type == "cuda":
             torch.cuda.manual_seed_all(cell.seed)
 
-    truncate_jsonl(out_dir / "train.jsonl", next_step // max(1, settings.log_every))
+    # Keep actual committed step positions, including a final off-stride log.
+    # Counting next_step//log_every would discard that record on a completed
+    # checkpoint recovered after a crash just before summary.json was written.
+    prior_records = read_jsonl(out_dir / "train.jsonl")
+    keep = sum(isinstance(record.get("step"), int) and record["step"] <= next_step
+               for record in prior_records)
+    truncate_jsonl(out_dir / "train.jsonl", keep)
     writer = MetricWriter(out_dir / "train.jsonl", stage=cell.slug)
     source = BatchSource(bundle.train.features, bundle.train.labels,
                          batch_size=preset.batch_size, seed=cell.seed, device=device,
@@ -178,18 +272,22 @@ def fit(cell: Cell, bundle: Bundle, out_dir: str | Path, settings: FitSettings, 
 
     progress = Progress(total, stage=cell.slug, what="steps", done=next_step)
     model.train()
-    if torch.cuda.is_available():
+    if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
     started = time.perf_counter()
     step = next_step
-    last_metrics: dict[str, Any] = {}
+    last_metrics: dict[str, Any] = dict((saved or {}).get("last_metrics") or {})
+    if not last_metrics and keep:
+        last_metrics = {key: value for key, value in prior_records[keep - 1].items()
+                        if key not in {"wall", "step", "epoch", "batch", "lr", "rows", "elapsed"}}
 
     def save(position: int) -> None:
-        if torch.cuda.is_available():
+        if device.type == "cuda":
             torch.cuda.synchronize(device)
         payload = {"format": CHECKPOINT_FORMAT, "signature": signature, "identity": identity,
                    "model": model.state_dict(), "optimizer": optimizer.state_dict(),
-                   "rng": _rng_state(), "next_step": position,
+                   "rng": _rng_state(device), "next_step": position,
+                   "last_metrics": last_metrics,
                    "train_seconds": elapsed + time.perf_counter() - started}
         temporary = checkpoint_path.with_suffix(".partial")
         torch.save(payload, temporary)
@@ -223,7 +321,8 @@ def fit(cell: Cell, bundle: Bundle, out_dir: str | Path, settings: FitSettings, 
                     save(step)
             if step < total and within == 0 and index + 1 < per_epoch:
                 raise RuntimeError("epoch ended before its batches were exhausted")
-        save(step)
+        if step > next_step or saved is None:
+            save(step)
     finally:
         writer.close()
         source.release()
@@ -235,7 +334,7 @@ def fit(cell: Cell, bundle: Bundle, out_dir: str | Path, settings: FitSettings, 
         "gpu_hours": train_seconds / 3600.0,
         "steps_per_second": step / max(1e-9, train_seconds),
         "peak_memory_bytes": int(torch.cuda.max_memory_allocated(device))
-        if torch.cuda.is_available() else None,
+        if device.type == "cuda" else None,
         "residency": source.residency,
         "final_metrics": last_metrics,
         "parameters": sum(p.numel() for p in model.parameters()),
