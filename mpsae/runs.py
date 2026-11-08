@@ -94,7 +94,14 @@ def dense_reference(spec: Backbone, bundle: Bundle, settings: RunSettings) -> di
     path = Path(settings.root) / spec.name / "dense_reference.json"
     previous = read_json(path)
     identity = canonical_hash(bundle.identity)
-    if previous and previous.get("identity") == identity and not settings.force:
+    # Older caches treated an all-negative dense vector as empty. Recompute
+    # those backbones once; the two released ResNets emit nonnegative ReLU
+    # features, so their historical dense references remain compatible.
+    zero_policy_ok = (spec.name in ("ff2048", "rn18") or (previous or {}).get("zero_detection")
+                      == "all_coordinates_equal_zero")
+    if (previous and previous.get("identity") == identity and not settings.force and zero_policy_ok
+            and isinstance(previous.get("top1"), (int, float))
+            and not isinstance(previous["top1"], bool) and math.isfinite(previous["top1"])):
         log.info("dense 1-NN %.2f%% (cached)", previous["top1"])
         return previous
     result = evaluate.dense_top1(
@@ -103,6 +110,7 @@ def dense_reference(spec: Backbone, bundle: Bundle, settings: RunSettings) -> di
         device=settings.fit.device, gallery_chunk=settings.gallery_chunk,
         query_block=settings.query_block, dim=spec.dim)
     record = {"backbone": spec.name, "dim": spec.dim, "identity": identity,
+              "zero_detection": "all_coordinates_equal_zero",
               # The dense gallery is the footprint the sparse codes are compared
               # against on the efficiency figure.
               "index_bytes": int(bundle.train.rows) * int(spec.dim) * 4, **result}

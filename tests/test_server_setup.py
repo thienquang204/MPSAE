@@ -84,6 +84,10 @@ def installation(tmp_path):
     python = tmp_path / ".venv" / "bin" / "python"
     _executable(python, '''#!/usr/bin/env bash
 printf '%s\n' "$*" >> "$TEST_SETUP_CALLS"
+if [[ "$*" == *"Missing {header}"* && "${TEST_FAIL_HEADERS:-0}" == 1 ]]; then
+    echo 'fixture matching Python.h missing' >&2
+    exit 29
+fi
 if [[ "$*" == *"pip install --no-build-isolation -r requirements-server.txt"* && "${TEST_FAIL_INSTALL:-0}" == 1 ]]; then
     echo 'fixture FFCV build failed' >&2
     exit 17
@@ -107,7 +111,7 @@ if [[ "$*" == '-m pip freeze' ]]; then printf 'fixture==1\n'; fi
     env.update(MPSAE_CUDA_HOME=cuda.as_posix(), TEST_SETUP_CALLS=(tmp_path / "calls.txt").as_posix())
     harness = '''
 source "$1"
-ubuntu_repository() { echo ubuntu2204; }
+ubuntu_repository() { echo "${TEST_UBUNTU_REPOSITORY:-ubuntu2204}"; }
 uname() { if [[ "$1" == -s ]]; then echo Linux; else echo "${TEST_CPU_ARCH:-x86_64}"; fi; }
 nvidia-smi() {
     printf '%s\n' "${TEST_GPU_INFO:-NVIDIA A100-SXM4-80GB, 8.0, 81920 MiB, 580.95.05}"
@@ -129,7 +133,8 @@ def test_dry_run_has_no_installation_side_effects(installation):
     assert not (root / "calls.txt").exists()
 
 
-@pytest.mark.parametrize("failure,expected_code", [("TEST_FAIL_INSTALL", 17), ("TEST_FAIL_VERIFY", 23)])
+@pytest.mark.parametrize("failure,expected_code", [("TEST_FAIL_INSTALL", 17), ("TEST_FAIL_VERIFY", 23),
+                                                    ("TEST_FAIL_HEADERS", 29)])
 def test_dependency_or_gpu_failure_never_reports_setup_success(installation, failure, expected_code):
     root, installer, python, env, harness = installation
     env[failure] = "1"
@@ -139,8 +144,10 @@ def test_dependency_or_gpu_failure_never_reports_setup_success(installation, fai
     assert not (root / ".venv/server-requirements.freeze.txt").exists()
     assert (root / "work/runs/existing.pt").read_bytes() == b"preserve source checkpoint"
     assert (root / ".env").read_text() == "HF_TOKEN=fixture-keep-existing\n"
-    if failure == "TEST_FAIL_INSTALL":
+    if failure in ("TEST_FAIL_INSTALL", "TEST_FAIL_HEADERS"):
         assert "-m mpsae.server" not in (root / "calls.txt").read_text()
+    if failure == "TEST_FAIL_HEADERS":
+        assert "-m pip install" not in (root / "calls.txt").read_text()
 
 
 def test_success_verifies_full_environment_and_keeps_existing_artifacts(installation):
@@ -151,6 +158,7 @@ def test_success_verifies_full_environment_and_keeps_existing_artifacts(installa
     calls = (root / "calls.txt").read_text()
     assert "torch==2.9.1+cu126 torchvision==0.24.1+cu126" in calls
     assert "--no-build-isolation -r requirements-server.txt" in calls
+    assert calls.index("-m pip install -c constraints/server.txt numpy") < calls.index("torch==2.9.1+cu126")
     assert calls.index("-m pip check") < calls.index("-m mpsae.server") < calls.index("-m pip freeze")
     assert (root / "env.sh").is_file()
     assert (root / ".venv/server-requirements.freeze.txt").read_text().strip() == "fixture==1"
@@ -179,16 +187,16 @@ def test_installer_selects_correct_wheels_and_compiler_architecture(installation
         assert "--force-reinstall --no-deps" in calls
 
 
-@pytest.mark.parametrize("cpu,gpu,capability,cuda,repo_arch", [
-    ("x86_64", "A100", "8.0", "12.6", "x86_64"),
-    ("aarch64", "GB300", "10.3", "12.9", "sbsa"),
+@pytest.mark.parametrize("cpu,gpu,capability,cuda,repo_arch,distro,glib", [
+    ("x86_64", "A100", "8.0", "12.6", "x86_64", "ubuntu2204", "libglib2.0-0"),
+    ("aarch64", "GB300", "10.3", "12.9", "sbsa", "ubuntu2404", "libglib2.0-0t64"),
 ])
 def test_system_setup_installs_versioned_toolkit_without_driver_or_real_privileges(
-        installation, cpu, gpu, capability, cuda, repo_arch):
+        installation, cpu, gpu, capability, cuda, repo_arch, distro, glib):
     root, installer, python, env, harness = installation
     (root / "cuda/bin/nvcc").unlink()
     env["TEST_SYSTEM_CALLS"] = (root / "system-calls.txt").as_posix()
-    env.update(TEST_CPU_ARCH=cpu, TEST_CUDA_VERSION=cuda,
+    env.update(TEST_CPU_ARCH=cpu, TEST_CUDA_VERSION=cuda, TEST_UBUNTU_REPOSITORY=distro,
                TEST_GPU_INFO=f"NVIDIA {gpu}, {capability}, 81920 MiB, 580.95.05")
     replacements = r'''
 sudo() { printf 'sudo:%s\n' "$*" >> "$TEST_SYSTEM_CALLS"; if [[ "$1" != -v ]]; then "$@"; fi; }
@@ -216,7 +224,8 @@ dpkg() { printf 'dpkg:%s\n' "$*" >> "$TEST_SYSTEM_CALLS"; }
     calls = (root / "system-calls.txt").read_text()
     assert "libturbojpeg0-dev libopencv-dev" in calls
     assert f"cuda-toolkit-{cuda.replace('.', '-')}" in calls
-    assert f"ubuntu2204/{repo_arch}/cuda-keyring_1.1-1_all.deb" in calls
+    assert f"{distro}/{repo_arch}/cuda-keyring_1.1-1_all.deb" in calls
+    assert f"libgl1 {glib}" in calls
     assert "nvidia-driver" not in calls
     assert "Setup complete." in result.stdout
 
@@ -259,6 +268,18 @@ def test_all_in_one_rejects_ignored_install_options(installation):
                             cwd=root, env=env, text=True, capture_output=True, timeout=30)
     assert result.returncode == 2
     assert "Installer options cannot be combined" in result.stderr
+    assert not (root / "calls.txt").exists()
+
+
+@pytest.mark.parametrize("mode", ["--skip-setup", "--sync-only", "--check"])
+def test_all_in_one_rejects_setup_only_when_setup_is_disabled(installation, mode):
+    root, installer, python, env, harness = installation
+    script = root / "all_in_one.sh"
+    _executable(script, (ROOT / "all_in_one.sh").read_text())
+    result = subprocess.run([BASH, str(script), "--setup-only", mode],
+                            cwd=root, env=env, text=True, capture_output=True, timeout=30)
+    assert result.returncode == 2
+    assert "--setup-only cannot be combined" in result.stderr
     assert not (root / "calls.txt").exists()
 
 

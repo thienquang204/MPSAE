@@ -195,6 +195,12 @@ is reported, not deleted. Install in a separate checkout if that environment
 must be retained. `--skip-system-packages` still installs all Python packages
 and performs every verification; it is not a way to skip FFCV or GPU checks.
 
+For a custom `--python`, install the matching development headers and venv
+support (for example `python3.11-dev` and `python3.11-venv`), not only the
+Ubuntu default `python3-dev`. Setup checks that the selected interpreter's
+`Python.h` exists before downloading Python dependencies. The Ubuntu 24.04
+profile selects `libglib2.0-0t64`; Ubuntu 22.04 uses `libglib2.0-0`.
+
 Setup writes logs under `.setup-logs/`, verified GPU/CPU/runtime provenance to
 `.venv/server-profile.json` and resolved Python versions to
 `.venv/server-requirements.freeze.txt` after successful verification. No token
@@ -214,7 +220,43 @@ Empty reports after a preflight failure mean no evaluation was completed;
 the final exception identifies the cause. Do not remove the dependency check
 or change the source extraction recipe merely to bypass a missing package.
 
+### PyArrow requires NumPy 2 during setup
+
+The native FFCV stack uses NumPy 1.26.4. Arrow 26 requires NumPy 2 at
+import time, even when `pip check` reports no broken requirements. The server
+constraints pin PyArrow 25.0.1, and verification checks an actual NumPy/Arrow/
+Hugging Face Dataset round trip before starting GPU checks.
+
+After updating this checkout, repair an existing environment in place:
+
+```bash
+source activate_server.sh
+python -m pip install --no-build-isolation -r requirements-server.txt
+bash setup_server.sh
+bash all_in_one.sh --skip-setup
+```
+
+Existing data and checkpoints are retained. Do not upgrade NumPy alone to
+bypass this error, since the FFCV stack shares these native dependencies.
+
 ## Workspace and long jobs
+
+After installing on the actual GPU server, run the regression suite and a
+small synthetic campaign before the full run:
+
+```bash
+source activate_server.sh
+python -m pytest tests/ -q
+bash all_in_one.sh --skip-setup --smoke
+bash all_in_one.sh --skip-setup
+```
+
+The smoke campaign uses its own workspace and never uploads to HF or W&B.
+Legacy `python -m mpsae --smoke run` also isolates its files under
+`<workspace>/smoke-legacy/`, preserving real source archives and checkpoints.
+It checks the training/evaluation/reporting path; it does not establish real
+dataset accuracy or certify every supported GPU. `setup_server.sh` separately
+tests the installed GPU, FFCV decoding, CuPy JIT and CUDA retrieval extension.
 
 Use fast local SSD storage. In `.env`, `MPSAE_WORKSPACE=/workspace/mpsae` moves
 the inputs, features, checkpoints, campaign state and reports together;

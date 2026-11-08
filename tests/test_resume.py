@@ -13,7 +13,7 @@ import torch  # noqa: E402
 
 from mpsae.config import BACKBONES, Cell  # noqa: E402
 from mpsae.features import BatchSource, Bundle, Split  # noqa: E402
-from mpsae.train import FitSettings, fit  # noqa: E402
+from mpsae.train import FitSettings, fit, fit_identity, load_fitted  # noqa: E402
 
 
 @pytest.fixture
@@ -94,7 +94,7 @@ def test_new_config_records_backbone_provenance_without_changing_fit_identity(ex
     assert _snapshot(tmp_path) == before
 
 
-@pytest.mark.parametrize("change", ["lr", "seed", "data", "rows", "code_version"])
+@pytest.mark.parametrize("change", ["lr", "nested_coef", "seed", "data", "rows", "code_version"])
 def test_changed_recipe_is_rejected_before_metadata_is_written(experiment, tmp_path, change):
     _fit(experiment, tmp_path)
     before = _snapshot(tmp_path)
@@ -102,6 +102,8 @@ def test_changed_recipe_is_rejected_before_metadata_is_written(experiment, tmp_p
     version = "2.0.0"
     if change == "lr":
         spec = replace(spec, preset=replace(spec.preset, lr=spec.preset.lr * 2))
+    elif change == "nested_coef":
+        spec = replace(spec, preset=replace(spec.preset, nested_coef=0.25))
     elif change == "seed":
         cell = replace(cell, seed=2026)
     elif change in ("data", "rows"):
@@ -113,6 +115,39 @@ def test_changed_recipe_is_rejected_before_metadata_is_written(experiment, tmp_p
     with pytest.raises(RuntimeError, match="different recipe"):
         fit(cell, bundle, tmp_path, settings, code_version=version, spec=spec)
     assert _snapshot(tmp_path) == before
+
+
+def test_ot_refinement_budget_is_part_of_fit_identity(experiment):
+    cell, bundle, spec, settings = experiment
+    cell = replace(cell, method="mpsae")
+    default = fit_identity(cell, bundle, spec.preset, total_steps=3, per_epoch=3, code_version="v")
+    changed = fit_identity(cell, bundle, replace(spec.preset, ot_max_refine_iters=3000),
+                           total_steps=3, per_epoch=3, code_version="v")
+    assert default != changed
+    assert "max_refine_iters" not in default["objective"]["ot"]
+
+
+@pytest.mark.parametrize("kwargs", [{"log_every": 0}, {"checkpoint_every": 0},
+                                     {"max_steps": -1}, {"max_steps": True}])
+def test_invalid_fit_settings_are_rejected_before_writing(kwargs):
+    with pytest.raises(ValueError):
+        FitSettings(**kwargs)
+
+
+def test_load_fitted_rejects_wrong_cell(experiment, tmp_path):
+    _fit(experiment, tmp_path)
+    cell, bundle, spec, settings = experiment
+    with pytest.raises(RuntimeError, match="different training cell"):
+        load_fitted(replace(cell, seed=2026), tmp_path, spec, device="cpu")
+
+
+def test_two_campaigns_cannot_write_the_same_fit(experiment, tmp_path):
+    from mpsae.io import exclusive_lock
+
+    with exclusive_lock(tmp_path / "fit.lock", timeout=0):
+        with pytest.raises(TimeoutError):
+            _fit(experiment, tmp_path)
+    assert not (tmp_path / "config.json").exists()
 
 
 def test_known_provenance_change_is_not_legacy_enrichment(experiment, tmp_path):

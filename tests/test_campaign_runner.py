@@ -269,6 +269,33 @@ def test_broken_installed_ffcv_fails_before_downloading_any_dataset(tmp_path, mo
     assert heavy_boundaries.source_loads == []
 
 
+def test_failed_dense_reference_prevents_source_training(tmp_path, monkeypatch, heavy_boundaries):
+    from mpsae import features
+    from mpsae.report import figures
+
+    campaign = Campaign.from_mapping({
+        "name": "dense_failure", "backbones": ["rn18"], "methods": ["csr"],
+        "seeds": [1227], "imagenet": {"train_k": [8]},
+        "downstream": {"enabled": False},
+    })
+    for split in ("train", "val"):
+        archive = tmp_path / "embeddings" / "rn18" / f"1K_{split}_rn18.npz"
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        archive.write_bytes(b"fixture")
+    monkeypatch.setattr(features, "load_bundle", lambda *args: object())
+
+    def failed_reference(*args, **kwargs):
+        raise RuntimeError("dense search failed")
+
+    monkeypatch.setattr(sys.modules["mpsae.runs"], "dense_reference", failed_reference)
+    monkeypatch.setattr(figures, "build_all", lambda *args, **kwargs: {"skipped": []})
+    with pytest.raises(RuntimeError, match="partial report"):
+        run.run_campaign(campaign, tmp_path, device="cpu", workers=0)
+    assert heavy_boundaries.fit_calls == heavy_boundaries.source_loads == []
+    status = run.campaign_status(campaign, tmp_path)
+    assert status["state"]["tasks"]["imagenet/dense/rn18"]["state"] == "failed"
+
+
 def test_downstream_campaign_reuses_source_and_resumes_all_dataset_budget_points(tmp_path, heavy_boundaries):
     campaign = _campaign()
     sources = [_write_source(tmp_path, cell) for cell in campaign.source_cells()]

@@ -73,7 +73,7 @@ ubuntu_repository() {
 
 main() {
     local dry_run=0 skip_system=0 setup_python="" requested_cuda=auto
-    local root_path log_path distro temporary_dir candidate gpu_info driver_version capabilities cpu_arch repo_arch vision_spec
+    local root_path log_path distro temporary_dir candidate gpu_info driver_version capabilities cpu_arch repo_arch vision_spec glib_package
     local -a admin=() gpu_query=()
     while (( $# )); do
         case "$1" in
@@ -93,6 +93,8 @@ main() {
         *) die "unsupported CPU architecture: $cpu_arch" ;;
     esac
     distro="$(ubuntu_repository)"
+    glib_package=libglib2.0-0
+    [[ "$distro" != ubuntu2404 ]] || glib_package=libglib2.0-0t64
     root_path="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
     cd "$root_path"
     command -v nvidia-smi >/dev/null || die 'nvidia-smi missing; the server provider must install the NVIDIA driver'
@@ -111,7 +113,9 @@ main() {
         die 'MPSAE_TORCH_INDEX conflicts with the selected GPU profile; unset it and use --cuda instead'
     fi
     if [[ -z "$setup_python" ]]; then
-        for candidate in python3.11 python3.12 python3.10 python3; do
+        # Prefer Ubuntu's interpreter so python3-dev/python3-venv match it.
+        # An explicitly requested custom interpreter remains supported below.
+        for candidate in /usr/bin/python3 python3.11 python3.12 python3.10 python3; do
             if command -v "$candidate" >/dev/null && "$candidate" -c \
                 'import sys; sys.exit(not ((3, 10) <= sys.version_info[:2] <= (3, 12)))'; then
                 setup_python="$candidate"
@@ -155,7 +159,7 @@ main() {
         "${admin[@]}" apt-get update
         "${admin[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             build-essential pkg-config git curl ca-certificates tmux \
-            python3 python3-dev python3-venv libturbojpeg0-dev libopencv-dev libgl1 libglib2.0-0
+            python3 python3-dev python3-venv libturbojpeg0-dev libopencv-dev libgl1 "$glib_package"
         if [[ ! -x "${MPSAE_CUDA_HOME:-/usr/local/cuda-$CUDA_VERSION}/bin/nvcc" ]]; then
             step "CUDA Toolkit $CUDA_VERSION from NVIDIA (no driver package)"
             temporary_dir="$(mktemp -d)"
@@ -186,13 +190,19 @@ main() {
     [[ -x .venv/bin/python ]] || die '.venv exists but is not a Linux Python environment; use a separate server checkout'
     .venv/bin/python -c 'import sys; assert (3,10) <= sys.version_info[:2] <= (3,12), "existing .venv needs Python 3.10-3.12; it has not been deleted"'
     local venv_python="$root_path/.venv/bin/python"
+    # A custom interpreter can coexist with Ubuntu's default Python. Installing
+    # python3-dev alone does not provide that interpreter's extension headers.
+    "$venv_python" -c 'import sys, sysconfig; from pathlib import Path; header = Path(sysconfig.get_path("include")) / "Python.h"; sys.exit(0 if header.is_file() else f"Missing {header}. Install python{sys.version_info.major}.{sys.version_info.minor}-dev (and the matching -venv package), or choose a Python with development headers using --python.")'
     step 'Python packaging tools'
     "$venv_python" -m pip install --upgrade pip 'setuptools==80.9.0' 'wheel==0.45.1'
+    # torchvision depends on NumPy. Install the shared ABI first, so the initial
+    # Torch install cannot leave NumPy 2 in a half-configured environment.
+    "$venv_python" -m pip install -c constraints/server.txt numpy
     step 'pinned GPU-compatible PyTorch'
     # The official ARM64 torchvision wheels have no +cuXXX local suffix.
     vision_spec="torchvision==$TORCHVISION_VERSION+$CUDA_FLAVOR"
     [[ "$repo_arch" != sbsa ]] || vision_spec="torchvision==$TORCHVISION_VERSION"
-    "$venv_python" -m pip install --index-url "$TORCH_INDEX" \
+    "$venv_python" -m pip install -c constraints/server.txt --index-url "$TORCH_INDEX" \
         "torch==$TORCH_VERSION+$CUDA_FLAVOR" "$vision_spec"
     if [[ "$repo_arch" == sbsa ]]; then
         "$venv_python" -m pip install --force-reinstall --no-deps --index-url "$TORCH_INDEX" "$vision_spec"

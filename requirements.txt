@@ -12,7 +12,8 @@ timm>=1.0.9
 safetensors>=0.4
 huggingface_hub>=0.25
 datasets>=3.0
-pyarrow>=16.0
+# Arrow 26 drops NumPy 1.x; native FFCV environments retain NumPy 1.26.
+pyarrow>=16.0,<26
 pillow>=10.0
 matplotlib>=3.8
 tqdm>=4.66

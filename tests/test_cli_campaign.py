@@ -43,9 +43,22 @@ def test_campaign_cli_rejects_silently_ignored_scientific_overrides(capsys):
     assert "select experiments in YAML" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("option,value", [("--workers", "-1"), ("--embed-batch-size", "0"),
+                                          ("--max-steps", "-1"), ("--force", "typo")])
+def test_invalid_runtime_options_are_rejected_early(option, value, capsys):
+    with pytest.raises(SystemExit) as error:
+        cli.main([option, value, "plan"])
+    assert error.value.code == 2
+
+
 def test_explicit_campaign_report_rejects_legacy_out(tmp_path, capsys):
     with pytest.raises(SystemExit) as error:
         cli.main(["--config", str(ROOT / "configs" / "smoke.yaml"), "--workspace", str(tmp_path),
                   "report", "--out", str(tmp_path / "other")])
     assert error.value.code == 2
     assert "fixed by campaign name/plan" in capsys.readouterr().err
+
+
+def test_legacy_smoke_uses_a_separate_workspace(tmp_path):
+    args = cli.build_parser().parse_args(["--workspace", str(tmp_path), "--smoke", "run"])
+    assert cli.to_options(args).paths.workspace == tmp_path / "smoke-legacy"

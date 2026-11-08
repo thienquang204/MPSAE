@@ -17,6 +17,84 @@ np = pytest.importorskip("numpy")
 
 import mpsae
 from mpsae.config import BACKBONES, Cell
+from mpsae.io import append_jsonl, open_npz_memmap, read_jsonl, save_npz, truncate_jsonl
+
+
+def test_interrupted_metric_tail_is_repaired_before_resume(tmp_path):
+    path = tmp_path / "train.jsonl"
+    path.write_bytes(b'{"step": 10}\n{"step": 20}\n{"step":')
+    assert read_jsonl(path) == [{"step": 10}, {"step": 20}]
+    assert truncate_jsonl(path, 2) == 2
+    append_jsonl(path, {"step": 30})
+    assert read_jsonl(path) == [{"step": 10}, {"step": 20}, {"step": 30}]
+
+
+def test_valid_unterminated_metric_gets_separator_before_append(tmp_path):
+    path = tmp_path / "train.jsonl"
+    path.write_text('{"step": 10}', encoding="utf-8")
+    assert truncate_jsonl(path, 10) == 1
+    append_jsonl(path, {"step": 20})
+    assert read_jsonl(path) == [{"step": 10}, {"step": 20}]
+
+
+@pytest.mark.parametrize("payload", [b'{"step":}\n', b'{"step":}\n{"step": 20}'])
+def test_corrupt_committed_metric_lines_are_not_silently_ignored(tmp_path, payload):
+    import json
+
+    path = tmp_path / "train.jsonl"
+    path.write_bytes(payload)
+    with pytest.raises(json.JSONDecodeError):
+        read_jsonl(path)
+
+
+@pytest.mark.parametrize("compressed,dtype,fortran,label_key", [
+    (False, "float32", False, "labels"),
+    (True, "float32", False, "label"),
+    (False, "float64", True, "labels"),
+    (True, "int32", False, "labels"),
+])
+def test_npz_cache_streams_data_without_materialising_archive_member(tmp_path, monkeypatch,
+                                                                  compressed, dtype, fortran, label_key):
+    values = np.arange(24, dtype=dtype).reshape(8, 3)
+    if fortran:
+        values = np.asfortranarray(values)
+    archive = tmp_path / "features.npz"
+    save = np.savez_compressed if compressed else np.savez
+    save(archive, data=values, **{label_key: np.arange(8)})
+    npz_type = type(np.load(archive))
+    original_getitem = npz_type.__getitem__
+
+    def prohibit_full_matrix(self, key):
+        if key in ("data", "data.npy"):
+            pytest.fail("the full embedding matrix must not be loaded into RAM")
+        return original_getitem(self, key)
+
+    monkeypatch.setattr(npz_type, "__getitem__", prohibit_full_matrix)
+    data, labels, metadata = open_npz_memmap(archive, tmp_path / "cache")
+    try:
+        assert isinstance(data, np.memmap)
+        assert data.dtype == np.float32 and data.flags.c_contiguous
+        np.testing.assert_array_equal(data, values.astype(np.float32))
+        np.testing.assert_array_equal(labels, np.arange(8))
+        assert metadata["label_key"] == label_key
+    finally:
+        data._mmap.close()
+
+
+def test_nonfinite_embeddings_do_not_publish_cache_receipt(tmp_path):
+    archive = tmp_path / "features.npz"
+    np.savez(archive, data=np.array([[np.nan]], dtype=np.float32), labels=np.array([0]))
+    with pytest.raises(ValueError, match="nonfinite"):
+        open_npz_memmap(archive, tmp_path / "cache")
+    assert not list((tmp_path / "cache").rglob("cache.json"))
+
+
+def test_archive_metadata_cannot_replace_validated_embeddings(tmp_path):
+    archive = tmp_path / "features.npz"
+    with pytest.raises(ValueError, match="cannot replace"):
+        save_npz(archive, data=np.ones((2, 3)), labels=np.array([0, 1]),
+                 extra={"data": np.array([[np.nan]])})
+    assert not archive.exists()
 
 
 @pytest.fixture
@@ -42,6 +120,31 @@ def _bundle():
         identity={"train": {"sha256": "a" * 64}, "validation": {"sha256": "b" * 64}},
         train=SimpleNamespace(features=np.ones((3, 2), dtype=np.float32), labels=np.array([0, 0, 1])),
         validation=SimpleNamespace(features=np.ones((2, 2), dtype=np.float32), labels=np.array([0, 1])))
+
+
+@pytest.mark.parametrize("backbone,recompute", [("ff2048", False), ("vit_b16", True)])
+def test_dense_reference_reuses_only_compatible_zero_detection(
+        runs, tmp_path, monkeypatch, backbone, recompute):
+    from mpsae.io import atomic_json, canonical_hash
+
+    bundle = _bundle()
+    bundle.train.rows = 3
+    path = tmp_path / backbone / "dense_reference.json"
+    previous = {"identity": canonical_hash(bundle.identity), "top1": 65.0}
+    atomic_json(path, previous)
+    calls = []
+
+    def score(*args, **kwargs):
+        calls.append(True)
+        return {"top1": 66.0}
+
+    monkeypatch.setattr(runs, "_evaluate_module", lambda: SimpleNamespace(dense_top1=score))
+    settings = runs.RunSettings(root=tmp_path)
+    result = runs.dense_reference(BACKBONES[backbone], bundle, settings)
+    assert bool(calls) is recompute
+    assert result["top1"] == (66.0 if recompute else 65.0)
+    runs.dense_reference(BACKBONES[backbone], bundle, settings)
+    assert len(calls) == int(recompute)  # New policy is reusable on the next run.
 
 
 def _fake_evaluator(fail_at=None):

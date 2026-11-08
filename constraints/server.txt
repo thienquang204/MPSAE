@@ -1,6 +1,8 @@
 # Shared Python 3.10-3.12 stack for all supported GPUs and FFCV 1.0.2.
 # Avoid silently moving to NumPy 2 when installing OpenCV or other dependencies.
 numpy==1.26.4
+# Arrow 26 requires NumPy 2 at import time; pip check may miss that requirement.
+pyarrow==25.0.1
 numba==0.61.2
 opencv-python==4.11.0.86
 cupy-cuda12x==13.6.0

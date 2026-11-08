@@ -78,6 +78,15 @@ def test_none_means_every_row_for_the_dense_reference(features):
     assert np.allclose(whole, features)
 
 
+def test_negative_dense_rows_are_not_empty_codes():
+    codes = np.array([[-1., -2.], [0., 0.], [0., -3.]], dtype=np.float32)
+    source = encode.CodeSource(codes, dim=2, device="cpu")
+    assert source.empty_mask().tolist() == [False, True, False]
+    result = knn.dense_top1(codes[[0, 2]], [0, 1], codes[[0]], [0], device="cpu")
+    assert result["top1"] == 100.0
+    assert result["empty_queries"] == 0
+
+
 def test_row_selection_is_validated(sae, features):
     for bad in (np.array([], dtype=np.int64),          # empty
                 np.array([0, 0, 1]),                   # not strictly increasing
@@ -109,6 +118,7 @@ def test_stats_describe_the_codes(sae, features):
         assert field in stats, field
     assert stats["k"] == K
     assert 0 <= stats["nnz_mean"] <= K
+    assert stats["precision"] == "cpu_float32_compute_float32_storage"
 
 
 def test_cache_round_trips(sae, features, tmp_path):

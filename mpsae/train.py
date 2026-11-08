@@ -23,7 +23,7 @@ from typing import Any
 from . import methods
 from .config import BACKBONES, Backbone, Cell, TrainPreset
 from .features import Bundle, BatchSource
-from .io import atomic_json, canonical_hash, read_json, read_jsonl, truncate_jsonl
+from .io import atomic_json, canonical_hash, exclusive_lock, read_json, read_jsonl, truncate_jsonl
 from .logs import MetricWriter, Progress, format_duration, get_logger
 from .model import build_sae, parameter_bytes
 
@@ -47,6 +47,16 @@ class FitSettings:
     #: means "do it again", not "do the rest of it".
     force: bool = False
 
+    def __post_init__(self) -> None:
+        for name in ("checkpoint_every", "log_every"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+        if isinstance(self.max_steps, bool) or not isinstance(self.max_steps, int) or self.max_steps < 0:
+            raise ValueError("max_steps must be a nonnegative integer")
+        if self.residency not in ("auto", "cuda", "cpu", "mmap"):
+            raise ValueError("residency must be auto, cuda, cpu or mmap")
+
 
 def total_updates(bundle: Bundle, preset: TrainPreset, *, max_steps: int = 0) -> tuple[int, int]:
     """``(batches_per_epoch, total_steps)`` for the released epoch definition."""
@@ -60,7 +70,7 @@ def total_updates(bundle: Bundle, preset: TrainPreset, *, max_steps: int = 0) ->
 def fit_identity(cell: Cell, bundle: Bundle, preset: TrainPreset, *,
                  total_steps: int, per_epoch: int, code_version: str) -> dict[str, Any]:
     """Everything that must match for a checkpoint to be resumable."""
-    return {
+    identity = {
         "format": CHECKPOINT_FORMAT,
         "code_version": code_version,
         "backbone": cell.backbone,
@@ -78,6 +88,14 @@ def fit_identity(cell: Cell, bundle: Bundle, preset: TrainPreset, *,
         "precision": {"params": "float32", "autocast": False, "tf32": False},
         "data": bundle.identity,
     }
+    # Historical v2 identities already imply these released defaults. Preserve
+    # their signatures while distinguishing any explicitly changed objective
+    # coefficient or refinement budget, previously omitted from the identity.
+    if preset.nested_coef != 0.125:
+        identity["objective"]["nested_coef"] = preset.nested_coef
+    if cell.method in methods.OT_METHODS and preset.ot_max_refine_iters != 2000:
+        identity["objective"]["ot"]["max_refine_iters"] = preset.ot_max_refine_iters
+    return identity
 
 
 def compatible_fit_identity(saved: dict[str, Any], requested: dict[str, Any]) -> bool:
@@ -160,6 +178,14 @@ def _restore_rng(state: dict[str, Any], device) -> None:
 
 def fit(cell: Cell, bundle: Bundle, out_dir: str | Path, settings: FitSettings, *,
         code_version: str, spec: Backbone | None = None) -> dict[str, Any]:
+    """Fit one cell, refusing concurrent writers even from different campaigns."""
+    out_dir = Path(out_dir)
+    with exclusive_lock(out_dir / "fit.lock", timeout=0):
+        return _fit(cell, bundle, out_dir, settings, code_version=code_version, spec=spec)
+
+
+def _fit(cell: Cell, bundle: Bundle, out_dir: str | Path, settings: FitSettings, *,
+         code_version: str, spec: Backbone | None = None) -> dict[str, Any]:
     """Train one cell to completion, resuming any partial checkpoint.
 
     Returns a summary dict and leaves ``checkpoint.pt``, ``config.json``,
@@ -176,6 +202,8 @@ def fit(cell: Cell, bundle: Bundle, out_dir: str | Path, settings: FitSettings, 
     device = torch.device(settings.device)
 
     per_epoch, total = total_updates(bundle, preset, max_steps=settings.max_steps)
+    if per_epoch < 1 or total < 1:
+        raise ValueError("cannot fit an empty training split")
     identity = fit_identity(cell, bundle, preset, total_steps=total,
                             per_epoch=per_epoch, code_version=code_version)
     signature = canonical_hash(identity)
@@ -314,7 +342,7 @@ def fit(cell: Cell, bundle: Bundle, out_dir: str | Path, settings: FitSettings, 
                               "lr": preset.lr, "rows": int(len(batch)),
                               "elapsed": elapsed + time.perf_counter() - started}
                     writer.log(record, step=step)
-                    progress.advance(settings.log_every, extra=(
+                    progress.advance(step - progress.done, extra=(
                         f"loss {record['loss_total']:.4f} k={record['training_k']} "
                         f"nnz {record['nnz_mean']:.1f} dead {record['dead_fraction']:.2f}"))
                 if step % settings.checkpoint_every == 0:
@@ -354,8 +382,17 @@ def load_fitted(cell: Cell, out_dir: str | Path, spec: Backbone, *, device) -> A
     if not summary or not summary.get("complete"):
         raise FileNotFoundError(f"{out_dir} has no completed fit")
     saved = torch.load(out_dir / "checkpoint.pt", map_location=device, weights_only=False)
-    if saved.get("signature") != summary["signature"]:
+    identity = saved.get("identity")
+    if (not isinstance(identity, dict) or canonical_hash(identity) != saved.get("signature")
+            or saved.get("signature") != summary.get("signature")
+            or summary.get("identity") != identity):
         raise RuntimeError(f"{out_dir}: checkpoint and summary disagree on the recipe")
+    expected = {"backbone": cell.backbone, "method": cell.method,
+                "target_k": cell.k, "seed": cell.seed}
+    if any(identity.get(key) != value for key, value in expected.items()):
+        raise RuntimeError(f"{out_dir}: checkpoint belongs to a different training cell")
+    if saved.get("next_step") != summary.get("steps"):
+        raise RuntimeError(f"{out_dir}: checkpoint and summary disagree on step count")
     model = build_sae(spec.dim, spec.preset.hidden_dim, seed=cell.seed,
                       dead_threshold=spec.preset.dead_threshold, device=device)
     model.load_state_dict(saved["model"], strict=True)

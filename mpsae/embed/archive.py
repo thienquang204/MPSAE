@@ -226,11 +226,20 @@ class FeatureSink:
 
     # -- lifecycle --------------------------------------------------------
     def __enter__(self) -> "FeatureSink":
-        import numpy as np
-
         self.directory.mkdir(parents=True, exist_ok=True)
         self._lock = exclusive_lock(self.directory / "sink.lock")
         self._lock.__enter__()
+        try:
+            return self._open()
+        except BaseException:
+            # A failed __enter__ never receives a matching __exit__ from with.
+            # Release the lock so this process can retry after a diagnosis.
+            self.__exit__(None, None, None)
+            raise
+
+    def _open(self) -> "FeatureSink":
+        import numpy as np
+
         receipt = read_json(self._receipt_path) or {}
         if receipt and receipt.get("signature") != self.signature:
             raise RuntimeError(f"feature cache {self.directory} belongs to another extraction")
@@ -239,6 +248,27 @@ class FeatureSink:
             raise RuntimeError(f"invalid durable cursor {cursor} in {self._receipt_path}")
         features_final, labels_final = self._final
         features_partial, labels_partial = self._partial
+        if cursor == self.rows and not receipt.get("complete"):
+            # A crash can land between either rename and the final receipt.
+            # The durable full-row cursor proves both arrays were fsynced.
+            recovered = []
+            for partial, final, shape, dtype in (
+                    (features_partial, features_final, (self.rows, self.dim), np.float32),
+                    (labels_partial, labels_final, (self.rows,), np.int64)):
+                candidate = partial if partial.is_file() else final
+                array = np.load(candidate, mmap_mode="r", allow_pickle=False)
+                try:
+                    if array.shape != shape or array.dtype != dtype:
+                        raise RuntimeError(f"malformed feature cache in {self.directory}")
+                finally:
+                    array._mmap.close()
+                recovered.append((candidate, final))
+            for candidate, final in recovered:
+                if candidate != final:
+                    os.replace(candidate, final)
+            receipt.update(complete=True, features_bytes=features_final.stat().st_size,
+                           labels_bytes=labels_final.stat().st_size)
+            atomic_json(self._receipt_path, receipt)
         if receipt.get("complete"):
             if cursor != self.rows or not features_final.is_file() or not labels_final.is_file():
                 raise RuntimeError(f"feature cache {self.directory} claims completion but is not whole")
@@ -248,13 +278,15 @@ class FeatureSink:
         if cursor and not (features_partial.is_file() and labels_partial.is_file()):
             raise RuntimeError(f"durable cursor is {cursor} but the partial arrays are missing "
                                f"in {self.directory}")
-        if features_partial.is_file():
+        if features_partial.is_file() and labels_partial.is_file():
             self._features = np.load(features_partial, mmap_mode="r+", allow_pickle=False)
             self._labels = np.load(labels_partial, mmap_mode="r+", allow_pickle=False)
             if (self._features.shape != (self.rows, self.dim) or self._features.dtype != np.float32
                     or self._labels.shape != (self.rows,) or self._labels.dtype != np.int64):
                 raise RuntimeError(f"malformed partial feature cache in {self.directory}")
         else:
+            # No durable rows exist: an interrupted initial allocation may
+            # have created only one of the two files, so recreate both.
             require_disk(self.directory, self.rows * (self.dim * 4 + 8),
                          what=f"feature cache {self.signature[:12]}")
             self._features = np.lib.format.open_memmap(
@@ -278,10 +310,16 @@ class FeatureSink:
                 # Keep whatever is already correct so the next attempt resumes.
                 self._checkpoint()
         finally:
-            self._features = self._labels = None
+            self._close_writers()
             if self._lock is not None:
                 self._lock.__exit__(None, None, None)
                 self._lock = None
+
+    def _close_writers(self) -> None:
+        for array in (self._features, self._labels):
+            if array is not None:
+                array._mmap.close()
+        self._features = self._labels = None
 
     # -- writing ----------------------------------------------------------
     def write(self, features, labels) -> int:
@@ -322,7 +360,7 @@ class FeatureSink:
             if self.cursor != self.rows:
                 raise RuntimeError(f"extraction ended early: {self.cursor:,}/{self.rows:,} rows")
             self._checkpoint()
-            self._features = self._labels = None
+            self._close_writers()
             features_partial, labels_partial = self._partial
             os.replace(features_partial, features_final)
             os.replace(labels_partial, labels_final)

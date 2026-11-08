@@ -113,7 +113,7 @@ def to_options(args: argparse.Namespace) -> PipelineOptions:
             if name not in METHODS:
                 raise SystemExit(f"unknown method {name!r}; choose from {', '.join(METHODS)}")
     return PipelineOptions(
-        paths=Paths(workspace=args.workspace),
+        paths=Paths(workspace=args.workspace / "smoke-legacy" if args.smoke else args.workspace),
         backbones=tuple(args.backbones),
         methods=args.methods, seeds=args.seeds, k_values=args.k_values,
         device=args.device, embed_batch_size=args.embed_batch_size, workers=args.workers,
@@ -157,6 +157,11 @@ def main(argv: list[str] | None = None) -> int:
     loaded = load_dotenv(preliminary.env_file)
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.workers < 0 or args.embed_batch_size < 1 or args.max_steps < 0:
+        parser.error("workers must be nonnegative, embed-batch-size positive, and max-steps nonnegative")
+    unknown_stages = (set(args.force) - {*STAGES, "all"}) | (set(args.skip) - set(STAGES))
+    if unknown_stages:
+        parser.error("unknown stage(s): " + ", ".join(sorted(unknown_stages)))
     if args.config is None and args.command != "stage" and os.environ.get("MPSAE_CONFIG"):
         args.config = Path(os.environ["MPSAE_CONFIG"])
     if args.config is not None:

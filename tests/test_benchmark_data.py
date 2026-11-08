@@ -36,6 +36,14 @@ def test_overlapping_sample_ids_are_rejected():
         build_dataset_bundle("eurosat", splits, revision="fixture-1", strict=False, audit_images=False)
 
 
+@pytest.mark.parametrize("invalid", [None, True, float("nan"), 1.5, "  "])
+def test_missing_or_ambiguous_sample_ids_are_rejected(invalid):
+    splits = _eurosat()
+    splits["test"][0]["image_id"] = invalid
+    with pytest.raises(ValueError, match="image_id"):
+        build_dataset_bundle("eurosat", splits, revision="fixture-1", strict=False, audit_images=False)
+
+
 def test_queries_without_positive_are_rejected():
     splits = _eurosat()
     splits["test"][0]["label"] = 2
@@ -76,6 +84,14 @@ def test_same_item_id_cannot_mean_two_categories():
     splits = _sop()
     splits["test"][0]["category"] = "bicycle"
     with pytest.raises(ValueError, match="multiple categories"):
+        build_dataset_bundle("sop", splits, revision="fixture-1", strict=False, audit_images=False)
+
+
+@pytest.mark.parametrize("key", ["item_id", "category", "image_path"])
+def test_sop_null_metadata_is_rejected_before_string_conversion(key):
+    splits = _sop()
+    splits["test"][0][key] = None
+    with pytest.raises(ValueError, match=key):
         build_dataset_bundle("sop", splits, revision="fixture-1", strict=False, audit_images=False)
 
 

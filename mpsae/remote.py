@@ -24,6 +24,15 @@ BACKUP_FOLDERS = ("embeddings", "benchmarks", "runs", "evaluations", "campaigns"
 SUFFIXES = (".npz", ".json", ".jsonl", ".pt", ".csv", ".md", ".png", ".pdf", ".caption.txt")
 
 
+def redacted_error(error):
+    message = str(error)
+    for key in ("HF_TOKEN", "WANDB_TOKEN", "WANDB_API_KEY"):
+        token = os.environ.get(key)
+        if token:
+            message = message.replace(token, "[REDACTED]")
+    return f"{type(error).__name__}: {message}"
+
+
 def configure_tracking():
     """Accept the user's token spelling; keep the SDK's standard key working."""
     if not os.environ.get("WANDB_API_KEY") and os.environ.get("WANDB_TOKEN"):
@@ -51,12 +60,7 @@ class RemoteSession:
         atomic_json(self.directory / "status.json", self.status)
 
     def warn(self, operation, error):
-        message = str(error)
-        for key in ("HF_TOKEN", "WANDB_TOKEN", "WANDB_API_KEY"):
-            token = os.environ.get(key)
-            if token:
-                message = message.replace(token, "[REDACTED]")
-        detail = {"operation": operation, "error": f"{type(error).__name__}: {message}"}
+        detail = {"operation": operation, "error": redacted_error(error)}
         self.status["warnings"].append(detail)
         get_logger("remote").warning("%s: %s", operation, detail["error"])
         self.save()
@@ -91,7 +95,8 @@ class RemoteSession:
             self.wandb_module = wandb
             identity_file = self.directory / "wandb.json"
             identity = read_json(identity_file) or {}
-            if identity.get("project") != self.project:
+            if (identity.get("project") != self.project
+                    or not isinstance(identity.get("id"), str) or not identity["id"]):
                 identity = {"project": self.project, "id": uuid.uuid4().hex[:16]}
                 atomic_json(identity_file, identity)
             self.directory.mkdir(parents=True, exist_ok=True)
@@ -268,6 +273,7 @@ def execute(session, args):
         return 0
     sink_token = METRIC_SINK.set(session.training_metrics)
     scientific_success = False
+    scientific_error = None
     try:
         if args.command == "run":
             from .benchmark.run import run_campaign
@@ -278,9 +284,22 @@ def execute(session, args):
         else:
             manifest = read_json(session.paths["reports"] / "manifest.json") or {}
             scientific_success = bool(manifest.get("complete"))
+    except BaseException as error:
+        scientific_error = error
+        raise
     finally:
         METRIC_SINK.reset(sink_token)
-        remote_success = session.finish(scientific_success=scientific_success)
+        try:
+            remote_success = session.finish(scientific_success=scientific_success)
+        except Exception as error:
+            if scientific_error is None:
+                raise
+            # A second disk/SDK failure during cleanup must not conceal the
+            # training error or cancellation that triggered synchronization.
+            message = f"Final remote synchronization also failed: {redacted_error(error)}"
+            get_logger("remote").error("%s", message)
+            if hasattr(scientific_error, "add_note"):
+                scientific_error.add_note(message)
     if not remote_success:
         raise RuntimeError(f"Remote synchronization incomplete; see {session.directory / 'status.json'}. "
                            "Retry bash all_in_one.sh --sync-only with the same config/workspace.")
@@ -292,9 +311,5 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except Exception as error:
         # HTTP exceptions can contain request information; redact token values.
-        message = str(error)
-        for key in ("HF_TOKEN", "WANDB_TOKEN", "WANDB_API_KEY"):
-            if os.environ.get(key):
-                message = message.replace(os.environ[key], "[REDACTED]")
-        print(f"all-in-one failed: {type(error).__name__}: {message}", file=sys.stderr)
+        print(f"all-in-one failed: {redacted_error(error)}", file=sys.stderr)
         raise SystemExit(1)

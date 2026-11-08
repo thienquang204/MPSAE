@@ -426,6 +426,10 @@ def run_campaign(campaign: Campaign, workspace: str | Path, *, device="cuda:0",
                         continue
                     dense = task(f"imagenet/dense/{name}", lambda: dense_reference(
                         spec, source, RunSettings(root=root / "runs", fit=FitSettings(device=device))))
+                    if dense is None:
+                        # Continue with other backbones after recording this
+                        # failure, but never fit against an unverified source.
+                        continue
                     if dense and not smoke and spec.reference_dense_top1 is not None and abs(
                             dense["top1"] - spec.reference_dense_top1) > 0.3:
                         raise RuntimeError(f"{name}: dense reference gate failed before source training")

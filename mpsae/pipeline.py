@@ -153,7 +153,7 @@ def stage_env(options: PipelineOptions) -> dict[str, Any]:
         caps = sorted({float(gpu["capability"]) for gpu in facts["gpus"]})
         for capability in caps:
             label = f"sm_{int(capability * 10)}"
-            _, needed = ARCHITECTURE_NOTES.get(f"{capability:g}", ("", None))
+            _, needed = ARCHITECTURE_NOTES.get(f"{capability:.1f}", ("", None))
             if needed and runtime and runtime < needed:
                 problems.append(
                     f"{label} needs CUDA {needed[0]}.{needed[1]} or newer, but torch is built "
@@ -167,7 +167,8 @@ def stage_env(options: PipelineOptions) -> dict[str, Any]:
         # r580 branch, 12.8 needs r570. This fails at the first kernel launch,
         # often minutes into a stage, so it is worth catching here.
         if driver is not None and runtime:
-            required_driver = 580 if runtime[0] >= 13 else (570 if runtime >= (12, 8) else 525)
+            required_driver = (580 if runtime[0] >= 13 else 575 if runtime >= (12, 9)
+                               else 570 if runtime >= (12, 8) else 525)
             if driver < required_driver:
                 problems.append(
                     f"driver branch {driver} cannot load a CUDA {facts.get('cuda')} build "
@@ -185,7 +186,7 @@ def stage_env(options: PipelineOptions) -> dict[str, Any]:
         except Exception as error:
             problems.append(f"missing {module} (needed for {why}): {error}")
 
-    if not _env("HF_TOKEN"):
+    if not options.smoke and not _env("HF_TOKEN"):
         problems.append("HF_TOKEN is unset; ILSVRC/imagenet-1k is gated. Accept the terms at "
                         "https://huggingface.co/datasets/ILSVRC/imagenet-1k and export a token")
     if options.hf_repo and not _env("HF_TOKEN"):
@@ -248,9 +249,11 @@ def _embed_one(spec: Backbone, options: PipelineOptions, split: str) -> dict[str
                               split=split, cache_dir=options.paths.cache,
                               device=options.device, batch_size=options.embed_batch_size,
                               workers=options.workers, hf_token=_env("HF_TOKEN"))
-    ffcv_file = next(options.paths.ffcv.glob(
-        f"{'train' if split == 'train' else 'val'}_*.ffcv"), None)
-    if ffcv_file is None:
+    # Select the released writer recipe explicitly. Directory iteration order
+    # must not decide between files from different preprocessing experiments.
+    folder = 'train' if split == 'train' else 'val'
+    ffcv_file = options.paths.ffcv / f"{folder}_500_0.50_90.ffcv"
+    if not ffcv_file.is_file():
         raise FileNotFoundError(f"no FFCV file for {split} in {options.paths.ffcv}; run the ffcv stage")
     return extract_timm(spec, ffcv_file, options.paths.embeddings / spec.name, split=split,
                         cache_dir=options.paths.cache, device=options.device,
@@ -343,6 +346,8 @@ def stage_publish(options: PipelineOptions) -> dict[str, Any]:
     named a repository; it is never implied by a bare pipeline run.
     """
     log = get_logger("publish")
+    if options.smoke:
+        return {"uploaded": False, "reason": "synthetic smoke runs never upload"}
     if not options.hf_repo:
         log.info("no repository configured (set HF_EMBEDDINGS_REPO); skipping upload")
         return {"uploaded": False, "reason": "no repository configured"}

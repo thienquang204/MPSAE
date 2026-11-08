@@ -36,7 +36,40 @@ def validate_cuda_runtime(capability, runtime, *, expected=None):
                            "Source activate_server.sh or rerun setup_server.sh.")
 
 
+def verify_data_stack() -> dict:
+    """Check binary interoperability, which pip's metadata checks can miss."""
+    try:
+        import numpy as np
+        import pyarrow as pa
+        import datasets
+
+        values = np.arange(4, dtype=np.int64)
+        np.testing.assert_array_equal(pa.array(values).to_numpy(), values)
+        dataset = datasets.Dataset.from_dict({"value": values})
+        np.testing.assert_array_equal(np.asarray(dataset["value"]), values)
+        # Retrieval consumes decoded HF Image rows, not only numeric columns.
+        from PIL import Image
+
+        pixels = np.full((8, 8, 3), 73, dtype=np.uint8)
+        images = datasets.Dataset.from_dict(
+            {"image": [Image.fromarray(pixels)]},
+            features=datasets.Features({"image": datasets.Image()}),
+        )
+        np.testing.assert_array_equal(np.asarray(images[0]["image"].convert("RGB")), pixels)
+    except (ImportError, ValueError) as error:
+        raise RuntimeError(
+            "NumPy/PyArrow/datasets interoperability check failed. "
+            "Repair the active environment with: python -m pip install "
+            "--no-build-isolation -r requirements-server.txt; then rerun "
+            "bash setup_server.sh. Native FFCV uses NumPy 1.26.4 and "
+            "PyArrow 25.0.1 (Arrow 26 requires NumPy 2)."
+        ) from error
+    print(f"NumPy {np.__version__} + PyArrow {pa.__version__} + datasets {datasets.__version__}: OK", flush=True)
+    return {"numpy": np.__version__, "pyarrow": pa.__version__, "datasets": datasets.__version__}
+
+
 def verify_server(*, check_extension: bool = True) -> dict:
+    verify_data_stack()
     import numpy as np
     import torch
     import cupy as cp
@@ -116,11 +149,12 @@ def verify_server(*, check_extension: bool = True) -> dict:
 
     versions = {}
     for name in ("torchvision", "timm", "safetensors", "datasets", "pyarrow",
-                 "huggingface_hub", "numpy", "numba", "cv2", "ffcv", "cupy", "yaml", "psutil"):
+                 "huggingface_hub", "numpy", "numba", "cv2", "ffcv", "cupy", "yaml", "psutil", "wandb", "PIL"):
         module = importlib.import_module(name)
         versions[name] = str(getattr(module, "__version__", "installed"))
     import matplotlib
 
+    versions["matplotlib"] = matplotlib.__version__
     matplotlib.use("Agg")
     from matplotlib import pyplot as plt
 

@@ -80,26 +80,60 @@ def append_jsonl(path: str | Path, record: Any) -> None:
 
 
 def read_jsonl(path: str | Path) -> list[Any]:
+    """Read committed lines, tolerating only an interrupted trailing write.
+
+    A killed training process can leave part of its last JSON record behind.
+    Interior corruption or a malformed newline-terminated record remains an
+    error rather than silently removing evidence from the experiment log.
+    """
     path = Path(path)
     if not path.is_file():
         return []
     records = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    lines = path.read_bytes().splitlines(keepends=True)
+    for index, line in enumerate(lines):
         if line.strip():
-            records.append(json.loads(line))
+            try:
+                records.append(json.loads(line))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                if index == len(lines) - 1 and not line.endswith((b"\n", b"\r")):
+                    break
+                raise
     return records
 
 
 def truncate_jsonl(path: str | Path, keep: int) -> int:
     """Drop records beyond ``keep`` so a resumed log never double-counts."""
+    if keep < 0:
+        raise ValueError("keep must be nonnegative")
     path = Path(path)
     records = read_jsonl(path)
-    if len(records) <= keep:
+    # Repair an interrupted final write even if every complete record is kept.
+    # A valid last JSON value without a newline also needs its separator before
+    # MetricWriter can append another record.
+    if not path.is_file():
+        return 0
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        size = handle.tell()
+        if size:
+            handle.seek(-1, os.SEEK_END)
+        terminated = not size or handle.read(1) == b"\n"
+    if len(records) <= keep and terminated:
         return len(records)
-    with path.open("w", encoding="utf-8") as handle:
-        for record in records[:keep]:
-            handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
-    return keep
+    handle = tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False,
+                                         prefix=path.name + ".", suffix=".tmp",
+                                         encoding="utf-8")
+    try:
+        with handle:
+            for record in records[:keep]:
+                handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(handle.name, path)
+    finally:
+        Path(handle.name).unlink(missing_ok=True)
+    return min(len(records), keep)
 
 
 # ------------------------------------------------------------------- locks
@@ -219,6 +253,8 @@ def open_npz_memmap(path: str | Path, cache_dir: str | Path, *,
     published after a successful fsync, so an interrupted run never leaves a
     half-written cache behind.
     """
+    import zipfile
+
     import numpy as np
 
     path, cache_dir = Path(path), Path(cache_dir)
@@ -238,30 +274,66 @@ def open_npz_memmap(path: str | Path, cache_dir: str | Path, *,
         if label_key is None:
             raise ValueError(f"{path} has no 'labels' member; keys: {sorted(header)}")
         shape = header["data"]["shape"]
+        dtype = np.dtype(header["data"]["dtype"])
+        if len(shape) != 2 or shape[1] == 0 or dtype.kind not in "fiu":
+            raise ValueError(f"{path}: embeddings must be a two-dimensional real numeric array")
         if receipt is None or not features_npy.is_file() or receipt.get("shape") != list(shape):
             target.mkdir(parents=True, exist_ok=True)
-            require_disk(target, int(np.prod(shape)) * 4, what=f"{path.name} feature cache")
+            convert = dtype != np.dtype(np.float32) or header["data"]["fortran_order"]
+            payload_bytes = int(np.prod(shape))
+            needed = payload_bytes * (4 + dtype.itemsize if convert else 4)
+            require_disk(target, needed, what=f"{path.name} feature cache")
             partial = features_npy.with_suffix(".partial")
-            with np.load(path, mmap_mode=None, allow_pickle=False) as archive:
-                source = archive["data"]
-                written = np.lib.format.open_memmap(partial, mode="w+",
-                                                    dtype=np.float32, shape=shape)
-                step = max(1, (64 << 20) // max(1, shape[1] * 4))
+            source_path = features_npy.with_suffix(".source.partial") if convert else partial
+            source = written = None
+            try:
+                # np.load(archive)['data'] materialises the complete embedding
+                # matrix (10+ GB for ImageNet). Stream its NPY member instead;
+                # ZIP_STORED and compressed NPZ archives both work this way.
+                with zipfile.ZipFile(path) as archive, archive.open("data.npy") as incoming:
+                    with source_path.open("wb") as output:
+                        shutil.copyfileobj(incoming, output, length=CHUNK)
+                source = np.load(source_path, mmap_mode="r", allow_pickle=False)
+                if source.shape != shape or source.dtype != dtype:
+                    raise ValueError(f"{path}: extracted embedding header disagrees with archive")
+                if convert:
+                    written = np.lib.format.open_memmap(partial, mode="w+", dtype=np.float32, shape=shape)
+                step = max(1, (64 << 20) // max(1, shape[1] * max(4, dtype.itemsize)))
                 for start in range(0, shape[0], step):
-                    written[start:start + step] = source[start:start + step]
-                written.flush()
-                del written
+                    chunk = source[start:start + step]
+                    if not np.isfinite(chunk).all():
+                        raise ValueError(f"{path}: refusing nonfinite embeddings")
+                    if written is not None:
+                        written[start:start + step] = chunk
+                        if not np.isfinite(written[start:start + step]).all():
+                            raise ValueError(f"{path}: embeddings overflow float32 storage")
+                if written is not None:
+                    written.flush()
+            finally:
+                for array in (written, source):
+                    if array is not None:
+                        array._mmap.close()
+                if convert:
+                    source_path.unlink(missing_ok=True)
             with partial.open("r+b") as handle:
                 os.fsync(handle.fileno())
             os.replace(partial, features_npy)
             receipt = {"source": str(path), "sha256": digest, "shape": list(shape),
                        "dtype": "float32", "label_key": label_key}
             atomic_json(receipt_path, receipt)
-    data = np.load(features_npy, mmap_mode="r", allow_pickle=False)
     with np.load(path, allow_pickle=False) as archive:
-        labels = np.asarray(archive[receipt["label_key"]]).reshape(-1).astype(np.int64)
-    if len(labels) != len(data):
-        raise ValueError(f"{path}: {len(data):,} rows but {len(labels):,} labels")
+        raw_labels = np.asarray(archive[receipt["label_key"]]).reshape(-1)
+        if raw_labels.dtype.kind not in "iu":
+            raise ValueError(f"{path}: labels must have an integer dtype")
+        if raw_labels.dtype.kind == "u" and raw_labels.size and raw_labels.max() > np.iinfo(np.int64).max:
+            raise ValueError(f"{path}: labels exceed int64 range")
+        labels = raw_labels.astype(np.int64)
+    if len(labels) != shape[0]:
+        raise ValueError(f"{path}: {shape[0]:,} rows but {len(labels):,} labels")
+    data = np.load(features_npy, mmap_mode="r", allow_pickle=False)
+    if data.shape != shape or data.dtype != np.dtype(np.float32) or not data.flags.c_contiguous:
+        data._mmap.close()
+        raise ValueError(f"{features_npy}: invalid cached embedding shape, dtype or layout; remove this cache file and retry")
     return data, labels, {"rows": len(data), "dim": int(data.shape[1]),
                           "sha256": digest, "label_key": receipt["label_key"],
                           "cache": str(features_npy)}
@@ -275,10 +347,16 @@ def save_npz(path: str | Path, *, data, labels, extra: dict[str, Any] | None = N
     path.parent.mkdir(parents=True, exist_ok=True)
     data = np.ascontiguousarray(data, dtype=np.float32)
     labels = np.ascontiguousarray(labels, dtype=np.int64).reshape(-1)
+    if data.ndim != 2 or data.shape[1] == 0:
+        raise ValueError("embeddings must be a two-dimensional array with nonzero width")
     if len(data) != len(labels):
         raise ValueError(f"{len(data):,} rows but {len(labels):,} labels")
-    if not np.isfinite(data).all():
-        raise ValueError("refusing to write nonfinite embeddings")
+    step = max(1, (64 << 20) // max(1, data.shape[1] * data.dtype.itemsize))
+    for start in range(0, len(data), step):
+        if not np.isfinite(data[start:start + step]).all():
+            raise ValueError("refusing to write nonfinite embeddings")
+    if extra and set(extra) & {"data", "labels"}:
+        raise ValueError("extra metadata cannot replace data or labels")
     partial = path.with_name(path.name + ".partial")
     payload = {"data": data, "labels": labels, **(extra or {})}
     with partial.open("wb") as handle:

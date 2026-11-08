@@ -135,6 +135,22 @@ def test_report_complete_requires_the_expected_evaluations(tmp_path, monkeypatch
         report.build_report([record(), record("csr")], tmp_path, expected_points=1)
 
 
+def test_report_cannot_claim_completion_when_plot_export_failed(tmp_path, monkeypatch):
+    monkeypatch.setattr(report, "_render_figures", lambda *args:
+                        ({}, ["quality: RuntimeError: PDF export failed"], {}))
+    manifest = report.build_report([record()], tmp_path, expected_points=1, expected_seeds=(1227,))
+    assert not manifest["complete"]
+    assert manifest["plot_failures"] == ["quality: RuntimeError: PDF export failed"]
+    assert manifest["counts"]["completed_points"] == 1
+
+
+def test_expected_point_count_does_not_replace_seed_coverage(tmp_path, monkeypatch):
+    monkeypatch.setattr(report, "_render_figures", lambda *args: ({}, [], {}))
+    manifest = report.build_report([record(seed=999)], tmp_path, expected_points=1,
+                                   expected_seeds=(1227,))
+    assert not manifest["complete"]
+
+
 def test_raw_evaluation_table_retains_metric_policies_and_per_class_results(tmp_path, monkeypatch):
     monkeypatch.setattr(report, "_render_figures", lambda *args: ({}, [], {}))
     item = record()

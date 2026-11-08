@@ -141,6 +141,17 @@ def _integer_label(value: Any, *, where: str) -> int:
     return int(value)
 
 
+def _identifier(value: Any, *, where: str) -> str:
+    # Nulls must not become the apparently valid sample/product ID "None".
+    # Floats (including NaN) and booleans are likewise ambiguous identifiers.
+    if isinstance(value, bool) or not isinstance(value, (str, numbers.Integral)):
+        raise ValueError(f"{where}: expected a nonempty string or integer ID, got {value!r}")
+    result = str(value).strip()
+    if not result:
+        raise ValueError(f"{where}: expected a nonempty string or integer ID")
+    return result
+
+
 def build_dataset_bundle(name: str, splits: Mapping[str, Any], *, revision: str,
                          strict: bool = True, audit_images: bool = True) -> DatasetBundle:
     """Validate already loaded splits (also useful for small offline fixtures).
@@ -187,10 +198,8 @@ def build_dataset_bundle(name: str, splits: Mapping[str, Any], *, revision: str,
                 raise ValueError(f"{name}/{split_name}: missing relevance key {spec.relevance_key!r}")
             value = row[spec.relevance_key]
             if name == "sop":
-                value = str(value).strip()
-                category = str(row.get("category", "")).strip()
-                if not value or not category:
-                    raise ValueError(f"sop/{split_name}: item_id and category must be nonempty")
+                value = _identifier(value, where=f"sop/{split_name} item_id")
+                category = _identifier(row.get("category"), where=f"sop/{split_name} category")
                 if value in categories and categories[value] != category:
                     raise ValueError(f"SOP item_id {value!r} occurs in multiple categories")
                 categories[value] = category
@@ -211,9 +220,8 @@ def build_dataset_bundle(name: str, splits: Mapping[str, Any], *, revision: str,
             if spec.id_key is None:
                 source_id = f"rgb-sha256:{digest}"
             else:
-                source_id = str(row.get(spec.id_key, "")).strip().replace("\\", "/")
-                if not source_id:
-                    raise ValueError(f"{name}/{split_name}: empty {spec.id_key}")
+                source_id = _identifier(row.get(spec.id_key),
+                                        where=f"{name}/{split_name} {spec.id_key}").replace("\\", "/")
             identities.append(f"{name}:{source_id}")
         if len(identities) != rows:
             raise ValueError(f"{name}/{split_name}: metadata iteration changed row count")

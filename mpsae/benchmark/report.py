@@ -447,6 +447,11 @@ def build_report(records: Sequence[Mapping[str, Any]], out_dir: str | Path, *,
         manifest.update(figures=figures, skipped=skipped, fonts=fonts)
     except Exception as error:
         manifest["skipped"].append(f"figures: {type(error).__name__}: {error}")
+    manifest["plot_failures"] = [reason for reason in manifest["skipped"]
+                                  if "Error:" in reason or reason.startswith("figures:")]
+    if manifest["complete"] is not None:
+        manifest["complete"] = bool(manifest["complete"] and not manifest["plot_failures"]
+                                    and all(row["complete"] for row in rows))
     atomic_json(out_dir / "manifest.json", manifest)
     get_logger("benchmark:report").info(
         "%d/%s evaluations, %d aggregate rows, %d figures -> %s", len(clean),

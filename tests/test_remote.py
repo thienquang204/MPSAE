@@ -115,6 +115,14 @@ def test_repo_is_recreated_and_wandb_run_resumed_after_deletion(services):
     assert state.init_arguments[-1]["resume"] == "allow"
 
 
+def test_incomplete_tracking_receipt_generates_a_new_resumable_id(services):
+    session, state = services
+    atomic_json(session.directory / "wandb.json", {"project": "cvpr"})
+    session.start()
+    assert state.init_arguments[0]["id"]
+    assert read_json(session.directory / "wandb.json")["id"] == state.init_arguments[0]["id"]
+
+
 def test_public_existing_repo_refuses_artifact_upload(services):
     session, state = services
     state.exists, state.private = True, False
@@ -231,3 +239,25 @@ def test_main_backs_up_partial_results_and_restores_sink_on_campaign_failure(ser
     assert METRIC_SINK.get() is None
     assert any(call["path_in_repo"] == "runs" for call in state.uploads)
     assert state.runs[0].finishes == [{"exit_code": 1}]
+
+
+@pytest.mark.parametrize("scientific_error", [RuntimeError("original scientific failure"), KeyboardInterrupt()])
+def test_cleanup_failure_does_not_replace_original_scientific_error(services, monkeypatch, scientific_error):
+    session, state = services
+    from mpsae.benchmark import run as runner
+
+    def fail(*args, **kwargs):
+        raise scientific_error
+
+    def fail_finish(**kwargs):
+        raise OSError("fixture backup disk failure with hf_fixture_secret")
+
+    monkeypatch.setattr(runner, "run_campaign", fail)
+    monkeypatch.setattr(session, "finish", fail_finish)
+    args = SimpleNamespace(command="run", workspace=str(session.root), device="cpu",
+                           workers=0, embed_batch_size=2, smoke=False)
+    with pytest.raises(type(scientific_error)) as caught:
+        remote.execute(session, args)
+    assert caught.value is scientific_error
+    assert METRIC_SINK.get() is None
+    assert "hf_fixture_secret" not in "".join(getattr(caught.value, "__notes__", []))

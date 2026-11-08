@@ -88,6 +88,8 @@ class CodeSource:
                                  f"{tuple(values.shape)} must share a [rows, k] shape")
             if not 0 < indices.shape[1] <= self.dim:
                 raise ValueError(f"compact k={indices.shape[1]} outside 1..{self.dim}")
+        elif getattr(values, "ndim", 0) != 2:
+            raise ValueError("dense codes must be a [rows, dim] matrix")
         elif values.shape[1] != self.dim:
             raise ValueError(f"dense codes have width {values.shape[1]}, expected {self.dim}")
         self.rows, self.k = int(values.shape[0]), int(values.shape[1])
@@ -187,7 +189,7 @@ class CodeSource:
         for start in range(0, self.rows, block):
             stop = min(start + block, self.rows)
             values = self._slice(self.values, start, stop, torch.float32)
-            mask[start:stop] = values.gt(0).any(dim=1).logical_not()
+            mask[start:stop] = values.ne(0).any(dim=1).logical_not()
         return mask
 
     def count_empty(self, *, block: int = 65536) -> int:
@@ -291,6 +293,8 @@ def encode_split(sae, features: Any, row_ids: np.ndarray | None, k: int, *,
         target = Path(cache_dir) / canonical_hash({"identity": identity, "k": k,
                                                    "rows": len(row_ids),
                                                    "row_ids": array_hash(row_ids),
+                                                   "precision": ("cuda_autocast_fp16" if device.type == "cuda"
+                                                                 else "cpu_float32"),
                                                    "hidden_dim": sae.hidden_dim})
         with exclusive_lock(target.with_suffix(".lock")):
             cached = _read_cache(target, rows=len(row_ids), k=k)
@@ -353,7 +357,8 @@ def _encode(sae, features: Any, row_ids: np.ndarray, k: int, *, device: torch.de
              "below_k_fraction": below_k / rows,
              "empty_codes": empty, "empty_fraction": empty / rows,
              "seconds": seconds, "rows_per_second": rows / max(seconds, 1e-9),
-             "precision": "autocast_float16_compute_float32_storage",
+             "precision": ("autocast_float16_compute_float32_storage" if device.type == "cuda"
+                           else "cpu_float32_compute_float32_storage"),
              "normalized": True}
     get_logger(progress_stage).info(
         "encoded %s rows at K=%d in %s | nnz mean %.2f min %d | %s empty",
@@ -412,6 +417,12 @@ def _encode_to_cache(sae, features: Any, row_ids: np.ndarray, k: int, *,
                      writer=(indices, values), progress_stage=progress_stage)
     indices.flush()
     values.flush()
+    # _encode returns the same writable maps. Close every reference before
+    # renaming; Windows otherwise refuses publication of a successful encode.
+    result.pop("indices")
+    result.pop("values")
+    indices._mmap.close()
+    values._mmap.close()
     del indices, values
     for path in (partial_indices, partial_values):
         with path.open("r+b") as handle:

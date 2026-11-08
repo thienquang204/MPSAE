@@ -69,10 +69,17 @@ def _timm_model(spec: Backbone, release: dict[str, Any], device):
                                                                    f"{release['revision']}"},
                               **extra)
     config = dict(getattr(model, "pretrained_cfg", {}) or {})
-    reported = config.get("input_size")
-    if override and reported and int(reported[-1]) != spec.input_size:
-        raise RuntimeError(f"{tag}: asked for img_size={spec.input_size} but the model reports "
-                           f"input_size={reported}")
+    if override:
+        # pretrained_cfg describes the checkpoint's original preprocessing;
+        # timm retains its native 518 input_size after constructing DINOv2 at
+        # 224. Inspect the actual graph instead of rejecting valid overrides
+        # based on metadata. Keep the original config for normalization and
+        # provenance; extraction/evaluation transforms use spec.input_size.
+        actual = getattr(getattr(model, "patch_embed", None), "img_size", None)
+        actual_size = (actual, actual) if isinstance(actual, int) else actual
+        if actual_size is None or tuple(actual_size) != (spec.input_size, spec.input_size):
+            raise RuntimeError(f"{tag}: asked for img_size={spec.input_size} but the model's "
+                               f"patch_embed.img_size={actual!r}; cannot verify the override")
     return model.eval().requires_grad_(False).to(device), config, tag, override
 
 

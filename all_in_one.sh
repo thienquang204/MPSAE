@@ -46,6 +46,10 @@ if [[ "$SKIP_SETUP" == 1 && "${#SETUP_ARGS[@]}" != 0 ]]; then
     printf 'Installer options cannot be combined with --skip-setup, --sync-only or --check\n' >&2
     exit 2
 fi
+if [[ "$SETUP_ONLY" == 1 && "$SKIP_SETUP" == 1 ]]; then
+    printf '%s\n' '--setup-only cannot be combined with --skip-setup, --sync-only or --check' >&2
+    exit 2
+fi
 if [[ "$SKIP_SETUP" == 0 ]]; then
     bash "$HERE/setup_server.sh" "${SETUP_ARGS[@]}"
 fi
