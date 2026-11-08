@@ -45,6 +45,7 @@ class RemoteSession:
         self.campaign, self.smoke = campaign, smoke
         self.paths = campaign_paths(campaign, workspace, smoke=smoke)
         self.root = self.paths["workspace"].resolve()
+        self.remote_prefix = "direct-v1/" if campaign.execution.get("storage_mode") == "direct_v1" and not smoke else ""
         self.project = configure_tracking()
         self.api = self.run = None
         self.repo = None
@@ -133,8 +134,53 @@ class RemoteSession:
         files.sort()
         for first in range(0, len(files), 100):
             self.api.upload_folder(repo_id=self.repo, repo_type="dataset", folder_path=str(folder),
-                                   path_in_repo=relative.as_posix(), allow_patterns=files[first:first + 100],
+                                   path_in_repo=self.remote_prefix + relative.as_posix(), allow_patterns=files[first:first + 100],
                                    commit_message=f"MPSAE {self.campaign.name}: {relative.as_posix()}")
+
+    def verify_backup(self, files):
+        """Fail closed before raw deletion; check immutable remote content IDs.
+
+        upload_folder returning is insufficient if a sidecar was excluded.
+        Verify LFS SHA256 or Git blob SHA1 for every required artifact.
+        """
+        import hashlib
+        from .io import sha256_file
+
+        self.ensure_repository()
+        files = list(dict.fromkeys(Path(p).resolve() for p in files))
+        if not files:
+            raise ValueError("cannot authorize raw cleanup with an empty backup")
+        for path in files:
+            if not path.is_relative_to(self.root) or not path.is_file():
+                raise ValueError(f"invalid backup artifact: {path}")
+        folders = {p.parent for p in files}
+        for folder in sorted(p for p in folders if not any(a in folders for a in p.parents)):
+            self.upload(folder)  # errors propagate, unlike best-effort reporting
+        revision = self.api.repo_info(repo_id=self.repo, repo_type="dataset").sha
+        remote_names = {self.remote_prefix + p.relative_to(self.root).as_posix(): p for p in files}
+        entries = self.api.get_paths_info(self.repo, list(remote_names), repo_type="dataset", revision=revision)
+        checked = {}
+        for entry in entries:
+            path = remote_names.get(entry.path)
+            if path is None or getattr(entry, "size", None) != path.stat().st_size:
+                raise RuntimeError(f"HF backup size mismatch: {entry.path}")
+            lfs = getattr(entry, "lfs", None)
+            if lfs:
+                expected = lfs.get("sha256") if isinstance(lfs, dict) else lfs.sha256
+                observed = sha256_file(path)
+            else:
+                expected = entry.blob_id
+                digest = hashlib.sha1(f"blob {path.stat().st_size}\0".encode())
+                with path.open("rb") as handle:
+                    for chunk in iter(lambda: handle.read(8 << 20), b""):
+                        digest.update(chunk)
+                observed = digest.hexdigest()
+            if observed != expected:
+                raise RuntimeError(f"HF backup hash mismatch: {entry.path}")
+            checked[entry.path] = expected
+        if set(checked) != set(remote_names):
+            raise RuntimeError("HF backup is missing required artifacts; raw data retained")
+        return {"repository": self.repo, "revision": revision, "files": checked}
 
     def on_task(self, name, result):
         if self.smoke:

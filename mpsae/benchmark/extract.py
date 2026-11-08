@@ -174,7 +174,8 @@ def _read_split(path: Path, source: DatasetSplit, manifest: dict[str, Any],
 def extract_bundle(spec: Backbone, bundle: DatasetBundle, out_dir: str | Path,
                    cache_dir: str | Path, *, device: str = "cuda:0", batch_size: int = 256,
                    workers: int = 0, token: str | None = None,
-                   expected_weights: dict[str, Any] | None = None) -> FeatureBundle:
+                   expected_weights: dict[str, Any] | None = None,
+                   reclaim_sink: bool = False) -> FeatureBundle:
     """Extract each active split once, then share it across methods and budgets."""
     import torch
     from torch.utils.data import DataLoader
@@ -232,6 +233,12 @@ def extract_bundle(spec: Backbone, bundle: DatasetBundle, out_dir: str | Path,
                             if target.type == "cuda" else nullcontext()
                         with torch.inference_mode(), autocast:
                             for images, labels in loader:
+                                if reclaim_sink and target.type == "cuda":
+                                    from ..embed.direct import forward_batches
+                                    features = forward_batches(network, images, spec, target)
+                                    sink.write(features, labels.cpu().numpy())
+                                    progress.advance(len(images))
+                                    continue
                                 images = images.to(target, non_blocking=True)
                                 features = network(images) if spec.recipe == "mrl" else \
                                     network.forward_head(network.forward_features(images), pre_logits=True)
@@ -247,7 +254,13 @@ def extract_bundle(spec: Backbone, bundle: DatasetBundle, out_dir: str | Path,
                     "deviations": ["downstream evaluation uses deterministic PIL bilinear RGB "
                                    "preprocessing for every split; no FFCV train augmentation"],
                 })
+                if reclaim_sink:
+                    from ..embed.direct import release_sink
+                    release_sink(sink, features, labels)
             loaded[split_name] = _read_split(path, source, existing, cache_dir)
+            if reclaim_sink:
+                from ..embed.direct import reclaim_verified_writer
+                reclaim_verified_writer(cache_dir, existing)
     finally:
         del network
         torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = previous_tf32

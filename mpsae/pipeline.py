@@ -182,6 +182,10 @@ def stage_env(options: PipelineOptions) -> dict[str, Any]:
                         *(((("ffcv", "the CSRv2 embedding recipe"),
                             ("cupy", "FFCV GPU normalization")) if needs_ffcv else ()))):
         try:
+            if module == "ffcv":
+                from .ffcv_compat import prepare_ffcv
+
+                prepare_ffcv()
             __import__(module)
         except Exception as error:
             problems.append(f"missing {module} (needed for {why}): {error}")

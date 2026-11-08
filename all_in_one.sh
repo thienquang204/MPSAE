@@ -33,7 +33,7 @@ Usage: bash all_in_one.sh [options]
   --sync-only    Upload existing results without training.
   --check        Check/create the private repo and check W&B credentials.
   --smoke        Synthetic rehearsal; no remote uploads or W&B writes.
-  --cuda auto|12.6|12.8|12.9 --python PATH --skip-system-packages
+  --cuda auto|13.0|12.6|12.8|12.9 --python PATH --skip-system-packages
                  Forwarded to setup_server.sh for flexible installation.
   --config PATH --env-file PATH --workspace PATH --device cuda:0
 Fill HF_TOKEN (write access) and optionally WANDB_TOKEN in .env before running.

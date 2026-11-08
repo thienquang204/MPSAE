@@ -6,6 +6,7 @@ extract/encode/search functions under no_grad; there is no adaptation path.
 from __future__ import annotations
 
 from dataclasses import replace
+from contextlib import nullcontext
 from datetime import datetime, timezone
 import gc
 from pathlib import Path
@@ -25,7 +26,10 @@ EVALUATION_VERSION = "frozen-transfer-ranking-v1"
 
 def campaign_workspace(workspace: str | Path, campaign: Campaign, smoke: bool) -> Path:
     root = Path(workspace)
-    return root / f"smoke-{campaign.name}" if smoke else root
+    if smoke:
+        return root / f"smoke-{campaign.name}"
+    # Different pixels/row selection from historical FFCV: never reuse its fits.
+    return root / "direct-v1" if campaign.execution.get("storage_mode") == "direct_v1" else root
 
 
 def campaign_paths(campaign: Campaign, workspace: str | Path, *, smoke=False) -> dict[str, Path]:
@@ -305,11 +309,13 @@ def run_campaign(campaign: Campaign, workspace: str | Path, *, device="cuda:0",
 
     paths = campaign_paths(campaign, workspace, smoke=smoke)
     root = paths["workspace"]
+    direct = campaign.execution.get("storage_mode") == "direct_v1" and not smoke
     Paths(root).create()
     paths["state"].mkdir(parents=True, exist_ok=True)
     setup_logging(root / "logs", name=campaign.name)
     log = get_logger("campaign")
-    with exclusive_lock(paths["state"] / "campaign.lock", timeout=0):
+    with exclusive_lock(paths["state"] / "campaign.lock", timeout=0), (
+            exclusive_lock(root / "state" / "direct-workspace.lock", timeout=0) if direct else nullcontext()):
         plan = campaign.plan()
         try:
             commit = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
@@ -365,7 +371,7 @@ def run_campaign(campaign: Campaign, workspace: str | Path, *, device="cuda:0",
                                        "fits with imagenet.enabled=false for evaluation-only CPU work")
                 if not campaign.imagenet["prepare"]:
                     raise FileNotFoundError("ImageNet feature archives missing with imagenet.prepare=false")
-                if any(BACKBONES[name].recipe == "csrv2" for name in missing_features):
+                if not direct and any(BACKBONES[name].recipe == "csrv2" for name in missing_features):
                     import importlib.util
 
                     missing_imports = [module for module in ("ffcv", "cupy")
@@ -381,8 +387,12 @@ def run_campaign(campaign: Campaign, workspace: str | Path, *, device="cuda:0",
                     # its compiled JPEG/OpenCV/CUDA dependencies are broken.
                     import importlib
 
+                    from ..ffcv_compat import prepare_ffcv
+
                     for module in ("ffcv", "cupy"):
                         try:
+                            if module == "ffcv":
+                                prepare_ffcv()
                             importlib.import_module(module)
                         except Exception as error:
                             raise RuntimeError(
@@ -397,13 +407,18 @@ def run_campaign(campaign: Campaign, workspace: str | Path, *, device="cuda:0",
                 missing_imports = [module for module in required if importlib.util.find_spec(module) is None]
                 if missing_imports:
                     raise RuntimeError(f"missing benchmark dependencies: {', '.join(missing_imports)}")
-            if campaign.downstream["enabled"] and not smoke:
+            if campaign.downstream["enabled"] and not smoke and not direct:
                 for name in campaign.downstream["datasets"]:
                     datasets[name] = task(f"dataset/{name}", lambda n=name: load_dataset_bundle(
                         n, root / "cache", revision=campaign.downstream["revisions"].get(n, "main"),
                         token=os.environ.get("HF_TOKEN")))
 
             prepared = True
+            if direct and campaign.imagenet["enabled"]:
+                from .storage import prepare_sources
+                prepare_sources(campaign, workspace, root, device=device, workers=workers,
+                                batch_size=embed_batch_size, observer=observer, task=task)
+                missing_features = []
             if campaign.imagenet["enabled"] and missing_features and not smoke:
                 prepared = task("imagenet/prepare", lambda: stage_imagenet(options)) is not None
                 if prepared and any(BACKBONES[n].recipe == "csrv2" for n in missing_features):
@@ -502,7 +517,7 @@ def run_campaign(campaign: Campaign, workspace: str | Path, *, device="cuda:0",
                             "complete": e1 is not None, "missing": [],
                             "has_train_log": (out / "train.jsonl").is_file(),
                             "code_version": checkpoint["source_code_version"]})
-                    if not campaign.downstream["enabled"] or cell.k not in campaign.budgets(
+                    if direct or not campaign.downstream["enabled"] or cell.k not in campaign.budgets(
                             "downstream", "train_k", name):
                         del model
                         continue
@@ -544,6 +559,11 @@ def run_campaign(campaign: Campaign, workspace: str | Path, *, device="cuda:0",
                     del model
                     if str(device).startswith("cuda"):
                         torch.cuda.empty_cache()
+                persist()
+            if direct and campaign.downstream["enabled"]:
+                from .storage import run_targets
+                run_targets(campaign, root, catalog, device=device, workers=workers,
+                            batch_size=embed_batch_size, observer=observer, task=task)
                 persist()
         except BaseException as error:
             if not state["failures"]:

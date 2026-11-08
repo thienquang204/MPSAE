@@ -247,7 +247,8 @@ def open_npz_memmap(path: str | Path, cache_dir: str | Path, *,
                     expected_sha256: str | None = None) -> tuple[Any, Any, dict[str, Any]]:
     """Return ``(data, labels, metadata)`` with ``data`` memory-mapped.
 
-    An uncompressed NPZ member cannot be mmapped directly, so the payload is
+    Uncompressed float32 NPZ members are mapped at their ZIP/NPY byte offset,
+    without a second copy. Compressed or converted payloads are
     extracted once into ``cache_dir`` as a plain ``.npy`` and reused. The
     extraction is keyed by the archive digest, guarded by a lock, and only
     published after a successful fsync, so an interrupted run never leaves a
@@ -263,6 +264,9 @@ def open_npz_memmap(path: str | Path, cache_dir: str | Path, *,
         observed = sha256_file(path)
         if observed != expected_sha256:
             raise RuntimeError(f"{path} digest {observed} differs from the expected {expected_sha256}")
+    direct = _map_stored_npz(path, digest)
+    if direct is not None:
+        return direct
     target = cache_dir / digest
     features_npy, receipt_path = target / "data.npy", target / "cache.json"
     with exclusive_lock(target.with_suffix(".lock")):
@@ -337,6 +341,58 @@ def open_npz_memmap(path: str | Path, cache_dir: str | Path, *,
     return data, labels, {"rows": len(data), "dim": int(data.shape[1]),
                           "sha256": digest, "label_key": receipt["label_key"],
                           "cache": str(features_npy)}
+
+
+def _map_stored_npz(path, digest):
+    """Map ZIP_STORED NPY data, including NumPy's ZIP64 local headers."""
+    import struct
+    import zipfile
+    import numpy as np
+
+    with zipfile.ZipFile(path) as archive:
+        if "data.npy" not in archive.namelist():
+            return None
+        member = archive.getinfo("data.npy")
+        if member.compress_type != zipfile.ZIP_STORED or member.flag_bits & 1:
+            return None
+        with path.open("rb") as handle:
+            handle.seek(member.header_offset)
+            header = handle.read(30)
+            if len(header) != 30 or header[:4] != b"PK\x03\x04":
+                raise ValueError(f"{path}: invalid ZIP local header")
+            name_size, extra_size = struct.unpack_from("<HH", header, 26)
+            payload = member.header_offset + 30 + name_size + extra_size
+            handle.seek(payload)
+            shape, fortran, dtype = _read_npy_header(handle)
+            offset = handle.tell()
+        dtype = np.dtype(dtype)
+        if dtype != np.dtype("float32") or fortran:
+            return None
+        if len(shape) != 2 or min(shape) <= 0:
+            raise ValueError(f"{path}: invalid embedding shape")
+        if offset + int(np.prod(shape)) * dtype.itemsize != payload + member.file_size:
+            raise ValueError(f"{path}: truncated or malformed NPY member")
+        label_key = "labels" if "labels.npy" in archive.namelist() else "label"
+        with archive.open(label_key + ".npy") as incoming:
+            raw_labels = np.load(incoming, allow_pickle=False).reshape(-1)
+        if raw_labels.dtype.kind not in "iu":
+            raise ValueError(f"{path}: labels must have an integer dtype")
+        if raw_labels.dtype.kind == "u" and raw_labels.size and raw_labels.max() > np.iinfo(np.int64).max:
+            raise ValueError(f"{path}: labels exceed int64 range")
+        labels = raw_labels.astype(np.int64)
+        if len(labels) != shape[0]:
+            raise ValueError(f"{path}: rows and labels disagree")
+    data = np.memmap(path, mode="r", dtype=dtype, offset=offset, shape=shape)
+    try:
+        step = max(1, (64 << 20) // (shape[1] * 4))
+        for start in range(0, len(data), step):
+            if not np.isfinite(data[start:start + step]).all():
+                raise ValueError(f"{path}: refusing nonfinite embeddings")
+    except BaseException:
+        data._mmap.close()
+        raise
+    return data, labels, {"rows": len(data), "dim": shape[1], "sha256": digest,
+                          "label_key": label_key, "cache": str(path), "storage": "zip_mmap"}
 
 
 def save_npz(path: str | Path, *, data, labels, extra: dict[str, Any] | None = None) -> str:

@@ -151,7 +151,8 @@ def _copy_shard(path: Path, directory: Path, synsets: list[str], *, split: str,
 
 
 def _materialise_split(split: str, root: Path, release: dict[str, Any], synsets: list[str], *,
-                       download: bool, token: str | None) -> dict[str, Any]:
+                       download: bool, token: str | None,
+                       reserve_bytes: int = 512 << 20) -> dict[str, Any]:
     """Copy every shard of one split into ``<root>/<folder>/<synset>/``."""
     log = get_logger(f"imagenet:{split}")
     directory = Path(root) / SPLIT_FOLDER[split]
@@ -176,7 +177,8 @@ def _materialise_split(split: str, root: Path, release: dict[str, Any], synsets:
             remaining = sum(int(release["files"][name].get("size") or 0) for name in pending)
             # JPEG bytes land next to the parquet copy; each parquet shard is
             # deleted once written, so the peak is one shard plus the output.
-            require_disk(directory, int(remaining * 1.1), what=f"ImageNet {split} images")
+            require_disk(directory, int(remaining * 1.1), reserve_bytes=reserve_bytes,
+                         what=f"ImageNet {split} images + next-stage reserve")
         rows_done = sum(int(entry["rows"]) for entry in done.values())
         progress = Progress(EXPECTED_ROWS[split], stage=f"imagenet:{split}", what="images",
                             done=rows_done)
@@ -250,7 +252,8 @@ def _count_images(directory: Path) -> dict[str, int]:
 
 def prepare_imagenet(root: str | Path, *, token: str | None = None, revision: str = "main",
                      download: bool = True, splits: tuple[str, ...] = ("train", "validation"),
-                     state_dir: str | Path | None = None) -> dict[str, Any]:
+                     state_dir: str | Path | None = None,
+                     reserve_bytes: int = 512 << 20) -> dict[str, Any]:
     """Download ImageNet-1K and write ``<root>/{train,val}/n########/*.JPEG``.
 
     Returns the provenance every later stage records: the immutable dataset
@@ -279,7 +282,7 @@ def prepare_imagenet(root: str | Path, *, token: str | None = None, revision: st
                 "classes": CLASSES, "classes_sha256": canonical_hash(synsets),
                 "first_class": synsets[0], "last_class": synsets[-1],
                 "splits": {split: _materialise_split(split, root, release, synsets,
-                                                     download=download, token=token)
+                                                     download=download, token=token, reserve_bytes=reserve_bytes)
                            for split in splits}}
 
     if state_dir is None:

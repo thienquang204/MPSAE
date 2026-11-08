@@ -20,7 +20,8 @@ IMAGENET_DEFAULTS = {"enabled": True, "prepare": True, "train_k": None,
 DOWNSTREAM_DEFAULTS = {"enabled": True, "datasets": list(DATASET_NAMES),
                       "train_k": None, "eval_k": None, "mode": "frozen", "revisions": {}}
 EXECUTION_DEFAULTS = {"train_missing": True, "continue_on_error": True,
-                     "retain_codes": False, "max_steps": 0}
+                     "retain_codes": False, "max_steps": 0,
+                     "storage_mode": "legacy", "cleanup_raw": False}
 
 
 def _section(value, defaults, name):
@@ -83,6 +84,10 @@ class Campaign:
                      _section(payload.get("execution", {}), EXECUTION_DEFAULTS, "execution"))
         if result.downstream["mode"] != "frozen":
             raise ValueError("only downstream.mode: frozen is supported; no target-data training")
+        if result.execution["storage_mode"] not in ("legacy", "direct_v1"):
+            raise ValueError("execution.storage_mode must be legacy or direct_v1")
+        if result.execution["cleanup_raw"] and result.execution["storage_mode"] != "direct_v1":
+            raise ValueError("cleanup_raw requires storage_mode: direct_v1")
         if result.imagenet["enabled"] and result.imagenet["e2"] and not result.imagenet["e1"]:
             raise ValueError("imagenet.e2 requires e1: true (the anchor measurement is reused)")
         if not result.imagenet["enabled"] and not result.downstream["enabled"]:
@@ -141,6 +146,10 @@ class Campaign:
         from dataclasses import asdict
 
         payload = asdict(self)
+        # Preserve historical plan IDs when the new storage path is not selected.
+        if payload["execution"]["storage_mode"] == "legacy" and not payload["execution"]["cleanup_raw"]:
+            payload["execution"].pop("storage_mode")
+            payload["execution"].pop("cleanup_raw")
         payload["presets"] = {name: asdict(BACKBONES[name].preset) for name in self.backbones}
         payload["resolved_budgets"] = {name: {
             "imagenet_train_k": self.budgets("imagenet", "train_k", name),
@@ -153,9 +162,22 @@ class Campaign:
         sparse = sum(len(self.budgets("downstream", "eval_k", c.backbone))
                      for c in self.downstream_cells()) * len(self.downstream["datasets"])
         dense = len(self.backbones) * len(self.downstream["datasets"]) if self.downstream["enabled"] else 0
-        return {"name": self.name, "mode": "frozen", "plan_id": canonical_hash(self.resolved()),
+        plan = {"name": self.name, "mode": "frozen", "plan_id": canonical_hash(self.resolved()),
                 "source_cells": len(self.source_cells()), "downstream_sparse_points": sparse,
                 "downstream_dense_points": dense, "config": self.resolved()}
+        if self.execution.get("storage_mode") == "direct_v1":
+            rows = 1_281_167 + 50_000
+            feature_bytes = {n: rows * (BACKBONES[n].dim * 4 + 8) for n in self.backbones}
+            checkpoints = sum((BACKBONES[c.backbone].dim * BACKBONES[c.backbone].preset.hidden_dim
+                               + BACKBONES[c.backbone].dim + BACKBONES[c.backbone].preset.hidden_dim) * 12
+                              for c in self.source_cells())
+            plan["storage_estimate"] = {"imagenet_features_bytes": feature_bytes,
+                "total_imagenet_features_bytes": sum(feature_bytes.values()),
+                "active_writer_upper_bytes": max(feature_bytes.values()),
+                "model_and_adam_tensor_bytes": checkpoints, "reserve_bytes": 10 << 30,
+                "excluded": "raw images, download/Arrow caches, model weights, environment, "
+                            "downstream features, sparse evaluation cache, checkpoint overhead"}
+        return plan
 
 
 def load_campaign(path: str | Path) -> Campaign:

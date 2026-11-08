@@ -1,5 +1,5 @@
 # General dependencies. For the complete native NVIDIA environment, run
-# bash setup_server.sh (selects matching cu126/cu128/cu129 and server constraints).
+# bash setup_server.sh (selects matching cu130 and server constraints).
 #
 # FAISS is deliberately absent. Its GPU wheels lag new architectures, and on
 # L2-normalised vectors a blocked FP32 GEMM argmax is exactly equivalent to
@@ -22,8 +22,8 @@ psutil>=5.9
 # Optional: metric streaming. The pipeline runs fine without it.
 wandb>=0.17
 
-# Required by CSRv2 source extraction (including rn18 in the default campaign).
-# Installed with CuPy by requirements-server.txt after system dependencies.
+# Optional historical FFCV extraction only; the default direct campaign does not import it.
+# See requirements-legacy-ffcv.txt for a CUDA 12 environment.
 # ffcv==1.0.2
 
 # Development only.

@@ -118,12 +118,16 @@ def _token(token: str | None) -> str | None:
 
 def library_versions() -> dict[str, str | None]:
     """Versions that can change a feature value, for the manifest."""
+    from importlib.metadata import PackageNotFoundError, version
+
     versions: dict[str, str | None] = {}
     for module in ("numpy", "torch", "torchvision", "timm", "ffcv", "PIL", "huggingface_hub",
                    "pyarrow"):
         try:
-            versions[module] = str(__import__(module).__version__)
-        except Exception:
+            # Reading provenance must not import an optional legacy FFCV/Numba
+            # stack into a direct JPEG run (especially an upgraded environment).
+            versions[module] = version("pillow" if module == "PIL" else module)
+        except PackageNotFoundError:
             versions[module] = None
     return versions
 

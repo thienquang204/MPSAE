@@ -241,6 +241,9 @@ def test_missing_ffcv_fails_before_downloading_any_dataset(tmp_path, monkeypatch
 
 def test_broken_installed_ffcv_fails_before_downloading_any_dataset(tmp_path, monkeypatch, heavy_boundaries):
     from mpsae.report import figures
+    from mpsae import ffcv_compat
+
+    monkeypatch.setattr(ffcv_compat, "prepare_ffcv", lambda: "test")
 
     campaign = Campaign.from_mapping({
         "name": "broken_dependency", "backbones": ["rn18"], "methods": ["csr"],
@@ -379,6 +382,51 @@ def test_shared_features_are_rejected_for_another_source_backbone_revision(tmp_p
     assert failed["state"] == "failed" and "different backbone weights" in failed["error"]
     assert heavy_boundaries.fit_calls == []
     assert not read_json(Path(status["report_manifest"]))["complete"]
+
+
+def test_direct_campaign_processes_targets_sequentially_and_resumes_without_download(
+        tmp_path, monkeypatch, heavy_boundaries):
+    from mpsae.benchmark import data, extract, storage
+    from mpsae.embed.archive import finalize_archive
+    campaign = replace(_campaign(), execution={**_campaign().execution,
+                                              "storage_mode": "direct_v1", "cleanup_raw": True})
+    root = run.campaign_paths(campaign, tmp_path)["workspace"]
+    for cell in campaign.source_cells():
+        _write_source(root, cell)
+    events = []
+    original_load = data.load_dataset_bundle
+    original_extract = extract.extract_bundle
+    def load(name, cache, **kwargs):
+        events.append(("load", name))
+        (cache / "hf_datasets").mkdir(parents=True)
+        (cache / "hf_datasets" / "raw.arrow").write_bytes(b"raw")
+        return original_load(name, cache, **kwargs)
+    def embeddings(spec, dataset, out, cache, **kwargs):
+        bundle = original_extract(spec, dataset, out, cache, **kwargs)
+        for split in {id(bundle.gallery): bundle.gallery, id(bundle.query): bundle.query}.values():
+            split.path = out / dataset.name / spec.name / f"{split.name}.npz"
+            split.manifest = finalize_archive(split.path, split.features, split.labels,
+                manifest={"ids_sha256": canonical_hash(split.ids)})
+        events.append(("extract", dataset.name))
+        return bundle
+    monkeypatch.setattr(data, "load_dataset_bundle", load)
+    monkeypatch.setattr(extract, "extract_bundle", embeddings)
+    def verified(files):
+        name = next(p.relative_to(root / "benchmarks").parts[0] for p in files)
+        events.append(("backup", name))
+        assert all(p.is_file() for p in files)
+        return {"verified": name}
+    observer = SimpleNamespace(on_task=lambda *a: None, verify_backup=verified)
+    result = run.run_campaign(campaign, tmp_path, device="cpu", workers=0, observer=observer)
+    assert result["complete"]
+    assert events == [(action, name) for name in campaign.downstream["datasets"]
+                      for action in ("load", "extract", "backup")]
+    assert not list((root / "cache" / "raw_datasets").rglob("raw.arrow"))
+    events.clear()
+    result = run.run_campaign(campaign, tmp_path, device="cpu", workers=0, observer=observer)
+    assert result["complete"]
+    assert events == [("backup", name) for name in campaign.downstream["datasets"]]
+    assert heavy_boundaries.fit_calls == []
 
 
 def test_real_cpu_smoke_campaign_when_torch_is_available(tmp_path, monkeypatch):

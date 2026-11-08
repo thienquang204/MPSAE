@@ -25,17 +25,22 @@ select_cuda_stack() {
         esac
     done
     case "$requested" in
-        auto) CUDA_FLAVOR="cu$required" ;;
+        auto) CUDA_FLAVOR=cu130 ;;
         12.6) CUDA_FLAVOR=cu126 ;;
         12.8) CUDA_FLAVOR=cu128 ;;
         12.9) CUDA_FLAVOR=cu129 ;;
-        *) die '--cuda must be auto, 12.6, 12.8 or 12.9' ;;
+        13.0) CUDA_FLAVOR=cu130 ;;
+        *) die '--cuda must be auto, 13.0, 12.6, 12.8 or 12.9' ;;
     esac
+    if [[ "$CUDA_FLAVOR" == cu130 && ";$capabilities;" == *";7.0;"* ]]; then
+        die "CUDA 13 does not support Volta sm_70; use --cuda 12.6"
+    fi
     (( ${CUDA_FLAVOR#cu} >= required )) || die "selected GPU needs CUDA ${required:0:2}.${required:2:1} or newer; --cuda $requested is too old"
     case "$CUDA_FLAVOR" in
         cu126) CUDA_VERSION=12.6; minimum_driver=560.35.05 ;;
         cu128) CUDA_VERSION=12.8; minimum_driver=570.124.06 ;;
         cu129) CUDA_VERSION=12.9; minimum_driver=575.57.08 ;;
+        cu130) CUDA_VERSION=13.0; minimum_driver=580.65.06 ;;
     esac
     [[ "$(printf '%s\n' "$minimum_driver" "$driver_version" | sort -V | head -1)" == "$minimum_driver" ]] \
         || die "CUDA $CUDA_VERSION profile needs NVIDIA driver >= $minimum_driver; found $driver_version. Ask the server provider to update the driver."
@@ -50,13 +55,13 @@ usage() {
 Usage: bash setup_server.sh [options]
   --dry-run               Inspect the server and print the plan without changes.
   --python PATH           Python 3.10, 3.11 or 3.12 for creating .venv.
-  --cuda VERSION          auto (default), 12.6, 12.8 or 12.9.
-  --skip-system-packages  Admin already installed the selected CUDA + JPEG/OpenCV headers.
+  --cuda VERSION          auto (CUDA 13.0), 13.0, 12.6, 12.8 or 12.9.
+  --skip-system-packages  Admin already installed the selected CUDA + Python development headers.
   --help                  Show this help.
 
 Target: Ubuntu 22.04/24.04, x86_64 or ARM64/SBSA, NVIDIA GPUs including
 A100, RTX A6000, RTX 4090/5090, H100/H200 and GB300.
-Installs the selected CUDA Toolkit (toolkit only), PyTorch, FFCV, CuPy, all project
+Installs the selected CUDA Toolkit (toolkit only), PyTorch, direct JPEG extraction, all project
 requirements, and verifies GPU operations including the CUDA extension.
 Root and sudo accounts are supported. The NVIDIA driver is managed by the host.
 HELP
@@ -159,7 +164,7 @@ main() {
         "${admin[@]}" apt-get update
         "${admin[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             build-essential pkg-config git curl ca-certificates tmux \
-            python3 python3-dev python3-venv libturbojpeg0-dev libopencv-dev libgl1 "$glib_package"
+            python3 python3-dev python3-venv libjpeg-dev libgl1 "$glib_package"
         if [[ ! -x "${MPSAE_CUDA_HOME:-/usr/local/cuda-$CUDA_VERSION}/bin/nvcc" ]]; then
             step "CUDA Toolkit $CUDA_VERSION from NVIDIA (no driver package)"
             temporary_dir="$(mktemp -d)"
@@ -176,7 +181,6 @@ main() {
     export CUDA_HOME="${MPSAE_CUDA_HOME:-/usr/local/cuda-$CUDA_VERSION}"
     [[ -x "$CUDA_HOME/bin/nvcc" ]] || die "CUDA $CUDA_VERSION compiler missing at $CUDA_HOME/bin/nvcc; install the toolkit or set MPSAE_CUDA_HOME"
     "$CUDA_HOME/bin/nvcc" --version | grep -Fq "release $CUDA_VERSION," || die "CUDA_HOME must point to CUDA Toolkit $CUDA_VERSION"
-    pkg-config --exists opencv4 libturbojpeg || die 'OpenCV/libturbojpeg development packages missing'
     export PATH="$CUDA_HOME/bin:$PATH"
     export LD_LIBRARY_PATH="$CUDA_HOME/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     export TORCH_CUDA_ARCH_LIST="$TORCH_ARCHES"
@@ -194,21 +198,21 @@ main() {
     # python3-dev alone does not provide that interpreter's extension headers.
     "$venv_python" -c 'import sys, sysconfig; from pathlib import Path; header = Path(sysconfig.get_path("include")) / "Python.h"; sys.exit(0 if header.is_file() else f"Missing {header}. Install python{sys.version_info.major}.{sys.version_info.minor}-dev (and the matching -venv package), or choose a Python with development headers using --python.")'
     step 'Python packaging tools'
-    "$venv_python" -m pip install --upgrade pip 'setuptools==80.9.0' 'wheel==0.45.1'
+    "$venv_python" -m pip install --no-cache-dir --upgrade pip 'setuptools==80.9.0' 'wheel==0.45.1'
     # torchvision depends on NumPy. Install the shared ABI first, so the initial
     # Torch install cannot leave NumPy 2 in a half-configured environment.
-    "$venv_python" -m pip install -c constraints/server.txt numpy
+    "$venv_python" -m pip install --no-cache-dir -c constraints/server.txt numpy
     step 'pinned GPU-compatible PyTorch'
     # The official ARM64 torchvision wheels have no +cuXXX local suffix.
     vision_spec="torchvision==$TORCHVISION_VERSION+$CUDA_FLAVOR"
     [[ "$repo_arch" != sbsa ]] || vision_spec="torchvision==$TORCHVISION_VERSION"
-    "$venv_python" -m pip install -c constraints/server.txt --index-url "$TORCH_INDEX" \
+    "$venv_python" -m pip install --no-cache-dir -c constraints/server.txt --index-url "$TORCH_INDEX" \
         "torch==$TORCH_VERSION+$CUDA_FLAVOR" "$vision_spec"
     if [[ "$repo_arch" == sbsa ]]; then
-        "$venv_python" -m pip install --force-reinstall --no-deps --index-url "$TORCH_INDEX" "$vision_spec"
+        "$venv_python" -m pip install --no-cache-dir --force-reinstall --no-deps --index-url "$TORCH_INDEX" "$vision_spec"
     fi
-    step 'all experiment dependencies, including FFCV and CuPy'
-    "$venv_python" -m pip install --no-build-isolation -r requirements-server.txt
+    step 'direct-extraction and experiment dependencies (no FFCV/CuPy required)'
+    "$venv_python" -m pip install --no-cache-dir --no-build-isolation -r requirements-server.txt
     "$venv_python" -m pip check
 
     step 'runtime environment'
@@ -220,7 +224,7 @@ main() {
         printf 'export TORCH_CUDA_ARCH_LIST=%q\nexport MPSAE_CUDA_VERSION=%q\n' "$TORCH_ARCHES" "$CUDA_VERSION"
         printf 'export MAX_JOBS="${MAX_JOBS:-4}"\nexport MPLBACKEND=Agg\n'
     } > env.sh
-    step 'GPU, CuPy, FFCV pipeline and compiled retrieval checks'
+    step 'GPU, direct JPEG pipeline and compiled retrieval checks'
     "$venv_python" -m mpsae.server --profile-output .venv/server-profile.json
     "$venv_python" -m pip freeze > .venv/server-requirements.freeze.txt
     if [[ ! -e .env ]]; then

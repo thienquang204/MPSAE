@@ -25,15 +25,15 @@ def shell(program, *arguments, cwd=ROOT, env=None):
                           cwd=cwd, env=env, text=True, capture_output=True, timeout=30)
 
 
-@pytest.mark.parametrize("driver", ["560.35.05", "570.86.15", "580.95.05", "600.1"])
+@pytest.mark.parametrize("driver", ["580.65.06", "580.95.05", "600.1"])
 def test_ampere_stack_stays_on_pinned_cuda_for_newer_drivers(driver):
     result = shell('source setup_server.sh; select_cuda_stack "$1" 8.0; '
                    'printf "%s|%s|%s|%s" "$CUDA_VERSION" "$TORCH_VERSION" "$TORCHVISION_VERSION" "$TORCH_INDEX"', driver)
     assert result.returncode == 0, result.stderr
-    assert result.stdout == "12.6|2.9.1|0.24.1|https://download.pytorch.org/whl/cu126"
+    assert result.stdout == "13.0|2.9.1|0.24.1|https://download.pytorch.org/whl/cu130"
 
 
-@pytest.mark.parametrize("driver", ["535.104.05", "560.1", "not-a-driver"])
+@pytest.mark.parametrize("driver", ["535.104.05", "560.35.05", "570.124.06", "580.65.05", "not-a-driver"])
 def test_old_or_invalid_driver_fails_before_installing(driver):
     result = shell('source setup_server.sh; select_cuda_stack "$1" 8.0; echo SHOULD_NOT_REACH', driver)
     assert result.returncode != 0
@@ -41,10 +41,10 @@ def test_old_or_invalid_driver_fails_before_installing(driver):
 
 
 @pytest.mark.parametrize("gpu,capabilities,cuda", [
-    ("A100", "8.0", "12.6"), ("RTX A6000", "8.6", "12.6"),
-    ("RTX 4090", "8.9", "12.6"), ("H100", "9.0", "12.6"),
-    ("H200", "9.0", "12.6"), ("RTX 5090", "12.0", "12.8"),
-    ("GB300", "10.3", "12.9"), ("mixed", "8.0;12.0;10.3;8.0", "12.9"),
+    ("A100", "8.0", "13.0"), ("RTX A6000", "8.6", "13.0"),
+    ("RTX 4090", "8.9", "13.0"), ("H100", "9.0", "13.0"),
+    ("H200", "9.0", "13.0"), ("RTX 5090", "12.0", "13.0"),
+    ("GB300", "10.3", "13.0"), ("mixed", "8.0;12.0;10.3;8.0", "13.0"),
 ])
 def test_gpu_selection_uses_capability_including_blackwell_and_mixed_hosts(gpu, capabilities, cuda):
     result = shell('source setup_server.sh; select_cuda_stack 580.95.05 "$1"; '
@@ -88,7 +88,7 @@ if [[ "$*" == *"Missing {header}"* && "${TEST_FAIL_HEADERS:-0}" == 1 ]]; then
     echo 'fixture matching Python.h missing' >&2
     exit 29
 fi
-if [[ "$*" == *"pip install --no-build-isolation -r requirements-server.txt"* && "${TEST_FAIL_INSTALL:-0}" == 1 ]]; then
+if [[ "$*" == *"pip install --no-cache-dir --no-build-isolation -r requirements-server.txt"* && "${TEST_FAIL_INSTALL:-0}" == 1 ]]; then
     echo 'fixture FFCV build failed' >&2
     exit 17
 fi
@@ -99,7 +99,7 @@ fi
 if [[ "$*" == '-m pip freeze' ]]; then printf 'fixture==1\n'; fi
 ''')
     cuda = tmp_path / "cuda"
-    _executable(cuda / "bin" / "nvcc", '#!/usr/bin/env bash\necho "Cuda compilation tools, release ${TEST_CUDA_VERSION:-12.6}, fixture"\n')
+    _executable(cuda / "bin" / "nvcc", '#!/usr/bin/env bash\necho "Cuda compilation tools, release ${TEST_CUDA_VERSION:-13.0}, fixture"\n')
     (tmp_path / ".env").write_text("HF_TOKEN=fixture-keep-existing\n")
     (tmp_path / ".env.example").write_text("HF_TOKEN=\n")
     checkpoint = tmp_path / "work" / "runs" / "existing.pt"
@@ -127,7 +127,7 @@ def test_dry_run_has_no_installation_side_effects(installation):
     root, installer, python, env, harness = installation
     result = shell(harness, installer.as_posix(), "--dry-run", "--python", python.as_posix(), cwd=root, env=env)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "CUDA Toolkit: 12.6" in result.stdout
+    assert "CUDA Toolkit: 13.0" in result.stdout
     assert not (root / ".setup-logs").exists()
     assert not (root / "env.sh").exists()
     assert not (root / "calls.txt").exists()
@@ -156,9 +156,9 @@ def test_success_verifies_full_environment_and_keeps_existing_artifacts(installa
     assert result.returncode == 0, result.stdout + result.stderr
     assert "Setup complete." in result.stdout
     calls = (root / "calls.txt").read_text()
-    assert "torch==2.9.1+cu126 torchvision==0.24.1+cu126" in calls
+    assert "torch==2.9.1+cu130 torchvision==0.24.1+cu130" in calls
     assert "--no-build-isolation -r requirements-server.txt" in calls
-    assert calls.index("-m pip install -c constraints/server.txt numpy") < calls.index("torch==2.9.1+cu126")
+    assert calls.index("-m pip install --no-cache-dir -c constraints/server.txt numpy") < calls.index("torch==2.9.1+cu130")
     assert calls.index("-m pip check") < calls.index("-m mpsae.server") < calls.index("-m pip freeze")
     assert (root / "env.sh").is_file()
     assert (root / ".venv/server-requirements.freeze.txt").read_text().strip() == "fixture==1"
@@ -168,8 +168,8 @@ def test_success_verifies_full_environment_and_keeps_existing_artifacts(installa
 
 
 @pytest.mark.parametrize("name,capability,cpu,cuda,vision", [
-    ("RTX 5090", "12.0", "x86_64", "12.8", "torchvision==0.24.1+cu128"),
-    ("GB300", "10.3", "aarch64", "12.9", "torchvision==0.24.1"),
+    ("RTX 5090", "12.0", "x86_64", "13.0", "torchvision==0.24.1+cu130"),
+    ("GB300", "10.3", "aarch64", "13.0", "torchvision==0.24.1"),
 ])
 def test_installer_selects_correct_wheels_and_compiler_architecture(installation, name, capability, cpu, cuda, vision):
     root, installer, python, env, harness = installation
@@ -188,8 +188,8 @@ def test_installer_selects_correct_wheels_and_compiler_architecture(installation
 
 
 @pytest.mark.parametrize("cpu,gpu,capability,cuda,repo_arch,distro,glib", [
-    ("x86_64", "A100", "8.0", "12.6", "x86_64", "ubuntu2204", "libglib2.0-0"),
-    ("aarch64", "GB300", "10.3", "12.9", "sbsa", "ubuntu2404", "libglib2.0-0t64"),
+    ("x86_64", "A100", "8.0", "13.0", "x86_64", "ubuntu2204", "libglib2.0-0"),
+    ("aarch64", "GB300", "10.3", "13.0", "sbsa", "ubuntu2404", "libglib2.0-0t64"),
 ])
 def test_system_setup_installs_versioned_toolkit_without_driver_or_real_privileges(
         installation, cpu, gpu, capability, cuda, repo_arch, distro, glib):
@@ -204,7 +204,7 @@ env() { shift; "$@"; }
 apt-get() {
     printf 'apt:%s\n' "$*" >> "$TEST_SYSTEM_CALLS"
     if [[ "$*" == *cuda-toolkit-* ]]; then
-        printf '#!/usr/bin/env bash\necho "release %s, fixture"\n' "${TEST_CUDA_VERSION:-12.6}" > "$MPSAE_CUDA_HOME/bin/nvcc"
+        printf '#!/usr/bin/env bash\necho "release %s, fixture"\n' "${TEST_CUDA_VERSION:-13.0}" > "$MPSAE_CUDA_HOME/bin/nvcc"
         chmod +x "$MPSAE_CUDA_HOME/bin/nvcc"
     fi
 }
@@ -222,7 +222,8 @@ dpkg() { printf 'dpkg:%s\n' "$*" >> "$TEST_SYSTEM_CALLS"; }
     result = shell(harness, installer.as_posix(), "--python", python.as_posix(), cwd=root, env=env)
     assert result.returncode == 0, result.stdout + result.stderr
     calls = (root / "system-calls.txt").read_text()
-    assert "libturbojpeg0-dev libopencv-dev" in calls
+    assert "libjpeg-dev" in calls
+    assert "libopencv-dev" not in calls
     assert f"cuda-toolkit-{cuda.replace('.', '-')}" in calls
     assert f"{distro}/{repo_arch}/cuda-keyring_1.1-1_all.deb" in calls
     assert f"libgl1 {glib}" in calls

@@ -84,6 +84,9 @@ def write_ffcv(image_root: str | Path, out_dir: str | Path, split: str, *,
             raise RuntimeError(f"{out_path} changed since its manifest was written "
                                f"({status.st_size:,} bytes vs {manifest.get('bytes'):,}); "
                                "delete both and write it again")
+        from ..ffcv_compat import prepare_ffcv
+
+        prepare_ffcv()
         try:
             from ffcv.fields import IntField, RGBImageField
             from ffcv.writer import DatasetWriter

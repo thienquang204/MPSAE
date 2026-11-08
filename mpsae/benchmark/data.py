@@ -287,9 +287,9 @@ def build_dataset_bundle(name: str, splits: Mapping[str, Any], *, revision: str,
 
 def load_dataset_bundle(name: str, cache_dir: str | Path, *, revision: str = "main",
                         token: str | None = None, strict: bool = True,
-                        audit_images: bool = True) -> DatasetBundle:
+                        audit_images: bool = True, reserve_bytes: int = 0) -> DatasetBundle:
     """Resolve an immutable HF commit, load Arrow splits and reuse their audit."""
-    from datasets import load_dataset
+    from datasets import DownloadConfig, load_dataset
 
     from ..embed.archive import pinned_release
 
@@ -297,8 +297,15 @@ def load_dataset_bundle(name: str, cache_dir: str | Path, *, revision: str = "ma
     cache_dir = Path(cache_dir)
     release = pinned_release(spec.repository, repo_type="dataset", revision=revision,
                              cache_dir=cache_dir, token=token)
+    if reserve_bytes:
+        from ..io import require_disk
+        parquet_bytes = sum(int(info.get("size") or 0) for filename, info in release["files"].items()
+                            if filename.endswith(".parquet"))
+        require_disk(cache_dir, int(parquet_bytes * 2.2), reserve_bytes=reserve_bytes,
+                     what=f"{name} download + Arrow materialization")
     loaded = load_dataset(spec.repository, revision=release["revision"], token=token,
-                          cache_dir=str(cache_dir / "hf_datasets"))
+                          cache_dir=str(cache_dir / "hf_datasets"),
+                          download_config=DownloadConfig(cache_dir=str(cache_dir / "downloads")))
     request = {"format": DATA_FORMAT, "spec": asdict(spec), "revision": release["revision"],
                "strict": strict, "audit_images": audit_images}
     audit_path = cache_dir / "dataset_audits" / f"{canonical_hash(request)}.json"

@@ -88,6 +88,10 @@ def _loader(ffcv_path: Path, *, spec: Backbone, train: bool, batch_size: int, wo
     """The released train/val FFCV pipelines, parameterised only where it must be."""
     import numpy as np
 
+    from ..ffcv_compat import prepare_ffcv
+
+    prepare_ffcv()
+
     try:
         from ffcv.fields.basics import IntDecoder
         from ffcv.fields.rgb_image import (CenterCropRGBImageDecoder,

@@ -1,6 +1,6 @@
 # One frozen-transfer campaign. Training presets remain in mpsae/config.py.
 name: thesis
-backbones: [ff2048, rn18]
+backbones: [ff2048, rn18, convnext_tiny, vit_b16, dinov2_vits14]
 methods: [csr, csrv2, mpsae, mpsaev2, csr_multitopk]
 seeds: [1227, 2026, 2027]
 imagenet:
@@ -14,11 +14,13 @@ imagenet:
 downstream:
   enabled: true
   datasets: [eurosat, flowers102, sop]
-  train_k: [8]                   # reuse these ImageNet checkpoints
-  eval_k: [2, 4, 8, 16, 32, 64]
+  train_k: null                  # 8 for ResNets, first registered anchor for modern backbones
+  eval_k: null                   # first six registered budgets for each backbone
   mode: frozen
   revisions: {}                  # main is resolved once to an immutable commit
 execution:
+  storage_mode: direct_v1        # isolated work/direct-v1; no FFCV image copy
+  cleanup_raw: true             # delete only after verified private HF backup
   train_missing: true
   continue_on_error: true
   retain_codes: false            # metrics persist; avoid accumulating TB of codes

@@ -1,0 +1,4 @@
+# Optional historical protocol only. Install in a CUDA 12 environment.
+-c constraints/server.txt
+ffcv==1.0.2
+cupy-cuda12x==13.6.0

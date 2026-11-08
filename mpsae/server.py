@@ -2,7 +2,7 @@
 
 Run ``python -m mpsae.server`` after sourcing activate_server.sh.
 Failures propagate: importing a package is insufficient evidence that its
-CUDA libraries, JIT compiler or FFCV preprocessing pipeline actually work.
+CUDA libraries, compiled extension or direct JPEG preprocessing pipeline actually work.
 """
 from __future__ import annotations
 
@@ -31,6 +31,8 @@ def validate_cuda_runtime(capability, runtime, *, expected=None):
         raise RuntimeError(f"sm_{capability[0]}{capability[1]} needs this project's CUDA "
                            f"{'.'.join(map(str, required[capability]))}+ profile; PyTorch has {runtime}. "
                            "Run bash setup_server.sh on this machine.")
+    if version >= (13, 0) and capability < (7, 5):
+        raise RuntimeError("CUDA 13 no longer supports this pre-Turing architecture; use CUDA 12")
     if expected and str(runtime) != expected:
         raise RuntimeError(f"Selected profile expects CUDA {expected}; PyTorch has {runtime}. "
                            "Source activate_server.sh or rerun setup_server.sh.")
@@ -61,7 +63,7 @@ def verify_data_stack() -> dict:
             "NumPy/PyArrow/datasets interoperability check failed. "
             "Repair the active environment with: python -m pip install "
             "--no-build-isolation -r requirements-server.txt; then rerun "
-            "bash setup_server.sh. Native FFCV uses NumPy 1.26.4 and "
+            "bash setup_server.sh. The pinned server stack uses NumPy 1.26.4 and "
             "PyArrow 25.0.1 (Arrow 26 requires NumPy 2)."
         ) from error
     print(f"NumPy {np.__version__} + PyArrow {pa.__version__} + datasets {datasets.__version__}: OK", flush=True)
@@ -72,14 +74,6 @@ def verify_server(*, check_extension: bool = True) -> dict:
     verify_data_stack()
     import numpy as np
     import torch
-    import cupy as cp
-    from PIL import Image
-    from ffcv.fields import IntField, RGBImageField
-    from ffcv.writer import DatasetWriter
-
-    from .config import BACKBONES
-    from .embed.csrv2_timm import _loader
-
     if not torch.cuda.is_available():
         raise RuntimeError("PyTorch cannot use CUDA; check the NVIDIA driver and active .venv")
     device = torch.device("cuda:0")
@@ -101,55 +95,27 @@ def verify_server(*, check_extension: bool = True) -> dict:
                 product = matrix @ matrix.T
             if not bool(torch.isfinite(product).all()):
                 raise RuntimeError(f"nonfinite PyTorch GPU {index} fp16 matmul")
-        with cp.cuda.Device(index):
-            values = cp.arange(16, dtype=cp.float32)
-            # Forces NVRTC compilation rather than just testing allocation.
-            kernel = cp.ElementwiseKernel("float32 x", "float32 y", "y = x * 2;", "mpsae_setup_double")
-            observed = kernel(values).get()
-            np.testing.assert_array_equal(observed, np.arange(16, dtype=np.float32) * 2)
-        print(f"GPU {index} PyTorch fp32/fp16 + CuPy NVRTC kernel: OK", flush=True)
+        print(f"GPU {index} PyTorch fp32/fp16: OK", flush=True)
 
-    class TinyImages:
-        def __len__(self):
-            return 4
+    # Exercise actual JPEG decode and the deterministic direct extraction transform.
+    from PIL import Image
+    from .benchmark.extract import evaluation_transform
+    from .config import BACKBONES
+    with io.BytesIO() as buffer:
+        Image.fromarray(np.full((280, 300, 3), 96, dtype=np.uint8)).save(buffer, format="JPEG")
+        buffer.seek(0)
+        with Image.open(buffer) as decoded:
+            for spec in BACKBONES.values():
+                transform, _ = evaluation_transform(spec, {"mean": (0.485, 0.456, 0.406),
+                                                          "std": (0.229, 0.224, 0.225)})
+                pixels = transform(decoded.convert("RGB")).unsqueeze(0).to(device)
+                if pixels.shape != (1, 3, spec.input_size, spec.input_size) or not torch.isfinite(pixels).all():
+                    raise RuntimeError(f"{spec.name}: invalid direct JPEG pipeline")
+    print("Direct JPEG decode + five-backbone transforms: OK", flush=True)
 
-        def __getitem__(self, index):
-            pixels = np.full((256, 256, 3), 32 + index * 32, dtype=np.uint8)
-            return Image.fromarray(pixels), index
-
-    with tempfile.TemporaryDirectory(prefix="mpsae-ffcv-check-") as temporary:
-        path = Path(temporary) / "tiny.ffcv"
-        writer = DatasetWriter(str(path), {
-            "image": RGBImageField(write_mode="jpg", jpeg_quality=95),
-            "label": IntField(),
-        }, num_workers=1)
-        writer.from_indexed_dataset(TinyImages())
-        spec = BACKBONES["rn18"]
-        mean, std = spec.normalize
-        # Exercise both augmentation/order settings used for source extraction.
-        for train in (False, True):
-            loader = _loader(path, spec=spec, train=train, batch_size=2, workers=1,
-                             seed=1227, device=device, mean=mean, std=std)
-            seen = []
-            for images, labels in loader:
-                if images.shape[1:] != (3, spec.input_size, spec.input_size):
-                    raise RuntimeError(f"unexpected FFCV image shape: {images.shape}")
-                if images.device != device or not bool(torch.isfinite(images).all()):
-                    raise RuntimeError("FFCV did not produce finite CUDA images")
-                for image, label in zip(images, labels):
-                    index = int(label.item())
-                    expected = torch.tensor([(32 + index * 32) / 255 - m for m in mean], device=device)
-                    expected /= torch.tensor(std, device=device)
-                    torch.testing.assert_close(image.mean(dim=(1, 2)), expected, atol=0.025, rtol=0)
-                    seen.append(index)
-            if sorted(seen) != list(range(4)):
-                raise RuntimeError(f"FFCV dropped/duplicated/misaligned rows: {seen}")
-            del loader
-    print("FFCV JPEG decode + train/validation GPU normalization: OK", flush=True)
-
-    versions = {}
+    versions = {"image_backend": "direct_pil_v1"}
     for name in ("torchvision", "timm", "safetensors", "datasets", "pyarrow",
-                 "huggingface_hub", "numpy", "numba", "cv2", "ffcv", "cupy", "yaml", "psutil", "wandb", "PIL"):
+                 "huggingface_hub", "numpy", "yaml", "psutil", "wandb", "PIL"):
         module = importlib.import_module(name)
         versions[name] = str(getattr(module, "__version__", "installed"))
     import matplotlib

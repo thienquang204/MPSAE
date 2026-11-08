@@ -18,9 +18,9 @@ from mpsae.config import Cell
 def test_default_campaign_is_source_training_plus_frozen_transfer():
     campaign = load_campaign("configs/thesis.yaml")
     plan = campaign.plan()
-    assert plan["source_cells"] == 300
-    assert plan["downstream_sparse_points"] == 540
-    assert plan["downstream_dense_points"] == 6
+    assert plan["source_cells"] == 690
+    assert plan["downstream_sparse_points"] == 1350
+    assert plan["downstream_dense_points"] == 15
     assert campaign.downstream["mode"] == "frozen"
 
 

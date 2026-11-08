@@ -53,11 +53,10 @@ bash all_in_one.sh --check        # check/create remote destinations
 ```
 
 The native installer supports Ubuntu 22.04/24.04 on x86_64 and ARM64/SBSA.
-It selects CUDA 12.6 for A100/RTX A6000/RTX 4090/H100/H200, CUDA 12.8 for
-RTX 5090, and CUDA 12.9 for GB300. The existing driver must meet the selected
-profile's requirement. It installs system libraries and that toolkit using
-root/sudo, creates `.venv`, installs the pinned PyTorch/FFCV/CuPy environment,
-then checks actual GPU kernels and the project's FFCV preprocessing pipeline.
+It defaults to CUDA 13.0 on H100, A100, RTX A6000 and other supported
+Turing-or-newer GPUs; Linux driver >= 580.65.06 is required. It installs the
+pinned PyTorch environment and verifies direct JPEG processing and GPU kernels.
+FFCV/CuPy are optional legacy dependencies, not part of the default pipeline.
 It creates `.env` only when missing; fill in the token after installation.
 It does not download datasets or start training. Preview its plan with:
 
@@ -75,8 +74,9 @@ bash pipeline.sh report
 
 Use `--config` with direct Python commands to select the campaign explicitly.
 Without a config or `MPSAE_CONFIG`, the old ImageNet-only CLI remains available.
-Both use the existing `work/runs/` fit layout; campaigns reference those fits
-rather than training a second copy per dataset. Docker is an optional older
+The default direct campaign uses `work/direct-v1/` for features, fits and reports;
+historical `work/runs/` results remain separate. ImageNet JPEGs at `work/imagenet`
+are reused, then retired only after all five feature bundles have verified HF backups. Docker is an optional older
 deployment path, described separately in `docs/benchmark.md`.
 
 The smoke configuration synthesises class-structured source and target data
@@ -86,13 +86,13 @@ numbers are not science and are labelled synthetic in the manifests.
 ### Hardware
 
 x86_64 or ARM64/SBSA, ≥ 24 GB VRAM (40–80 GB comfortable), ≥ 64 GB RAM, ≥ 16 CPU cores,
-≥ 500 GB SSD.
+SSD sized for the peak storage budget below.
 
-All native GPU profiles use PyTorch 2.9.1 / torchvision 0.24.1,
-FFCV 1.0.2 and CuPy 13.6.0. Constraints keep NumPy/OpenCV/Numba compatible with
-the released FFCV code. Setup stops on a failed dependency or GPU check;
-`requirements.txt` alone is not the complete server installation. Details in
-[`docs/server.md`](docs/server.md).
+The default five-backbone campaign needs about 24 GB for one copy of ImageNet
+embeddings. Peak disk use also includes original images, one active writer,
+download caches and the environment; 500 GB is not an unconditional guarantee.
+Dataset preparation and cleanup are sequential. Read the storage and resume
+rules in [`docs/server.md`](docs/server.md) before reusing a full server.
 
 There is **no FAISS dependency**. Its GPU wheels lag new architectures. On
 L2-normalised vectors, maximum inner product is equivalent to minimum L2
