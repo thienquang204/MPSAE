@@ -159,7 +159,8 @@ def stage_env(options: PipelineOptions) -> dict[str, Any]:
             if runtime and runtime[0] >= 13 and capability < CUDA13_MIN_CAPABILITY:
                 problems.append(
                     f"torch is a CUDA {runtime[0]} build, which dropped {label}; that GPU needs "
-                    "a 12.x build (MPSAE_TORCH_INDEX=https://download.pytorch.org/whl/cu126)")
+                    "a CUDA 12.x PyTorch build in a matching environment; "
+                    "the native setup script targets A100")
         # The driver bounds the runtime that can load at all: CUDA 13 needs the
         # r580 branch, 12.8 needs r570. This fails at the first kernel launch,
         # often minutes into a stage, so it is worth catching here.

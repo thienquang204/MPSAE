@@ -22,6 +22,33 @@ from mpsae.model import build_sae  # noqa: E402
 DIM, HIDDEN, ROWS, K = 6, 32, 40, 3
 
 
+def test_native_a100_extension_honors_explicit_architecture(monkeypatch):
+    import os
+    import torch
+    from torch.utils import cpp_extension
+    from mpsae.evaluate import timing
+
+    monkeypatch.setenv("TORCH_CUDA_ARCH_LIST", "8.0")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (8, 0))
+    monkeypatch.setattr(timing, "_EXTENSION", None)
+    monkeypatch.setattr(timing, "_EXTENSION_FAILED", False)
+    extension = object()
+    seen = []
+
+    def compile_extension(**kwargs):
+        arches = os.environ["TORCH_CUDA_ARCH_LIST"]
+        seen.append(arches)
+        if arches != "8.0":
+            raise RuntimeError("CUDA 12.6 does not support the requested architecture")
+        return extension
+
+    monkeypatch.setattr(cpp_extension, "load", compile_extension)
+    assert timing.maybe_build_inverted_index() is extension
+    assert seen == ["8.0"]
+    assert os.environ["TORCH_CUDA_ARCH_LIST"] == "8.0"
+
+
 @pytest.fixture
 def sae():
     return build_sae(DIM, HIDDEN, seed=1227)

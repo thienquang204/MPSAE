@@ -24,44 +24,46 @@ retrieval benchmarks. `.env` holds credentials and environment settings;
 `configs/thesis.yaml` selects the experiments. No downstream fine-tuning runs.
 
 ```bash
-cp .env.example .env                         # set HF_TOKEN for ImageNet
-docker compose build
-docker compose run --rm mpsae plan
-docker compose run --rm mpsae                # default: the thesis campaign
-docker compose run --rm mpsae status
-docker compose run --rm mpsae report
+bash scripts/setup_server.sh                # once, on the Ubuntu A100 server
+source scripts/activate_server.sh           # each new shell
+# Edit .env: set HF_TOKEN for gated ImageNet access.
+python -m mpsae --config configs/thesis.yaml plan
+python -m mpsae --config configs/smoke.yaml --smoke run
+python -m mpsae --config configs/thesis.yaml run
+python -m mpsae --config configs/thesis.yaml status
+python -m mpsae --config configs/thesis.yaml report
 ```
 
-The container runs selected fits and evaluations sequentially, reuses compatible
+Python runs selected fits and evaluations sequentially, reuses compatible
 ImageNet checkpoints, and writes a campaign report from the explicit result
 list. Repeating the command resumes unfinished work. See
 [`docs/benchmark.md`](docs/benchmark.md) for the dataset protocols, result
 identities, figure definitions and server commands.
 
-For a host installation instead of Docker:
+The native installer requires Ubuntu 22.04/24.04 x86_64, an A100 and an existing
+driver >= 560.28.03. It installs system libraries and CUDA Toolkit 12.6 using
+root/sudo, creates `.venv`, installs the pinned PyTorch/FFCV/CuPy environment,
+then checks actual GPU kernels and the project's FFCV preprocessing pipeline.
+It creates `.env` only when missing; fill in the token after installation.
+It does not download datasets or start training. Preview its plan with:
 
 ```bash
-cp .env.example .env && $EDITOR .env    # paste HF_TOKEN
-./scripts/setup_server.sh               # once: CUDA-matched torch, deps, FFCV
-./scripts/pipeline.sh --smoke           # separate synthetic campaign workspace
-./scripts/pipeline.sh                   # configs/thesis.yaml
+bash scripts/setup_server.sh --dry-run
 ```
 
-Useful afterwards:
+The shell launcher uses the same Python CLI and also saves a console transcript:
 
 ```bash
-./scripts/pipeline.sh status            # what is done, what is outstanding
-./scripts/pipeline.sh plan              # the campaign, no GPU/token needed
-./scripts/pipeline.sh stage embed       # one legacy ImageNet stage
-./scripts/pipeline.sh report            # rebuild the selected campaign's reports
-./scripts/pipeline.sh --config configs/thesis.yaml  # edit scientific selections in YAML
+bash scripts/pipeline.sh                # configs/thesis.yaml
+bash scripts/pipeline.sh status
+bash scripts/pipeline.sh report
 ```
 
-The container sets `MPSAE_CONFIG=configs/thesis.yaml`, so `plan`, `status` and
-`report` use the same campaign when the Docker command is replaced. On a host
-with `MPSAE_CONFIG` unset, `python -m mpsae run` without `--config` retains the
-original ImageNet-only interface. Both use the existing `work/runs/` fit layout;
-campaigns reference those fits rather than training a second copy per dataset.
+Use `--config` with direct Python commands to select the campaign explicitly.
+Without a config or `MPSAE_CONFIG`, the old ImageNet-only CLI remains available.
+Both use the existing `work/runs/` fit layout; campaigns reference those fits
+rather than training a second copy per dataset. Docker is an optional older
+deployment path, described separately in `docs/benchmark.md`.
 
 The smoke configuration synthesises class-structured source and target data
 and runs capped fits, retrieval and reporting in a separate workspace. Its
@@ -72,12 +74,11 @@ numbers are not science and are labelled synthetic in the manifests.
 x86_64, ≥ 24 GB VRAM (40–80 GB comfortable), ≥ 64 GB RAM, ≥ 16 CPU cores,
 ≥ 500 GB SSD.
 
-`setup_server.sh` picks the torch wheel from the driver branch and the compute
-capability together, because each bounds a different end: the driver caps the
-CUDA runtime that can load (13.x needs ≥ 580, 12.8 needs ≥ 570), while CUDA 13
-dropped every architecture below sm_75 and so cannot serve a V100. CUDA 13 is
-the preferred case — driver ≥ 580 gets `cu132` and current torch. Override with
-`MPSAE_TORCH_INDEX`. Details in [`docs/server.md`](docs/server.md).
+The native A100 profile uses PyTorch 2.9.1 / torchvision 0.24.1 with CUDA 12.6,
+FFCV 1.0.2 and CuPy 13.6.0. Constraints keep NumPy/OpenCV/Numba compatible with
+the released FFCV code. Setup stops on a failed dependency or GPU check;
+`requirements.txt` alone is not the complete server installation. Details in
+[`docs/server.md`](docs/server.md).
 
 There is **no FAISS dependency**. Its GPU wheels lag new architectures. On
 L2-normalised vectors, maximum inner product is equivalent to minimum L2
@@ -216,12 +217,14 @@ mpsae/
   runs.py        the grid, E1 and E2
   pipeline.py    stages: env → imagenet → ffcv → embed → publish → train → report
   cli.py         python -m mpsae
+  server.py      native A100 GPU/dependency verification
   data/          ImageNet acquisition, FFCV serialisation
   embed/         MRL and CSRv2 extraction recipes, archive writer
   evaluate/      encoding, exact 1-NN, probes, retrieval timing
   report/        aggregation, published references, style, figures
 csrc/            CUDA inverted index (optional secondary metric)
-scripts/         pipeline.sh, setup_server.sh, capture_golden.py
+scripts/         setup_server.sh, activate_server.sh, pipeline.sh, capture_golden.py
+constraints/     pinned native A100 dependency versions
 tests/reference/ transcribed CSR/CSRv2 source, used only as a test oracle
 docs/            methods, data provenance, pipeline, outputs, server setup
 ```

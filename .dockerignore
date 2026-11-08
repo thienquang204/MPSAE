@@ -19,6 +19,8 @@ wandb/
 .repair-test-venv/
 .repair-uv-cache/
 .venv/
+.setup-logs/
+scripts/env.sh
 .codex-uv-cache/
 .codex-tests/
 .pytest*/

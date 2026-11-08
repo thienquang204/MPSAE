@@ -1,0 +1,9 @@
+# Full native A100 environment; installed by scripts/setup_server.sh.
+# CUDA PyTorch wheels are installed first from the cu126 index by that script.
+-c constraints/server-a100.txt
+-r requirements.txt
+torch==2.9.1
+torchvision==0.24.1
+ffcv==1.0.2
+cupy-cuda12x==13.6.0
+ninja>=1.11

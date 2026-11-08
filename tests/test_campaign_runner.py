@@ -229,11 +229,44 @@ def test_missing_ffcv_fails_before_downloading_any_dataset(tmp_path, monkeypatch
                         None if name in {"ffcv", "cupy"}
                         else original_find_spec(name, *args, **kwargs))
     monkeypatch.setattr(figures, "build_all", lambda *args, **kwargs: {"skipped": []})
-    with pytest.raises(RuntimeError, match="ImageNet GPU extraction needs ffcv, cupy"):
+    with pytest.raises(RuntimeError, match="ImageNet GPU extraction needs ffcv, cupy") as failure:
         run.run_campaign(campaign, tmp_path, device="cuda:0")
+    assert "bash scripts/setup_server.sh" in str(failure.value)
+    assert "source scripts/activate_server.sh" in str(failure.value)
+    assert "Docker" not in str(failure.value)
     assert heavy_boundaries.dataset_loads == []
     assert heavy_boundaries.source_loads == []
     assert heavy_boundaries.fit_calls == []
+
+
+def test_broken_installed_ffcv_fails_before_downloading_any_dataset(tmp_path, monkeypatch, heavy_boundaries):
+    from mpsae.report import figures
+
+    campaign = Campaign.from_mapping({
+        "name": "broken_dependency", "backbones": ["rn18"], "methods": ["csr"],
+        "seeds": [1227], "imagenet": {"train_k": [8]},
+        "downstream": {"datasets": ["eurosat"], "train_k": [8], "eval_k": [8]},
+    })
+    monkeypatch.setattr(sys.modules["torch"].cuda, "is_available", lambda: True)
+    original_find_spec = importlib.util.find_spec
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *args, **kwargs:
+                        importlib.machinery.ModuleSpec(name, loader=None) if name in {"ffcv", "cupy"}
+                        else original_find_spec(name, *args, **kwargs))
+    original_import = importlib.import_module
+
+    def import_module(name, *args, **kwargs):
+        if name == "ffcv":
+            raise OSError("libturbojpeg.so missing")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib, "import_module", import_module)
+    monkeypatch.setattr(figures, "build_all", lambda *args, **kwargs: {"skipped": []})
+    with pytest.raises(RuntimeError, match="ffcv is installed but cannot import") as failure:
+        run.run_campaign(campaign, tmp_path, device="cuda:0")
+    assert "libturbojpeg.so missing" in str(failure.value)
+    assert "bash scripts/setup_server.sh" in str(failure.value)
+    assert heavy_boundaries.dataset_loads == []
+    assert heavy_boundaries.source_loads == []
 
 
 def test_downstream_campaign_reuses_source_and_resumes_all_dataset_budget_points(tmp_path, heavy_boundaries):

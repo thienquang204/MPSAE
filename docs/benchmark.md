@@ -9,35 +9,32 @@ This measures cross-dataset transfer and sensitivity to the inference code
 budget K. It does not yet measure robustness to image corruptions or
 adversarial perturbations; those need separate datasets and protocols.
 
-## One container, one configuration
+## Native Python, one configuration
 
 ```bash
-cp .env.example .env
-# Set HF_TOKEN after accepting ImageNet access conditions.
-docker compose build
-docker compose run --rm mpsae plan
-docker compose run --rm mpsae
+bash scripts/setup_server.sh
+source scripts/activate_server.sh
+# Set HF_TOKEN in .env after accepting ImageNet access conditions.
+python -m mpsae --config configs/thesis.yaml plan
+python -m mpsae --config configs/thesis.yaml run
 ```
 
-The image defaults to `--config configs/thesis.yaml run` and sets
-`MPSAE_CONFIG=configs/thesis.yaml`, so replacing the command with `plan`,
-`status` or `report` keeps the same campaign. Use `--config` to select another
-configuration. Compose mounts
-`./work` at `/work` and `./configs` read-only at `/opt/mpsae/configs`, so results
-and checkpoints survive the container and configuration changes need no image
-rebuild. A token is needed by stages that access gated ImageNet, not to inspect
-a plan, status or existing reports.
+The supported native setup targets Ubuntu 22.04/24.04 and an A100 with driver
+>= 560.28.03. It installs the complete pinned CUDA 12.6 Python environment,
+including mandatory FFCV/CuPy, and verifies real GPU operations before
+reporting success. See [server.md](server.md) for installation, logs and
+administrator-provided dependencies. The script creates `.env` only if it
+does not exist. A token is needed by gated ImageNet access, not to inspect a
+plan, status or existing reports.
 
-The image uses Ubuntu 24.04's stable Python in `/opt/venv`, CUDA 13.0 and
-the matching [PyTorch cu130 wheels](https://download.pytorch.org/whl/cu130/).
-FFCV and [CuPy's matching CUDA wheel](https://docs.cupy.dev/en/stable/install.html)
-are mandatory for the default RN18 extraction; dependency installation errors
-fail the image build. `ninja` is included for the optional timing extension.
+Use the same config on every command. Selected data and results live in
+`work/`, independently of the Python environment. Editing YAML does not require
+reinstalling dependencies.
 
 ```bash
-docker compose run --rm mpsae status
-docker compose run --rm mpsae report
-docker compose run --rm mpsae --config configs/smoke.yaml --smoke run
+python -m mpsae --config configs/thesis.yaml status
+python -m mpsae --config configs/thesis.yaml report
+python -m mpsae --config configs/smoke.yaml --smoke run
 ```
 
 The smoke campaign uses synthetic source and target data and a separate
@@ -48,17 +45,16 @@ host installation can use:
 python -m mpsae --config configs/smoke.yaml --smoke --device cpu run
 ```
 
-The Compose service itself reserves a CUDA GPU. For a host environment,
-`scripts/setup_server.sh` installs dependencies and `scripts/pipeline.sh` wraps
-the same CLI. The launcher uses an exported `MPSAE_CONFIG` or defaults to
+`scripts/pipeline.sh` wraps the same Python CLI, loads the generated CUDA paths
+and saves a console transcript. The launcher uses an exported `MPSAE_CONFIG` or defaults to
 `configs/thesis.yaml`; `--smoke` defaults to `configs/smoke.yaml`. It accepts
 global options on either side of the command:
 
 ```bash
-./scripts/pipeline.sh plan
-./scripts/pipeline.sh --config configs/thesis.yaml --device cuda:0
-./scripts/pipeline.sh report
-./scripts/pipeline.sh stage embed -- --backbones ff2048
+bash scripts/pipeline.sh plan
+bash scripts/pipeline.sh --config configs/thesis.yaml --device cuda:0
+bash scripts/pipeline.sh report
+bash scripts/pipeline.sh stage embed -- --backbones ff2048
 ```
 
 `stage NAME` remains the original ImageNet-stage interface. On a host with
@@ -70,8 +66,11 @@ backbones, seeds and budgets belong in YAML; runtime device/workspace options
 remain CLI flags. Campaign reports use their plan-specific output directories.
 For an old-style report with a custom output directory, use
 `python -m mpsae report --out work/reports/review` with `MPSAE_CONFIG` unset.
-In Docker, the equivalent explicit environment override is
-`docker compose run --rm -e MPSAE_CONFIG= mpsae report --out /work/reports/review`.
+Docker files remain available as an optional separate deployment. They are not
+used by the native installer or Python runner. The container defaults to
+`configs/thesis.yaml`, mounts `./work` and `./configs`, and uses
+`docker compose run --rm mpsae` to run; this path is not required on the A100
+server. Its CUDA version is configured independently in `compose.yaml`.
 
 ## Configuration and execution
 

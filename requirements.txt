@@ -1,5 +1,5 @@
-# torch and torchvision are installed separately by scripts/setup_server.sh,
-# which picks the CUDA build that matches the GPU (cu128 for Blackwell).
+# General dependencies. For the complete native A100 environment, run
+# bash scripts/setup_server.sh (uses requirements-server.txt and pinned cu126).
 #
 # FAISS is deliberately absent. Its GPU wheels lag new architectures, and on
 # L2-normalised vectors a blocked FP32 GEMM argmax is exactly equivalent to
@@ -21,9 +21,8 @@ psutil>=5.9
 # Optional: metric streaming. The pipeline runs fine without it.
 wandb>=0.17
 
-# Optional: only needed by the CSRv2 embedding recipe (rn18, convnext_tiny,
-# vit_b16, dinov2_vits14). Installed by setup_server.sh, which tolerates a
-# build failure and tells you that ff2048 still works.
+# Required by CSRv2 source extraction (including rn18 in the default campaign).
+# Installed with CuPy by requirements-server.txt after system dependencies.
 # ffcv==1.0.2
 
 # Development only.

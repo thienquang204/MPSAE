@@ -1,4 +1,10 @@
-# Running the pipeline
+# Legacy ImageNet stage interface
+
+For the native A100 installation and the combined ImageNet/downstream campaign,
+use [server.md](server.md) and [benchmark.md](benchmark.md). This page describes
+the older ImageNet-only stage/grid interface. Its direct Python examples assume
+`MPSAE_CONFIG` is unset and omit `--config`. The shell launcher now defaults to
+the YAML campaign; scientific subsets for that runner belong in YAML.
 
 The operations manual behind [`README.md`](../README.md). The README says what
 we claim and how to start a run; this file is what you read when a run stops,
@@ -18,10 +24,9 @@ stage is considered already done when its receipt has `ok: true` **and** its
 stored `identity` equals the hash of the identity the current invocation would
 use, and `--force` was not given. Anything else re-runs it.
 
-For the seven top-level stages the identity is
-`{version, backbones, smoke}` (`pipeline.run_all`). That is deliberately
-coarse, and it has one consequence worth knowing: changing `--backbones`
-changes the identity of *every* stage, so all seven receipts go stale at once.
+For the seven top-level stages the identity includes `{version, options}`
+(`pipeline.run_all`), with the resolved pipeline options. Changing the selection
+changes the identity of every stage, so all seven receipts go stale at once.
 Nothing is recomputed that was already materialised — the stages are
 individually resumable below the receipt level — but you will see each stage
 start again rather than print `skip (already done ...)`.
@@ -72,23 +77,21 @@ backbone uses the CSRv2 recipe.
 | `train` | the grid: fit every cell, evaluate E1, and at an E2 anchor sweep every budget | `embeddings/`, `cache/` | `runs/<backbone>/<method>/k<K>/seed<S>/*`, `runs/grid.json` | ~20–25 h of fitting, ~4 h E1, ~26 h E2 | first failing cell. It writes `failure.json` in that cell's directory and re-raises, so the stage stops rather than silently producing a hole in the grid |
 | `report` | aggregates the run tree into tables and figures | `runs/` | `reports/tables/*`, `reports/figures/*` | minutes | essentially never: a partial grid is the normal state, every loader tolerates a missing file, and a figure with no data records why it was skipped instead of raising |
 
-Cost expectations per phase are in
-[`docs/server.md`](server.md#expected-cost); they are not duplicated here.
+The phase times above are rough historical estimates, not A100 guarantees.
 
 ## Command line
 
-`python -m mpsae [global options] <command>`. `scripts/pipeline.sh` is a thin
-wrapper: it activates `.venv`, checks that `.env` exists and has a non-empty
-`HF_TOKEN`, sets `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`, passes
-`--env-file` and `--workspace`, and tees the whole transcript to
-`work/logs/console-<timestamp>.log`. Anything after `--` goes straight to the
-CLI.
+`python -m mpsae [global options] <command>`. First source
+`scripts/activate_server.sh` to use the installed environment. The shell
+launcher is the campaign interface documented in `benchmark.md`; it saves a
+console transcript, while credential checks happen only in stages that need
+them. Metadata commands do not need a token.
 
 ### Commands
 
 | command | effect |
 |---|---|
-| `run` | all seven stages, minus `--skip`, minus the ones this configuration cannot use. The default when `pipeline.sh` is called with no subcommand |
+| `run` | all seven legacy stages, minus `--skip`, minus the ones this configuration cannot use |
 | `stage <name>` | exactly one stage, from `env imagenet ffcv embed publish train report`. Still receipt-gated |
 | `status` | JSON: which receipts are green, how many grid cells have an `eval_e1.json`, and the shortfall per backbone and per method. No torch needed |
 | `plan` | prints the grid and exits. No side effects, no workspace writes, no torch needed |
@@ -126,14 +129,14 @@ first, and values already present in the environment win over the file.
 
 | variable | read by | purpose |
 |---|---|---|
-| `HF_TOKEN` | `pipeline._env`, `embed.archive`, `data.imagenet` | required. Must belong to an account that has accepted the ImageNet-1k terms, and must have write scope if you publish. `env` fails without it; `pipeline.sh` refuses to start if it is empty in `.env` |
+| `HF_TOKEN` | `pipeline._env`, `embed.archive`, `data.imagenet` | required for gated ImageNet access, with accepted terms; write scope is needed only for the legacy publish stage |
 | `HF_EMBEDDINGS_REPO` | `--hf-repo` default | setting it is what authorises the upload |
 | `WANDB_API_KEY` | `logs.open_wandb` | W&B is enabled only when both this and a project are set, and a W&B failure never fails the pipeline |
 | `WANDB_PROJECT` | `--wandb-project` default | as above |
 | `HF_HOME` | `huggingface_hub` | point the Hub cache at the big disk, not `/` |
-| `MPSAE_TORCH_INDEX` | `scripts/setup_server.sh` | override the wheel index the installer derives from the driver and the compute capability |
+| `MPSAE_CUDA_HOME` | `scripts/setup_server.sh` | custom CUDA 12.6 toolkit location; A100 Python/CUDA package versions are pinned |
 | `MPSAE_ENV_FILE`, `MPSAE_PYTHON` | `scripts/pipeline.sh` | which `.env` and which interpreter |
-| `PYTORCH_CUDA_ALLOC_CONF` | torch | set to `expandable_segments:True` by both scripts, to keep hundreds of consecutive fits from fragmenting the allocator |
+| `PYTORCH_CUDA_ALLOC_CONF` | torch | optional allocator setting; set by the shell launcher, but not required by the A100 installer |
 | `NO_COLOR` | `logs.setup_logging` | suppress ANSI colour on the console handler |
 
 Nothing from `.env` is ever written to a log or a manifest.
@@ -148,7 +151,7 @@ messages tell you to lower them.
 ## The smoke path
 
 ```bash
-./scripts/pipeline.sh --smoke
+python -m mpsae --smoke run
 ```
 
 What it actually does:
@@ -188,19 +191,19 @@ the narrowing composes.
 
 ```bash
 # one backbone, and the only one that needs no FFCV
-./scripts/pipeline.sh -- --backbones ff2048
+python -m mpsae --backbones ff2048 run
 
 # the OT claim and its control against one baseline
-./scripts/pipeline.sh -- --methods csr,mpsae,csr_multitopk
+python -m mpsae --methods csr,mpsae,csr_multitopk run
 
 # the E2 anchors first, so the generalisation figure fills in early
-./scripts/pipeline.sh -- --backbones ff2048 --k 8,16,32,64,128,256
+python -m mpsae --backbones ff2048 --k 8,16,32,64,128,256 run
 
 # one seed, no E2, no probes: the cheapest useful sweep
-./scripts/pipeline.sh -- --seeds 1227 --no-e2 --no-probe
+python -m mpsae --seeds 1227 --no-e2 --no-probe run
 
 # a single cell, end to end
-./scripts/pipeline.sh -- --backbones rn18 --methods mpsaev2 --k 64 --seeds 2026
+python -m mpsae --backbones rn18 --methods mpsaev2 --k 64 --seeds 2026 run
 ```
 
 Two things to keep in mind. `--k` is intersected with each backbone's own
@@ -216,7 +219,7 @@ Both are torch-free by design — `command_plan` imports `config.grid` rather th
 through the run machinery. You can plan and monitor from a laptop.
 
 ```
-$ ./scripts/pipeline.sh plan
+$ python -m mpsae plan
 MPSAE 2.0.0: 690 training cells
 
 backbone             d K budgets                                    E2 anchors              cells
@@ -237,7 +240,7 @@ seeds:   1227, 2026, 2027
 counts as done when its `eval_e1.json` exists and contains a `top1`:
 
 ```
-$ ./scripts/pipeline.sh status
+$ python -m mpsae status
 {
   "stages": {"env": true, "imagenet": true, "ffcv": true, "embed": true,
              "publish": false, "train": false, "report": false},
@@ -261,18 +264,18 @@ Re-running the same command is always the right first move. It is safe, and it
 continues.
 
 ```bash
-./scripts/pipeline.sh                  # continue
-./scripts/pipeline.sh stage embed      # just the embeddings
-./scripts/pipeline.sh report           # just the tables and figures
+python -m mpsae run                  # continue legacy ImageNet work
+python -m mpsae stage embed          # just the embeddings
+python -m mpsae report               # just the tables and figures
 ```
 
 To make something happen again:
 
 ```bash
-./scripts/pipeline.sh -- --force report              # one stage
-./scripts/pipeline.sh -- --force embed --backbones ff2048
-./scripts/pipeline.sh -- --force all                 # everything, including the download check
-./scripts/pipeline.sh -- --skip publish,report       # leave stages out of a full run
+python -m mpsae --force report run
+python -m mpsae --force embed --backbones ff2048 run
+python -m mpsae --force all run
+python -m mpsae --skip publish,report run
 ```
 
 `--force` is coarser than it looks on two stages, and the difference matters:
@@ -292,7 +295,7 @@ Redoing one cell by hand is therefore:
 
 ```bash
 mv work/runs/ff2048/mpsae/k64/seed1227 /tmp/
-./scripts/pipeline.sh -- --backbones ff2048 --methods mpsae --k 64 --seeds 1227
+python -m mpsae --backbones ff2048 --methods mpsae --k 64 --seeds 1227 run
 ```
 
 ## Troubleshooting
@@ -305,9 +308,9 @@ fragment to find the site.
 | `HF_TOKEN is unset; ILSVRC/imagenet-1k is gated` | `env` found no token | accept the terms at the dataset page with the account that owns the token, put it in `.env` |
 | `cannot resolve dataset ILSVRC/imagenet-1k@main (...); accept the access conditions at ...` | the token exists but that account has not accepted the gate, or the token lacks read scope | same page, same account. There is no substitute dataset and the code will not silently pick one |
 | `publishing needs a write-scoped HF_TOKEN` | `--hf-repo`/`HF_EMBEDDINGS_REPO` set, token not write-scoped | issue a write token, or unset the repo to skip `publish` |
-| `missing ffcv (needed for the CSRv2 embedding recipe)`, or `ffcv is not importable. The CSRv2 recipe needs it ...` | no FFCV, and a selected backbone uses the CSRv2 recipe | the conda route in [`docs/server.md`](server.md#ffcv), or run `--backbones ff2048`, which needs no FFCV. `env` checks this *before* anything downloads |
-| `sm_90 needs CUDA 12.1 or newer, but torch is built against 11.8` | wheel too old for the card | `scripts/setup_server.sh`, or `MPSAE_TORCH_INDEX=...` |
-| `torch is a CUDA 13 build, which dropped sm_70` | CUDA 13 compiles only for sm_75 and up; a V100 needs a 12.x wheel | `MPSAE_TORCH_INDEX=https://download.pytorch.org/whl/cu126` |
+| `ImageNet GPU extraction needs ffcv, cupy`, or `ffcv is not importable` | incomplete server environment or wrong interpreter | on A100 run `bash scripts/setup_server.sh`, then `source scripts/activate_server.sh`; see [server.md](server.md) |
+| `sm_90 needs CUDA 12.1 or newer, but torch is built against 11.8` | wheel too old for the card | the native installer targets A100; other hardware needs its own matching environment |
+| `torch is a CUDA 13 build, which dropped sm_70` | a V100 needs a 12.x wheel | use an appropriate separate environment; the A100 installer does not target V100 |
 | `driver branch 570 cannot load a CUDA 13.2 build (needs >= 580)` | driver below the runtime's floor | newer driver image from the provider, or a matching wheel. This would otherwise fail at the first kernel launch, minutes into a stage |
 | `exact top-1 over 1,281,167 x 50,000 at dim=8192 needs ... plus 1.0 GiB reserve on cuda:0 (... free). Lower gallery_chunk, query_block, or the query split size.` | out of VRAM at search time | lower `RunSettings.gallery_chunk` (32768) and `query_block` (8192) in `mpsae/runs.py`. The check runs before the loop, so you lose nothing but the setup |
 | `sparse retrieval score buffer needs ...` | the optional timing harness, not the metric | same two knobs, or set `RunSettings.measure_timing = False` |
@@ -333,7 +336,8 @@ fragment to find the site.
 
 ```bash
 tmux new -s mpsae
-./scripts/pipeline.sh
+source scripts/activate_server.sh
+python -m mpsae run
 # C-b d to detach, tmux attach -t mpsae to come back
 ```
 

@@ -11,6 +11,7 @@ import gc
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 from typing import Any
 
 from .. import __version__
@@ -368,7 +369,24 @@ def run_campaign(campaign: Campaign, workspace: str | Path, *, device="cuda:0",
                                        if importlib.util.find_spec(module) is None]
                     if missing_imports:
                         raise RuntimeError("ImageNet GPU extraction needs " + ", ".join(missing_imports)
-                                           + "; rebuild the campaign Docker image before downloading data")
+                                           + f" in the active interpreter ({sys.executable}). "
+                                           "Run 'bash scripts/setup_server.sh', then "
+                                           "'source scripts/activate_server.sh' and retry. "
+                                           "See docs/server.md; installing requirements.txt alone "
+                                           "does not install the full server environment.")
+                    # A package may be installed yet fail at import because
+                    # its compiled JPEG/OpenCV/CUDA dependencies are broken.
+                    import importlib
+
+                    for module in ("ffcv", "cupy"):
+                        try:
+                            importlib.import_module(module)
+                        except Exception as error:
+                            raise RuntimeError(
+                                f"{module} is installed but cannot import in {sys.executable}: {error}. "
+                                "Run 'bash scripts/setup_server.sh', then "
+                                "'source scripts/activate_server.sh'; see docs/server.md."
+                            ) from error
             if not smoke and campaign.downstream["enabled"]:
                 import importlib.util
 
