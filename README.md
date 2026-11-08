@@ -6,8 +6,8 @@ Working notes for this repository. Not a release document.
 autoencoder and regularises the codes with a contrastive term. We replace that
 term with an entropic **multi-marginal partial-OT matching gap** that couples
 the codes of the *same* example across three budgets (K, 2K, 4K). Inference is
-unchanged — the same Top-K code — so the comparison is entirely about the
-training objective.
+unchanged — the same Top-K code. Training changes the objective and uses the
+MPSAE-specific optimisation settings below.
 
 **Ground rules.** Settings follow the published papers (CSR Table 3/9, CSRv2
 Table 11). Algorithms follow the *released code*. Where the released code
@@ -131,6 +131,13 @@ The 768-d backbones are treated like FF2048, the 384-d one like RN18.
 
 ### Methods
 
+`mpsae` and `mpsaev2` use training batches of **1024** on every backbone and
+the original constant learning rate of **4e-5**. Baseline batch sizes retain
+their backbone presets. OT solver limits remain **400** initial iterations
+and **8000** refinement iterations; early stopping still applies. Epochs,
+OT group size and loss weights retain their existing settings. Comparisons
+with CSR include the batch-size and update-count differences where applicable.
+
 | method | K during training | gates/step | regulariser | extra reconstruction |
 |---|---|---|---|---|
 | `csr` | fixed | K, 4K, K | γ · `inbatch_cl` | — |
@@ -148,13 +155,13 @@ duplicate contrastive view. Ours spend the third gate on the 2K view they
 actually consume.
 
 `csr_multitopk` is the control for the OT claim. It shares `csr`'s gates and
-contrastive term and adds only `L(2K)/8`, so "MPSAE > csr_multitopk" rules out
-the explanation that the gain comes from merely *looking at* a 2K view. It
+contrastive term and adds only `L(2K)/8`, providing a control for supervising
+a 2K view. MPSAE uses the batch size described above. It
 follows CSRv2 App. G's "Diverse Multi-TopK" ablation in spirit.
 
 `mpsaev2` is **variant B**: the main budget anneals, so it is `csrv2` with the
-contrastive term swapped for the OT gap and the comparison isolates exactly
-that substitution. Variant A (fixed main budget, annealed OT views only) is
+contrastive term swapped for the OT gap, with the MPSAE batch size of 1024.
+Variant A (fixed main budget, annealed OT views only) is
 specified in [`docs/notes/mpsaev2_legacy_A.md`](docs/notes/mpsaev2_legacy_A.md)
 and is deliberately not implemented.
 

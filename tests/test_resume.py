@@ -124,7 +124,7 @@ def test_ot_refinement_budget_is_part_of_fit_identity(experiment):
     changed = fit_identity(cell, bundle, replace(spec.preset, ot_max_refine_iters=3000),
                            total_steps=3, per_epoch=3, code_version="v")
     assert default != changed
-    assert "max_refine_iters" not in default["objective"]["ot"]
+    assert default["objective"]["ot"]["max_refine_iters"] == 8000
 
 
 @pytest.mark.parametrize("kwargs", [{"log_every": 0}, {"checkpoint_every": 0},

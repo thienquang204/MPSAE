@@ -16,7 +16,7 @@ import sys
 from typing import Any
 
 from .. import __version__
-from ..config import BACKBONES, Cell
+from ..config import BACKBONES, Cell, training_preset
 from ..io import atomic_json, canonical_hash, exclusive_lock, read_json, sha256_file
 from ..logs import get_logger, setup_logging
 from .config import Campaign
@@ -489,12 +489,13 @@ def run_campaign(campaign: Campaign, workspace: str | Path, *, device="cuda:0",
 
                         saved_identity = record["training_identity"]
                         rows = saved_identity["data"]["train"]["rows"]
-                        per_epoch = -(-rows // spec.preset.batch_size)
-                        total = per_epoch * spec.preset.epochs
+                        preset = training_preset(c.method, spec.preset)
+                        per_epoch = -(-rows // preset.batch_size)
+                        total = per_epoch * preset.epochs
                         if maximum:
                             total = min(total, maximum)
                         requested = fit_identity(c, SimpleNamespace(identity=saved_identity["data"]),
-                                                 spec.preset, total_steps=total, per_epoch=per_epoch,
+                                                 preset, total_steps=total, per_epoch=per_epoch,
                                                  code_version=__version__)
                         if not compatible_fit_identity(saved_identity, requested):
                             raise RuntimeError(f"{c.slug}: source checkpoint uses a different training recipe")

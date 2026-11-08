@@ -71,6 +71,15 @@ L = L(k) + 0.125·L(4k) + (1/32)·NMSE_aux + γ·L_reg
 
 ## The five methods
 
+`mpsae` and `mpsaev2` use training batches of **1024** on every backbone and
+the original constant learning rate of **4e-5**. `csr`, `csrv2` and
+`csr_multitopk` retain their backbone batch-size presets. OT solver limits
+remain **400** initial iterations and **8000** refinement iterations;
+convergence can stop a solve earlier. Epochs, OT groups of 32, loss weights
+and tolerances are unchanged. Update counts and annealing schedules are
+computed from the effective batch size. Run identities and campaign metadata
+record the effective recipe; checkpoints with different settings cannot resume.
+
 | method | K during training | gates per step | regulariser | extra reconstruction |
 |---|---|---|---|---|
 | `csr` | fixed K | K, 4K, K | γ·`inbatch_cl` | — |
@@ -179,8 +188,8 @@ ours.
 ### mpsaev2
 
 `csrv2` with the contrastive term replaced by the OT gap: the main budget
-anneals, the OT views are `k(t)`, `2k(t)`, `4k(t)`. Against `csrv2` the only
-difference is the regulariser, which is what makes that comparison readable.
+anneals, the OT views are `k(t)`, `2k(t)`, `4k(t)`. Against `csrv2`, the
+regulariser and, for the 4096-row backbone presets, batch size differ.
 
 This is "variant B". Variant A — fixed main budget, annealing only the OT
 comparison views — is specified in [`notes/mpsaev2_legacy_A.md`](notes/mpsaev2_legacy_A.md)
@@ -193,8 +202,8 @@ couples the views with OT. Without a control, a gain could be explained by
 either. `csr_multitopk` keeps CSR's contrastive term and its gate sequence and
 adds only `L(2K)/8`, so:
 
-* **MPSAE > csr_multitopk** isolates the OT coupling from merely supervising a
-  2K view;
+* **MPSAE > csr_multitopk** compares OT coupling with supervising a 2K view,
+  including batch-size and update-count differences where applicable;
 * **csr_multitopk > csr** measures what the extra view alone buys.
 
 It follows CSRv2 App. G's "Diverse Multi-TopK" ablation in spirit, which found

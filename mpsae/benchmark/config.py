@@ -11,7 +11,7 @@ from pathlib import Path
 import re
 from typing import Any
 
-from ..config import BACKBONES, METHODS, SEEDS, Cell, grid
+from ..config import BACKBONES, METHODS, SEEDS, Cell, grid, training_preset
 from ..io import canonical_hash
 
 DATASET_NAMES = ("eurosat", "flowers102", "sop")
@@ -151,6 +151,10 @@ class Campaign:
             payload["execution"].pop("storage_mode")
             payload["execution"].pop("cleanup_raw")
         payload["presets"] = {name: asdict(BACKBONES[name].preset) for name in self.backbones}
+        payload["method_presets"] = {
+            name: {method: asdict(training_preset(method, BACKBONES[name].preset))
+                   for method in self.methods}
+            for name in self.backbones}
         payload["resolved_budgets"] = {name: {
             "imagenet_train_k": self.budgets("imagenet", "train_k", name),
             "downstream_train_k": self.budgets("downstream", "train_k", name),

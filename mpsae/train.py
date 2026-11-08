@@ -21,7 +21,7 @@ import time
 from typing import Any
 
 from . import methods
-from .config import BACKBONES, Backbone, Cell, TrainPreset
+from .config import BACKBONES, Backbone, Cell, TrainPreset, training_preset
 from .features import Bundle, BatchSource
 from .io import atomic_json, canonical_hash, exclusive_lock, read_json, read_jsonl, truncate_jsonl
 from .logs import MetricWriter, Progress, format_duration, get_logger
@@ -70,6 +70,7 @@ def total_updates(bundle: Bundle, preset: TrainPreset, *, max_steps: int = 0) ->
 def fit_identity(cell: Cell, bundle: Bundle, preset: TrainPreset, *,
                  total_steps: int, per_epoch: int, code_version: str) -> dict[str, Any]:
     """Everything that must match for a checkpoint to be resumable."""
+    preset = training_preset(cell.method, preset)
     identity = {
         "format": CHECKPOINT_FORMAT,
         "code_version": code_version,
@@ -194,7 +195,7 @@ def _fit(cell: Cell, bundle: Bundle, out_dir: str | Path, settings: FitSettings,
     import torch
 
     spec = spec or BACKBONES[cell.backbone]
-    preset = spec.preset
+    preset = training_preset(cell.method, spec.preset)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     log = get_logger(f"fit {cell.slug}")

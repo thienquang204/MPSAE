@@ -26,7 +26,7 @@ SEEDS = (1227, 2026, 2027)
 
 @dataclass(frozen=True)
 class TrainPreset:
-    """Optimisation settings shared by all methods on one backbone."""
+    """Backbone settings; MPSAE-family training uses batches of 1024."""
 
     name: str
     hidden_dim: int = 8192
@@ -48,8 +48,8 @@ class TrainPreset:
     ot_mass: float = 0.9
     ot_eta: float = 0.2
     ot_microbatch: int = 32
-    ot_max_iters: int = 100
-    ot_max_refine_iters: int = 2000
+    ot_max_iters: int = 400
+    ot_max_refine_iters: int = 8000
     ot_tol: float = 1e-4
 
     def __post_init__(self) -> None:
@@ -64,6 +64,13 @@ FF2048_PRESET = TrainPreset(name="paper-table3", batch_size=4096, cl_coef=0.1)
 
 #: CSR Table 9 (timm backbones, empirical input-dimension study).
 TIMM_PRESET = TrainPreset(name="paper-table9", batch_size=1024, cl_coef=1.0)
+
+
+def training_preset(method: str, preset: TrainPreset) -> TrainPreset:
+    """Resolve the MPSAE batch size while preserving baseline recipes."""
+    if method not in METHODS:
+        raise ValueError(f"unknown method {method!r}")
+    return replace(preset, batch_size=1024) if method in OURS else preset
 
 
 # ---------------------------------------------------------------- backbone

@@ -15,7 +15,9 @@ forward passes, the third only to produce a duplicate contrastive view. Our
 methods spend the third gate on the 2K view they actually consume. The
 ``csr_multitopk`` ablation deliberately matches our gate sequence, so the only
 difference from ``csr`` is the extra ``L(2K)/8`` reconstruction term and the
-only difference from ``mpsae`` is OT versus contrastive.
+objective differences from ``mpsae`` are the extra reconstruction and OT
+versus contrastive. MPSAE uses batches of 1024; baseline batch sizes follow
+the backbone preset, so update counts can also differ.
 
 Shared objective (released CSR):
 
@@ -23,8 +25,8 @@ Shared objective (released CSR):
 
 ``mpsaev2`` is the "variant B" the user selected: the *main* budget anneals, so
 it is CSRv2 with the contrastive term replaced by the OT gap, and a comparison
-against ``csrv2`` isolates exactly that substitution. The alternative (fixed
-main budget, annealed OT views only) is recorded in
+against ``csrv2`` also includes the MPSAE batch-size setting. The alternative
+(fixed main budget, annealed OT views only) is recorded in
 ``docs/notes/mpsaev2_legacy_A.md`` and is not implemented.
 """
 from __future__ import annotations
