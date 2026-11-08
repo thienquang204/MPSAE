@@ -231,8 +231,8 @@ def test_missing_ffcv_fails_before_downloading_any_dataset(tmp_path, monkeypatch
     monkeypatch.setattr(figures, "build_all", lambda *args, **kwargs: {"skipped": []})
     with pytest.raises(RuntimeError, match="ImageNet GPU extraction needs ffcv, cupy") as failure:
         run.run_campaign(campaign, tmp_path, device="cuda:0")
-    assert "bash scripts/setup_server.sh" in str(failure.value)
-    assert "source scripts/activate_server.sh" in str(failure.value)
+    assert "bash setup_server.sh" in str(failure.value)
+    assert "source activate_server.sh" in str(failure.value)
     assert "Docker" not in str(failure.value)
     assert heavy_boundaries.dataset_loads == []
     assert heavy_boundaries.source_loads == []
@@ -264,7 +264,7 @@ def test_broken_installed_ffcv_fails_before_downloading_any_dataset(tmp_path, mo
     with pytest.raises(RuntimeError, match="ffcv is installed but cannot import") as failure:
         run.run_campaign(campaign, tmp_path, device="cuda:0")
     assert "libturbojpeg.so missing" in str(failure.value)
-    assert "bash scripts/setup_server.sh" in str(failure.value)
+    assert "bash setup_server.sh" in str(failure.value)
     assert heavy_boundaries.dataset_loads == []
     assert heavy_boundaries.source_loads == []
 
@@ -274,7 +274,9 @@ def test_downstream_campaign_reuses_source_and_resumes_all_dataset_budget_points
     sources = [_write_source(tmp_path, cell) for cell in campaign.source_cells()]
     before = {str(path): path.read_bytes() for directory in sources for path in directory.iterdir()}
 
-    manifest = run.run_campaign(campaign, tmp_path, device="cpu", workers=0)
+    observed = []
+    observer = SimpleNamespace(on_task=lambda name, result: observed.append(name))
+    manifest = run.run_campaign(campaign, tmp_path, device="cpu", workers=0, observer=observer)
     status = run.campaign_status(campaign, tmp_path)
     catalog = status["catalog"]
     expected = campaign.plan()
@@ -283,6 +285,8 @@ def test_downstream_campaign_reuses_source_and_resumes_all_dataset_budget_points
         "source_cells": 2, "imagenet_e1": 0, "imagenet_e2": 0}
     assert expected["downstream_sparse_points"] == 12
     assert expected["downstream_dense_points"] == 3
+    assert len([name for name in observed if name.startswith("retrieval/")]) == 12
+    assert len([name for name in observed if name.startswith("source/")]) == 2
     assert len(catalog["evaluations"]) == 15
     assert heavy_boundaries.fit_calls == []
     assert len(heavy_boundaries.models) == 2

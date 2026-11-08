@@ -2,7 +2,7 @@
 
 Credentials are read from the environment (normally via ``.env``); everything
 else has a default that reproduces the paper settings. ``run`` executes the
-whole pipeline, which is what ``scripts/pipeline.sh`` calls.
+whole pipeline, which is what ``pipeline.sh`` calls.
 """
 from __future__ import annotations
 

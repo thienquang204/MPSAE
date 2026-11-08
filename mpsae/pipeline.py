@@ -31,9 +31,11 @@ STAGES = ("env", "imagenet", "ffcv", "embed", "publish", "train", "report")
 #: kernels for each. CUDA 13 dropped everything below sm_75, so an older card
 #: needs a 12.x build; Blackwell needs 12.8 or any 13.x.
 ARCHITECTURE_NOTES = {"8.0": ("A100", (12, 0)),
+                      "8.6": ("RTX A6000", (12, 0)),
                       "8.9": ("L40S / RTX 4090", (12, 0)),
-                      "9.0": ("H100", (12, 1)),
+                      "9.0": ("H100 / H200", (12, 1)),
                       "10.0": ("Blackwell datacentre", (12, 8)),
+                      "10.3": ("GB300 / B300", (12, 9)),
                       "12.0": ("RTX 5090 / RTX PRO 6000", (12, 8))}
 #: CUDA 13 compiles only for sm_75 and above.
 CUDA13_MIN_CAPABILITY = 7.5
@@ -155,12 +157,12 @@ def stage_env(options: PipelineOptions) -> dict[str, Any]:
             if needed and runtime and runtime < needed:
                 problems.append(
                     f"{label} needs CUDA {needed[0]}.{needed[1]} or newer, but torch is built "
-                    f"against {facts.get('cuda')}; reinstall with scripts/setup_server.sh")
+                    f"against {facts.get('cuda')}; reinstall with setup_server.sh")
             if runtime and runtime[0] >= 13 and capability < CUDA13_MIN_CAPABILITY:
                 problems.append(
                     f"torch is a CUDA {runtime[0]} build, which dropped {label}; that GPU needs "
                     "a CUDA 12.x PyTorch build in a matching environment; "
-                    "the native setup script targets A100")
+                    "run the native setup_server.sh with a matching CUDA 12.x profile")
         # The driver bounds the runtime that can load at all: CUDA 13 needs the
         # r580 branch, 12.8 needs r570. This fails at the first kernel launch,
         # often minutes into a stage, so it is worth catching here.
@@ -170,7 +172,7 @@ def stage_env(options: PipelineOptions) -> dict[str, Any]:
                 problems.append(
                     f"driver branch {driver} cannot load a CUDA {facts.get('cuda')} build "
                     f"(needs >= {required_driver}); either update the driver or install a "
-                    "matching wheel with scripts/setup_server.sh")
+                    "matching wheel with setup_server.sh")
 
     needs_ffcv = any(BACKBONES[name].recipe == "csrv2" for name in options.backbones)
     for module, why in (("torch", "training"), ("numpy", "everything"),

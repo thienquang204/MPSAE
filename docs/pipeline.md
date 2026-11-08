@@ -1,6 +1,6 @@
 # Legacy ImageNet stage interface
 
-For the native A100 installation and the combined ImageNet/downstream campaign,
+For the native GPU installation and the combined ImageNet/downstream campaign,
 use [server.md](server.md) and [benchmark.md](benchmark.md). This page describes
 the older ImageNet-only stage/grid interface. Its direct Python examples assume
 `MPSAE_CONFIG` is unset and omit `--config`. The shell launcher now defaults to
@@ -82,7 +82,7 @@ The phase times above are rough historical estimates, not A100 guarantees.
 ## Command line
 
 `python -m mpsae [global options] <command>`. First source
-`scripts/activate_server.sh` to use the installed environment. The shell
+`activate_server.sh` to use the installed environment. The shell
 launcher is the campaign interface documented in `benchmark.md`; it saves a
 console transcript, while credential checks happen only in stages that need
 them. Metadata commands do not need a token.
@@ -134,9 +134,9 @@ first, and values already present in the environment win over the file.
 | `WANDB_API_KEY` | `logs.open_wandb` | W&B is enabled only when both this and a project are set, and a W&B failure never fails the pipeline |
 | `WANDB_PROJECT` | `--wandb-project` default | as above |
 | `HF_HOME` | `huggingface_hub` | point the Hub cache at the big disk, not `/` |
-| `MPSAE_CUDA_HOME` | `scripts/setup_server.sh` | custom CUDA 12.6 toolkit location; A100 Python/CUDA package versions are pinned |
-| `MPSAE_ENV_FILE`, `MPSAE_PYTHON` | `scripts/pipeline.sh` | which `.env` and which interpreter |
-| `PYTORCH_CUDA_ALLOC_CONF` | torch | optional allocator setting; set by the shell launcher, but not required by the A100 installer |
+| `MPSAE_CUDA_HOME` | `setup_server.sh` | custom toolkit location matching the selected CUDA profile; preview with `--dry-run` |
+| `MPSAE_ENV_FILE`, `MPSAE_PYTHON` | `pipeline.sh` | which `.env` and which interpreter |
+| `PYTORCH_CUDA_ALLOC_CONF` | torch | optional allocator setting; set by the shell launcher, but not required by the installer |
 | `NO_COLOR` | `logs.setup_logging` | suppress ANSI colour on the console handler |
 
 Nothing from `.env` is ever written to a log or a manifest.
@@ -308,9 +308,9 @@ fragment to find the site.
 | `HF_TOKEN is unset; ILSVRC/imagenet-1k is gated` | `env` found no token | accept the terms at the dataset page with the account that owns the token, put it in `.env` |
 | `cannot resolve dataset ILSVRC/imagenet-1k@main (...); accept the access conditions at ...` | the token exists but that account has not accepted the gate, or the token lacks read scope | same page, same account. There is no substitute dataset and the code will not silently pick one |
 | `publishing needs a write-scoped HF_TOKEN` | `--hf-repo`/`HF_EMBEDDINGS_REPO` set, token not write-scoped | issue a write token, or unset the repo to skip `publish` |
-| `ImageNet GPU extraction needs ffcv, cupy`, or `ffcv is not importable` | incomplete server environment or wrong interpreter | on A100 run `bash scripts/setup_server.sh`, then `source scripts/activate_server.sh`; see [server.md](server.md) |
-| `sm_90 needs CUDA 12.1 or newer, but torch is built against 11.8` | wheel too old for the card | the native installer targets A100; other hardware needs its own matching environment |
-| `torch is a CUDA 13 build, which dropped sm_70` | a V100 needs a 12.x wheel | use an appropriate separate environment; the A100 installer does not target V100 |
+| `ImageNet GPU extraction needs ffcv, cupy`, or `ffcv is not importable` | incomplete server environment or wrong interpreter | run `bash setup_server.sh`, then `source activate_server.sh`; see [server.md](server.md) |
+| `sm_90 needs CUDA 12.1 or newer, but torch is built against 11.8` | wheel too old for the card | run the GPU-detecting `setup_server.sh` on that machine |
+| `torch is a CUDA 13 build, which dropped sm_70` | a V100 needs a 12.x wheel | the native installer selects a CUDA 12.x profile |
 | `driver branch 570 cannot load a CUDA 13.2 build (needs >= 580)` | driver below the runtime's floor | newer driver image from the provider, or a matching wheel. This would otherwise fail at the first kernel launch, minutes into a stage |
 | `exact top-1 over 1,281,167 x 50,000 at dim=8192 needs ... plus 1.0 GiB reserve on cuda:0 (... free). Lower gallery_chunk, query_block, or the query split size.` | out of VRAM at search time | lower `RunSettings.gallery_chunk` (32768) and `query_block` (8192) in `mpsae/runs.py`. The check runs before the loop, so you lose nothing but the setup |
 | `sparse retrieval score buffer needs ...` | the optional timing harness, not the metric | same two knobs, or set `RunSettings.measure_timing = False` |
@@ -336,7 +336,7 @@ fragment to find the site.
 
 ```bash
 tmux new -s mpsae
-source scripts/activate_server.sh
+source activate_server.sh
 python -m mpsae run
 # C-b d to detach, tmux attach -t mpsae to come back
 ```

@@ -24,7 +24,7 @@ CHUNK_SIZE = 100
 _SYNSET = re.compile(r"n[0-9]{8}")
 
 FFCV_MISSING = ("ffcv is not importable. The CSRv2 recipe needs it to write and read the "
-                "dataset; install the pinned environment with scripts/setup_server.sh "
+                "dataset; install the pinned environment with setup_server.sh "
                 "(conda: opencv, libjpeg-turbo, pkg-config, then ffcv).")
 
 

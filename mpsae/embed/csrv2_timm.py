@@ -31,7 +31,7 @@ CROP_RATIO = 224 / 256
 WEIGHT_FILE = "model.safetensors"
 
 FFCV_MISSING = ("ffcv is not importable. The CSRv2 recipe reads its dataset through FFCV; "
-                "run 'bash scripts/setup_server.sh', then 'source scripts/activate_server.sh'.")
+                "run 'bash setup_server.sh', then 'source activate_server.sh'.")
 
 
 def _deviations(spec: Backbone, mean, std, source: str) -> list[str]:

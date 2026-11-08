@@ -20,7 +20,7 @@ wandb/
 .repair-uv-cache/
 .venv/
 .setup-logs/
-scripts/env.sh
+env.sh
 .codex-uv-cache/
 .codex-tests/
 .pytest*/

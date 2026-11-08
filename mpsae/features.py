@@ -91,7 +91,7 @@ def load_bundle(spec: Backbone, embeddings_dir: str | Path, cache_dir: str | Pat
         if not path.is_file():
             raise FileNotFoundError(
                 f"missing {split} embeddings for {spec.name}: {path}. Run the embedding "
-                f"stage first: ./scripts/pipeline.sh stage embed -- --backbones {spec.name}")
+                f"stage first: ./pipeline.sh stage embed -- --backbones {spec.name}")
         # Current writers append .json to the complete archive name. Retain
         # support for earlier hand-provided sidecars without rewriting them.
         manifest = (read_json(path.with_name(path.name + ".json"))

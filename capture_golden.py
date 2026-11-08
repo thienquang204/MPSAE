@@ -3,7 +3,7 @@
 
 Run this on a machine with torch, once, before removing the legacy modules:
 
-    python scripts/capture_golden.py
+    python capture_golden.py
 
 It checks out the pre-rewrite commit into a temporary worktree, imports the old
 ``mpsae_repair`` from there, evaluates the transport primitives on fixed CPU

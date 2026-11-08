@@ -31,4 +31,4 @@ two. They are all listed in [`data.md`](data.md).
 
 The rewrite has not executed on a GPU yet. Tests that need torch skip on a
 machine without it, and the OT golden fixtures still need a one-off capture
-(`scripts/capture_golden.py`). The first real `--smoke` run is the actual test.
+(`capture_golden.py`). The first real `--smoke` run is the actual test.

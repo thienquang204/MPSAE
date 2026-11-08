@@ -270,7 +270,7 @@ def maybe_build_inverted_index(*, source_dir: str | Path | None = None,
                                verbose: bool = False) -> Any:
     """Compile and return the ``csrc/`` inverted-index extension, or ``None``.
 
-    Respect explicit TORCH_CUDA_ARCH_LIST (the native A100 profile sets 8.0).
+    Respect TORCH_CUDA_ARCH_LIST generated from the selected GPU capabilities.
     Otherwise try this device plus H100 and Blackwell, then fall back to the
     running device alone: older nvcc rejects ``12.0`` outright. A second
     failure is logged and swallowed -- this is a secondary number and must never
@@ -296,8 +296,8 @@ def maybe_build_inverted_index(*, source_dir: str | Path | None = None,
     previous = os.environ.get("TORCH_CUDA_ARCH_LIST")
     configured = previous.replace(" ", ";").split(";") if previous else []
     primary = [arch for arch in configured if arch] or sorted({device_arch, *EXTENSION_ARCHES})
-    # The native A100 setup explicitly requests 8.0. Respect it rather than
-    # first asking CUDA 12.6 to compile unsupported Blackwell targets.
+    # Honor the installer's detected architectures rather than first compiling
+    # optional architectures that the selected toolkit may not support.
     attempts = (primary,) if primary == [device_arch] else (primary, [device_arch])
     try:
         for arches in attempts:

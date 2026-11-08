@@ -11,6 +11,7 @@ Every stage writes three things:
 from __future__ import annotations
 
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 import json
 import logging
@@ -24,6 +25,7 @@ from .io import append_jsonl, atomic_json, read_json
 
 LOGGER_NAME = "mpsae"
 _CONFIGURED = False
+METRIC_SINK: ContextVar[Any] = ContextVar("mpsae_metric_sink", default=None)
 
 
 class _Formatter(logging.Formatter):
@@ -131,6 +133,12 @@ class MetricWriter:
         if step is not None:
             payload["step"] = step
         append_jsonl(self.path, payload)
+        sink = METRIC_SINK.get()
+        if sink is not None:
+            try:
+                sink(self.stage, record, step)
+            except Exception:
+                get_logger(self.stage).warning("Remote metric logging failed; local JSONL was saved")
         self._count += 1
         if console:
             get_logger(self.stage).info("%s", console)

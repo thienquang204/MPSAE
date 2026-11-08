@@ -24,39 +24,53 @@ retrieval benchmarks. `.env` holds credentials and environment settings;
 `configs/thesis.yaml` selects the experiments. No downstream fine-tuning runs.
 
 ```bash
-bash scripts/setup_server.sh                # once, on the Ubuntu A100 server
-source scripts/activate_server.sh           # each new shell
-# Edit .env: set HF_TOKEN for gated ImageNet access.
-python -m mpsae --config configs/thesis.yaml plan
-python -m mpsae --config configs/smoke.yaml --smoke run
-python -m mpsae --config configs/thesis.yaml run
-python -m mpsae --config configs/thesis.yaml status
-python -m mpsae --config configs/thesis.yaml report
+cp .env.example .env                       # if .env does not exist yet
+# Fill HF_TOKEN (read + write) and WANDB_TOKEN in .env.
+bash all_in_one.sh                 # install -> run -> back up
 ```
+
+The all-in-one entry point detects the NVIDIA GPU/CPU architecture, installs
+the matching native environment and runs the
+campaign. HF_TOKEN identifies the account: it creates/reuses the private dataset
+repository `<account>/MPSAE`. W&B uses project `cvpr`, with the account's default
+entity; `WANDB_TOKEN` and the standard `WANDB_API_KEY` are both accepted. No
+repository, project or team needs to be created manually.
 
 Python runs selected fits and evaluations sequentially, reuses compatible
 ImageNet checkpoints, and writes a campaign report from the explicit result
 list. Repeating the command resumes unfinished work. See
 [`docs/benchmark.md`](docs/benchmark.md) for the dataset protocols, result
-identities, figure definitions and server commands.
+identities, figure definitions and server commands. Expensive source fits and
+feature archives are backed up as they finish; the final sync includes metrics,
+plots and campaign state, also after a failed run. Raw images, caches, `.env`
+and W&B internal files are excluded. Upload failures are recorded and can be
+retried without retraining:
 
-The native installer requires Ubuntu 22.04/24.04 x86_64, an A100 and an existing
-driver >= 560.28.03. It installs system libraries and CUDA Toolkit 12.6 using
+```bash
+bash all_in_one.sh --skip-setup    # resume with installed environment
+bash all_in_one.sh --sync-only    # retry backup and W&B report only
+bash all_in_one.sh --check        # check/create remote destinations
+```
+
+The native installer supports Ubuntu 22.04/24.04 on x86_64 and ARM64/SBSA.
+It selects CUDA 12.6 for A100/RTX A6000/RTX 4090/H100/H200, CUDA 12.8 for
+RTX 5090, and CUDA 12.9 for GB300. The existing driver must meet the selected
+profile's requirement. It installs system libraries and that toolkit using
 root/sudo, creates `.venv`, installs the pinned PyTorch/FFCV/CuPy environment,
 then checks actual GPU kernels and the project's FFCV preprocessing pipeline.
 It creates `.env` only when missing; fill in the token after installation.
 It does not download datasets or start training. Preview its plan with:
 
 ```bash
-bash scripts/setup_server.sh --dry-run
+bash setup_server.sh --dry-run
 ```
 
 The shell launcher uses the same Python CLI and also saves a console transcript:
 
 ```bash
-bash scripts/pipeline.sh                # configs/thesis.yaml
-bash scripts/pipeline.sh status
-bash scripts/pipeline.sh report
+bash pipeline.sh                # configs/thesis.yaml
+bash pipeline.sh status
+bash pipeline.sh report
 ```
 
 Use `--config` with direct Python commands to select the campaign explicitly.
@@ -71,10 +85,10 @@ numbers are not science and are labelled synthetic in the manifests.
 
 ### Hardware
 
-x86_64, ≥ 24 GB VRAM (40–80 GB comfortable), ≥ 64 GB RAM, ≥ 16 CPU cores,
+x86_64 or ARM64/SBSA, ≥ 24 GB VRAM (40–80 GB comfortable), ≥ 64 GB RAM, ≥ 16 CPU cores,
 ≥ 500 GB SSD.
 
-The native A100 profile uses PyTorch 2.9.1 / torchvision 0.24.1 with CUDA 12.6,
+All native GPU profiles use PyTorch 2.9.1 / torchvision 0.24.1,
 FFCV 1.0.2 and CuPy 13.6.0. Constraints keep NumPy/OpenCV/Numba compatible with
 the released FFCV code. Setup stops on a failed dependency or GPU check;
 `requirements.txt` alone is not the complete server installation. Details in
@@ -217,14 +231,16 @@ mpsae/
   runs.py        the grid, E1 and E2
   pipeline.py    stages: env → imagenet → ffcv → embed → publish → train → report
   cli.py         python -m mpsae
-  server.py      native A100 GPU/dependency verification
+  server.py      native NVIDIA GPU/dependency verification
+  remote.py      private MPSAE backup, cvpr tracking, all-in-one orchestration
   data/          ImageNet acquisition, FFCV serialisation
   embed/         MRL and CSRv2 extraction recipes, archive writer
   evaluate/      encoding, exact 1-NN, probes, retrieval timing
   report/        aggregation, published references, style, figures
 csrc/            CUDA inverted index (optional secondary metric)
-scripts/         setup_server.sh, activate_server.sh, pipeline.sh, capture_golden.py
-constraints/     pinned native A100 dependency versions
+*.sh             all_in_one.sh, setup_server.sh, activate_server.sh, pipeline.sh
+capture_golden.py one-off OT fixture capture
+constraints/     shared native GPU dependency versions
 tests/reference/ transcribed CSR/CSRv2 source, used only as a test oracle
 docs/            methods, data provenance, pipeline, outputs, server setup
 ```
@@ -256,7 +272,7 @@ float32 behaviour of the solver depends on association order that no paper
 documents:
 
 ```bash
-python scripts/capture_golden.py      # reads the pre-rewrite code out of git
+python capture_golden.py      # reads the pre-rewrite code out of git
 ```
 
 Until that file exists the OT contract tests still run; only the

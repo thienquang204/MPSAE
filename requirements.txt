@@ -1,5 +1,5 @@
-# General dependencies. For the complete native A100 environment, run
-# bash scripts/setup_server.sh (uses requirements-server.txt and pinned cu126).
+# General dependencies. For the complete native NVIDIA environment, run
+# bash setup_server.sh (selects matching cu126/cu128/cu129 and server constraints).
 #
 # FAISS is deliberately absent. Its GPU wheels lag new architectures, and on
 # L2-normalised vectors a blocked FP32 GEMM argmax is exactly equivalent to

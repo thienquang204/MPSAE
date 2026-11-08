@@ -2,7 +2,7 @@
 
 The contracts hold always. The golden comparison runs only when
 ``tests/golden/ot_reference.json`` exists -- produce it once with
-``python scripts/capture_golden.py`` on a machine with torch, which reads the
+``python capture_golden.py`` on a machine with torch, which reads the
 pre-rewrite implementation out of git. Until then these tests still check that
 the solver is feasible, the gap is nonnegative, and the gradient is the
 envelope gradient.
@@ -201,7 +201,7 @@ def test_rejects_invalid_problems(torch):
 # -------------------------------------------------------------- golden values
 
 @pytest.mark.skipif(not GOLDEN.is_file(),
-                    reason="run scripts/capture_golden.py on a torch machine first")
+                    reason="run capture_golden.py on a torch machine first")
 def test_matches_the_pinned_legacy_numerics(torch):
     payload = json.loads(GOLDEN.read_text(encoding="utf-8"))
     for case in payload["cases"]:

@@ -1,4 +1,4 @@
-# Optional container image. On a rented box, scripts/setup_server.sh is simpler
+# Optional container image. On a rented box, setup_server.sh is simpler
 # and faster; this exists for reproducibility and for schedulers that want an
 # image.
 #
@@ -39,6 +39,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /opt/mpsae
 COPY requirements.txt .
+COPY requirements-server.txt .
+COPY constraints/ ./constraints/
 RUN python3 -m pip install --upgrade pip wheel setuptools \
     && python3 -m pip install --index-url "${TORCH_INDEX}" torch torchvision \
     && python3 -m pip install -r requirements.txt ninja
@@ -55,7 +57,7 @@ RUN case "${CUDA_TAG%%.*}" in \
 
 COPY mpsae/ ./mpsae/
 COPY csrc/ ./csrc/
-COPY scripts/ ./scripts/
+COPY setup_server.sh activate_server.sh all_in_one.sh pipeline.sh capture_golden.py ./
 COPY tests/ ./tests/
 COPY configs/ ./configs/
 

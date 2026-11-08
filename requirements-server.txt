@@ -1,6 +1,6 @@
-# Full native A100 environment; installed by scripts/setup_server.sh.
-# CUDA PyTorch wheels are installed first from the cu126 index by that script.
--c constraints/server-a100.txt
+# Native NVIDIA environment; setup_server.sh selects cu126/cu128/cu129.
+# The matched PyTorch wheels are installed before these shared dependencies.
+-c constraints/server.txt
 -r requirements.txt
 torch==2.9.1
 torchvision==0.24.1

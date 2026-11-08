@@ -291,7 +291,7 @@ def report_campaign(campaign: Campaign, workspace: str | Path, *, smoke=False):
 
 
 def run_campaign(campaign: Campaign, workspace: str | Path, *, device="cuda:0",
-                 workers=16, embed_batch_size=256, smoke=False) -> dict[str, Any]:
+                 workers=16, embed_batch_size=256, smoke=False, observer=None) -> dict[str, Any]:
     import os
     import torch
 
@@ -319,7 +319,8 @@ def run_campaign(campaign: Campaign, workspace: str | Path, *, device="cuda:0",
         atomic_json(paths["state"] / "resolved.json", plan)
         atomic_json(paths["state"] / "runtime.json", {
             "device": device, "smoke": smoke, "code_version": __version__, "git_commit": commit,
-            "torch": str(torch.__version__), "workers": workers, "embed_batch_size": embed_batch_size})
+            "torch": str(torch.__version__), "workers": workers, "embed_batch_size": embed_batch_size,
+            "native_profile": read_json(Path(sys.prefix) / "server-profile.json")})
         catalog = {"plan_id": plan["plan_id"], "checkpoints": {}, "evaluations": [],
                    "imagenet": [], "dense": {}, "scientific": not smoke}
         state = {"plan_id": plan["plan_id"], "complete": False, "tasks": {}, "failures": []}
@@ -344,6 +345,8 @@ def run_campaign(campaign: Campaign, workspace: str | Path, *, device="cuda:0",
                 return None
             state["tasks"][name] = {"state": "done"}
             persist()
+            if observer is not None:
+                observer.on_task(name, result)
             return result
 
         options = PipelineOptions(paths=Paths(root), backbones=campaign.backbones,
@@ -370,8 +373,8 @@ def run_campaign(campaign: Campaign, workspace: str | Path, *, device="cuda:0",
                     if missing_imports:
                         raise RuntimeError("ImageNet GPU extraction needs " + ", ".join(missing_imports)
                                            + f" in the active interpreter ({sys.executable}). "
-                                           "Run 'bash scripts/setup_server.sh', then "
-                                           "'source scripts/activate_server.sh' and retry. "
+                                           "Run 'bash setup_server.sh', then "
+                                           "'source activate_server.sh' and retry. "
                                            "See docs/server.md; installing requirements.txt alone "
                                            "does not install the full server environment.")
                     # A package may be installed yet fail at import because
@@ -384,8 +387,8 @@ def run_campaign(campaign: Campaign, workspace: str | Path, *, device="cuda:0",
                         except Exception as error:
                             raise RuntimeError(
                                 f"{module} is installed but cannot import in {sys.executable}: {error}. "
-                                "Run 'bash scripts/setup_server.sh', then "
-                                "'source scripts/activate_server.sh'; see docs/server.md."
+                                "Run 'bash setup_server.sh', then "
+                                "'source activate_server.sh'; see docs/server.md."
                             ) from error
             if not smoke and campaign.downstream["enabled"]:
                 import importlib.util

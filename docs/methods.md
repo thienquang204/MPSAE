@@ -277,4 +277,4 @@ three Adam steps against it. `tests/test_schedules.py` checks the annealing at
 every step of several schedules. `tests/test_methods.py` checks that the five
 methods differ only as designed. `tests/test_ot.py` checks feasibility,
 nonnegativity, the envelope gradient and group independence, plus the pinned
-legacy numerics once `scripts/capture_golden.py` has been run on a GPU box.
+legacy numerics once `capture_golden.py` has been run on a GPU box.

@@ -12,15 +12,25 @@ adversarial perturbations; those need separate datasets and protocols.
 ## Native Python, one configuration
 
 ```bash
-bash scripts/setup_server.sh
-source scripts/activate_server.sh
-# Set HF_TOKEN in .env after accepting ImageNet access conditions.
-python -m mpsae --config configs/thesis.yaml plan
-python -m mpsae --config configs/thesis.yaml run
+cp .env.example .env                         # if creating a new .env
+# Fill HF_TOKEN (read + write) and WANDB_TOKEN.
+bash all_in_one.sh
 ```
 
-The supported native setup targets Ubuntu 22.04/24.04 and an A100 with driver
->= 560.28.03. It installs the complete pinned CUDA 12.6 Python environment,
+This installs and runs the native campaign, creates/reuses the private HF
+dataset `<account>/MPSAE` using HF_TOKEN, and logs to W&B project `cvpr` using
+WANDB_TOKEN (WANDB_API_KEY is also accepted). Project and account names do not
+need to be supplied. Checkpoints, feature archives and final reports are backed
+up, including partial results after failure. Retry only remote synchronization
+with `bash all_in_one.sh --sync-only`. A synthetic rehearsal via
+`bash all_in_one.sh --smoke` does not write to either service.
+
+Direct `python -m mpsae --config ...` commands below run locally. Automatic
+cloud operations belong to the all-in-one entry point (`python -m mpsae.remote`).
+
+The native setup targets Ubuntu 22.04/24.04 on x86_64 or ARM64/SBSA and detects
+A100, RTX A6000, RTX 4090/5090, H100/H200 and GB300 by compute capability.
+It selects the matching CUDA 12.6/12.8/12.9 profile and installs the Python environment,
 including mandatory FFCV/CuPy, and verifies real GPU operations before
 reporting success. See [server.md](server.md) for installation, logs and
 administrator-provided dependencies. The script creates `.env` only if it
@@ -45,16 +55,16 @@ host installation can use:
 python -m mpsae --config configs/smoke.yaml --smoke --device cpu run
 ```
 
-`scripts/pipeline.sh` wraps the same Python CLI, loads the generated CUDA paths
+`pipeline.sh` wraps the same Python CLI, loads the generated CUDA paths
 and saves a console transcript. The launcher uses an exported `MPSAE_CONFIG` or defaults to
 `configs/thesis.yaml`; `--smoke` defaults to `configs/smoke.yaml`. It accepts
 global options on either side of the command:
 
 ```bash
-bash scripts/pipeline.sh plan
-bash scripts/pipeline.sh --config configs/thesis.yaml --device cuda:0
-bash scripts/pipeline.sh report
-bash scripts/pipeline.sh stage embed -- --backbones ff2048
+bash pipeline.sh plan
+bash pipeline.sh --config configs/thesis.yaml --device cuda:0
+bash pipeline.sh report
+bash pipeline.sh stage embed -- --backbones ff2048
 ```
 
 `stage NAME` remains the original ImageNet-stage interface. On a host with
@@ -69,7 +79,7 @@ For an old-style report with a custom output directory, use
 Docker files remain available as an optional separate deployment. They are not
 used by the native installer or Python runner. The container defaults to
 `configs/thesis.yaml`, mounts `./work` and `./configs`, and uses
-`docker compose run --rm mpsae` to run; this path is not required on the A100
+`docker compose run --rm mpsae` to run; this path is not required on the native
 server. Its CUDA version is configured independently in `compose.yaml`.
 
 ## Configuration and execution
