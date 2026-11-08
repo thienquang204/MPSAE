@@ -179,7 +179,7 @@ GB, dinov2 2.0 GB; validation splits are 1/25th of those.
 `python -m mpsae.embeddings_hub` (also `bash embeddings.sh`) keeps every
 embedding set in one folder `<dataset>_<backbone>_<dim>` — `imagenet_ff2048_2048`,
 `sop_rn18_512`, `eurosat_dinov2_vits14_384` — locally under
-`work/embeddings-hub/` and in one private HF dataset `<account>/MPSAE-embeddings`.
+`work/embeddings-hub/` and in one private HF dataset, `Lukita/MPSAE-embeddings`.
 
 * Per folder: on this machine and on the Hub -> use the local one; only on
   this machine -> push it; only on the Hub -> pull it (every SHA-256 checked);
@@ -187,8 +187,8 @@ embedding set in one folder `<dataset>_<backbone>_<dim>` — `imagenet_ff2048_20
   `extract_bundle`; `storage_mode: direct_v1`), push it, verify the remote
   hashes, and only then delete the raw data. Pushes check the local hashes
   first and the remote hashes after.
-* Repository: `--repo owner/name` or `MPSAE_EMBEDDINGS_REPO` in `.env`;
-  default `<account>/MPSAE-embeddings`. It is created private if missing.
+* Repository: `Lukita/MPSAE-embeddings` (`--repo owner/name` to change); `.env`
+  only needs `HF_TOKEN` with access to it. Created private if missing.
 * Downstream features use the backbone weights recorded in that backbone's
   ImageNet folder, so ImageNet is always done first.
 * `bash all_in_one.sh` runs `embeddings_hub sync --config <campaign>` before the

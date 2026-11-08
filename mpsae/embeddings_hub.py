@@ -3,7 +3,7 @@
 Every embedding set lives in one folder named ``<dataset>_<backbone>_<dim>``
 (``imagenet_ff2048_2048``, ``sop_rn18_512``, ``eurosat_dinov2_vits14_384``),
 both locally under ``<workspace>/embeddings-hub/`` and in one private
-Hugging Face dataset repository (default ``<HF account>/MPSAE-embeddings``).
+Hugging Face dataset repository, ``Lukita/MPSAE-embeddings`` (``--repo`` to change).
 
 ``sync`` makes every selected folder present on this machine AND on the Hub:
 
@@ -60,7 +60,7 @@ from .io import atomic_json, read_json, sha256_file
 
 FORMAT = "mpsae-embedding-folder-v1"
 FOLDER_MANIFEST = "folder.json"
-REPOSITORY_NAME = "MPSAE-embeddings"
+DEFAULT_REPO = "Lukita/MPSAE-embeddings"
 IMAGENET = "imagenet"
 DENSE_GATE = 0.3       # percentage points, as the campaign's source gate
 
@@ -140,15 +140,9 @@ class Hub:
     def connect(cls, repo: str | None = None):
         token = os.environ.get("HF_TOKEN")
         if not token:
-            raise RuntimeError("Set HF_TOKEN (read ImageNet, write the embeddings repository)")
+            raise RuntimeError("Set HF_TOKEN (read ImageNet, read/write the embeddings repository)")
         from huggingface_hub import HfApi
-        api = HfApi(token=token)
-        if repo is None:
-            account = api.whoami().get("name")
-            if not account:
-                raise RuntimeError("HF_TOKEN did not resolve to a Hugging Face account")
-            repo = f"{account}/{REPOSITORY_NAME}"
-        return cls(api, repo, token=token)
+        return cls(HfApi(token=token), repo or DEFAULT_REPO, token=token)
 
     def files(self) -> set[str]:
         if self._files is None:
@@ -493,9 +487,8 @@ def main(argv=None) -> int:
     parser.add_argument("--datasets", help=f"comma-separated, default all: {','.join(all_datasets())}")
     parser.add_argument("--backbones", help=f"comma-separated, default all: {','.join(all_backbones())}")
     parser.add_argument("--workspace", default=os.environ.get("MPSAE_WORKSPACE", "work"))
-    parser.add_argument("--repo", default=os.environ.get("MPSAE_EMBEDDINGS_REPO") or None,
-                        help=f"owner/name (or MPSAE_EMBEDDINGS_REPO); default <HF account>/{REPOSITORY_NAME}, "
-                             "created private if missing")
+    parser.add_argument("--repo", default=DEFAULT_REPO,
+                        help="owner/name of the private embeddings dataset (created private if missing)")
     parser.add_argument("--device", default=os.environ.get("MPSAE_DEVICE", "cuda:0"))
     parser.add_argument("--workers", type=int, default=int(os.environ.get("MPSAE_WORKERS", "16")))
     parser.add_argument("--batch-size", "--embed-batch-size", dest="batch_size", type=int,

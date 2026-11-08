@@ -41,7 +41,7 @@ Usage: bash all_in_one.sh [options]
   --skip-embeddings
                  Do not run the embeddings step first (python -m mpsae.embeddings_hub
                  sync: pull each <dataset>_<backbone>_<dim> folder from the private
-                 HF repo MPSAE-embeddings, or build and upload it once).
+                 HF repo Lukita/MPSAE-embeddings, or build and upload it once).
   --cuda auto|13.0|12.6|12.8|12.9 --python PATH --skip-system-packages
                  Forwarded to setup_server.sh for flexible installation.
   --config PATH --env-file PATH --workspace PATH --device cuda:0
