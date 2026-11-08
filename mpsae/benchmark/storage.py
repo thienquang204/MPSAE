@@ -240,6 +240,14 @@ def run_targets(campaign, root, catalog, *, device, workers, batch_size, observe
                                   "recipe": "direct-target-lifecycle-v1"}
             receipts[backbone] = directory / f"{backbone}-bundle.json"
             bundles[backbone] = load_bundle_receipt(receipts[backbone], root, requests[backbone])
+            if bundles[backbone] is None:
+                # Features already built by mpsae.embeddings_hub with the same
+                # backbone weights: use them instead of downloading the dataset.
+                from ..embeddings_hub import load_campaign_hub_bundle
+                hub_bundle = load_campaign_hub_bundle(root, name, backbone, weights[backbone], root / "cache")
+                if hub_bundle is not None:
+                    save_bundle(hub_bundle, receipts[backbone], root, requests[backbone])
+                    bundles[backbone] = hub_bundle
         missing = [n for n, bundle in bundles.items() if bundle is None]
         if missing:
             # Leave room for features and transient archive writer before downloading.

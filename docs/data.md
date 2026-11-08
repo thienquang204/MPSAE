@@ -174,6 +174,33 @@ verified on every load, and the memory-mapped cache is keyed by it.
 Approximate sizes: ff2048 10.5 GB train, the 768-d backbones 3.9 GB, rn18 2.6
 GB, dinov2 2.0 GB; validation splits are 1/25th of those.
 
+## Embeddings repository (built once, then pulled)
+
+`python -m mpsae.embeddings_hub` (also `bash embeddings.sh`) keeps every
+embedding set in one folder `<dataset>_<backbone>_<dim>` — `imagenet_ff2048_2048`,
+`sop_rn18_512`, `eurosat_dinov2_vits14_384` — locally under
+`work/embeddings-hub/` and in one private HF dataset `<account>/MPSAE-embeddings`.
+
+* Per folder: on this machine and on the Hub -> use the local one; only on
+  this machine -> push it; only on the Hub -> pull it (every SHA-256 checked);
+  nowhere -> build it with the campaign's own extractors (`extract_source`,
+  `extract_bundle`; `storage_mode: direct_v1`), push it, verify the remote
+  hashes, and only then delete the raw data. Pushes check the local hashes
+  first and the remote hashes after.
+* Repository: `--repo owner/name` or `MPSAE_EMBEDDINGS_REPO` in `.env`;
+  default `<account>/MPSAE-embeddings`. It is created private if missing.
+* Downstream features use the backbone weights recorded in that backbone's
+  ImageNet folder, so ImageNet is always done first.
+* `bash all_in_one.sh` runs `embeddings_hub sync --config <campaign>` before the
+  campaign (`--skip-embeddings` turns it off) and hard-links the folders where
+  the campaign reads them: ImageNet archives into
+  `work/direct-v1/embeddings/<backbone>/`, downstream folders into
+  `work/direct-v1/benchmarks/<dataset>/hub/<backbone>/`. The campaign still runs
+  its own verification and uses a downstream folder only when its weights equal
+  the source checkpoint's; otherwise it extracts as before.
+* The campaign's own backup then uploads these features again to `<account>/MPSAE`
+  (its artifact backup); that copy is redundant but harmless.
+
 ## Publishing
 
 Optional, and never implied by a bare run: the publish stage is skipped unless
