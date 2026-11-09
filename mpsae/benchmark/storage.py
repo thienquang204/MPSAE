@@ -123,6 +123,9 @@ def prepare_sources(campaign, workspace, root, *, device, workers, batch_size, o
     with exclusive_lock(Path(workspace) / "state" / "direct-imagenet.lock", timeout=0):
         complete = {name: verified_source(root, name) for name in campaign.backbones}
         missing = [name for name, files in complete.items() if files is None]
+        if missing and campaign.execution.get("precomputed_only"):
+            raise FileNotFoundError(f"Missing precomputed ImageNet embeddings: {', '.join(missing)}; "
+                                    "download and link them with mpsae.embeddings_hub first")
         retired = read_json(image_root / "direct-retired.json")
         if missing and retired:
             raise RuntimeError("ImageNet images were already retired, but selected embeddings are missing. "
@@ -228,8 +231,8 @@ def run_targets(campaign, root, catalog, *, device, workers, batch_size, observe
         raw = root / "cache" / "raw_datasets" / name
         directory = root / "benchmarks" / name
         bundles, requests, receipts, weights = {}, {}, {}, {}
-        for backbone in campaign.backbones:
-            candidates = [c for c in campaign.downstream_cells() if c.backbone == backbone]
+        for backbone in campaign.target_backbones(name):
+            candidates = [c for c in campaign.downstream_cells(name) if c.backbone == backbone]
             if not candidates:
                 continue
             record = checkpoint_record(candidates[0], root, require_provenance=True)
@@ -240,8 +243,21 @@ def run_targets(campaign, root, catalog, *, device, workers, batch_size, observe
                                   "recipe": "direct-target-lifecycle-v1"}
             receipts[backbone] = directory / f"{backbone}-bundle.json"
             bundles[backbone] = load_bundle_receipt(receipts[backbone], root, requests[backbone])
+            if bundles[backbone] is None:
+                # Features already built by mpsae.embeddings_hub with the same
+                # backbone weights: use them instead of downloading the dataset.
+                from ..embeddings_hub import load_campaign_hub_bundle
+                hub_bundle = load_campaign_hub_bundle(root, name, backbone, weights[backbone], root / "cache",
+                    revision=campaign.downstream["revisions"].get(name))
+                if hub_bundle is not None:
+                    save_bundle(hub_bundle, receipts[backbone], root, requests[backbone])
+                    bundles[backbone] = hub_bundle
         missing = [n for n, bundle in bundles.items() if bundle is None]
         if missing:
+            if campaign.execution.get("precomputed_only"):
+                raise FileNotFoundError(
+                    f"{name}: missing or incompatible precomputed embeddings for {', '.join(missing)}; "
+                    "check the linked bundle's backbone weights and dataset revision. Extraction is disabled.")
             # Leave room for features and transient archive writer before downloading.
             from .data import DATASETS
             spec = DATASETS[name]
@@ -276,7 +292,7 @@ def run_targets(campaign, root, catalog, *, device, workers, batch_size, observe
             dense = task(f"dense/{backbone}/{name}", lambda: evaluate_point(bundle, spec, root, device=device))
             if dense:
                 catalog["evaluations"].append(dense)
-            for cell in (c for c in campaign.downstream_cells() if c.backbone == backbone):
+            for cell in (c for c in campaign.downstream_cells(name) if c.backbone == backbone):
                 checkpoint = checkpoint_record(cell, root, require_provenance=True)
                 verify_feature_provenance(bundle, checkpoint)
                 model = load_fitted(cell, root / "runs" / cell.slug, spec, device=device)

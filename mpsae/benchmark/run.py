@@ -365,6 +365,11 @@ def run_campaign(campaign: Campaign, workspace: str | Path, *, device="cuda:0",
             missing_features = [name for name in campaign.backbones if any(
                 not (root / "embeddings" / name / f"1K_{split}_{name}.npz").is_file()
                 for split in ("train", "val"))]
+            if (campaign.execution.get("precomputed_only") and not smoke and missing_features
+                    and campaign.imagenet["enabled"]):
+                raise FileNotFoundError(
+                    f"Missing precomputed ImageNet embeddings: {', '.join(missing_features)}. "
+                    "Run python -m mpsae.embeddings_hub sync --download-only --config <campaign.yaml> first.")
             if campaign.imagenet["enabled"] and missing_features and not smoke:
                 if not str(device).startswith("cuda"):
                     raise RuntimeError("real ImageNet feature extraction requires CUDA; use existing source "
@@ -403,7 +408,8 @@ def run_campaign(campaign: Campaign, workspace: str | Path, *, device="cuda:0",
             if not smoke and campaign.downstream["enabled"]:
                 import importlib.util
 
-                required = ("numpy", "PIL", "torchvision", "timm", "datasets", "huggingface_hub")
+                required = (("numpy",) if campaign.execution.get("precomputed_only") else
+                            ("numpy", "PIL", "torchvision", "timm", "datasets", "huggingface_hub"))
                 missing_imports = [module for module in required if importlib.util.find_spec(module) is None]
                 if missing_imports:
                     raise RuntimeError(f"missing benchmark dependencies: {', '.join(missing_imports)}")
@@ -464,8 +470,7 @@ def run_campaign(campaign: Campaign, workspace: str | Path, *, device="cuda:0",
                                            retain_codes=campaign.execution["retain_codes"])
                     wants_imagenet = campaign.imagenet["enabled"] and cell.k in campaign.budgets(
                         "imagenet", "train_k", name)
-                    wants_downstream = campaign.downstream["enabled"] and cell.k in campaign.budgets(
-                        "downstream", "train_k", name)
+                    wants_downstream = cell in campaign.downstream_cells()
                     previous = read_json(out / "summary.json") or {}
                     missing = not (previous.get("complete") and (out / "checkpoint.pt").is_file()
                                    and (out / "config.json").is_file())
@@ -518,11 +523,12 @@ def run_campaign(campaign: Campaign, workspace: str | Path, *, device="cuda:0",
                             "complete": e1 is not None, "missing": [],
                             "has_train_log": (out / "train.jsonl").is_file(),
                             "code_version": checkpoint["source_code_version"]})
-                    if direct or not campaign.downstream["enabled"] or cell.k not in campaign.budgets(
-                            "downstream", "train_k", name):
+                    if direct or not wants_downstream:
                         del model
                         continue
                     for dataset_name in campaign.downstream["datasets"]:
+                        if name not in campaign.target_backbones(dataset_name):
+                            continue
                         if dataset_name not in feature_bundles:
                             if smoke:
                                 feature_bundles[dataset_name] = task(f"features/{name}/{dataset_name}",

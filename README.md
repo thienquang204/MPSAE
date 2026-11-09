@@ -25,8 +25,8 @@ retrieval benchmarks. `.env` holds credentials and environment settings;
 
 ```bash
 cp .env.example .env                       # if .env does not exist yet
-# Fill HF_TOKEN (read + write) and WANDB_TOKEN in .env.
-bash all_in_one.sh                 # install -> run -> back up
+# Fill HF_TOKEN (write access for result backup); WANDB_TOKEN is optional.
+bash all_in_one.sh                 # install -> pull embeddings -> run -> back up
 ```
 
 The all-in-one entry point detects the NVIDIA GPU/CPU architecture, installs
@@ -51,6 +51,36 @@ bash all_in_one.sh --skip-setup    # resume with installed environment
 bash all_in_one.sh --sync-only    # retry backup and W&B report only
 bash all_in_one.sh --check        # check/create remote destinations
 ```
+
+To train from the published embeddings without downloading images or running
+backbones, use:
+
+```bash
+bash all_in_one.sh
+# Add --skip-setup when the server environment is already installed.
+```
+
+The default config selects all five ImageNet/EuroSAT backbones and SOP for
+`ff2048`, `rn18`, `convnext_tiny`, whose bundles are
+available in [Lukita/MPSAE-embeddings](https://huggingface.co/datasets/Lukita/MPSAE-embeddings).
+Training still fits the sparse autoencoders. The download step verifies hashes
+and links archives into `work/direct-v1/`; the campaign checks dimensions,
+sample IDs, backbone weights and preprocessing. `precomputed_only: true` stops
+on missing or incompatible features instead of extracting them.
+
+As checked on 2026-11-09, the repository has 13 of the full campaign's 20
+bundles: all ImageNet and EuroSAT backbones, plus SOP for `ff2048`, `rn18` and
+`convnext_tiny`. Flowers102 and the other two SOP backbones are missing.
+`configs/thesis.yaml` and `configs/precomputed.yaml` select those 13 bundles.
+Flowers102 is excluded from these campaigns because no bundles are published;
+this does not establish a dataset defect. SOP remains enabled for its three
+available backbones through `downstream.backbones.sop`. Plans, downloads and
+reports use this same selection (720 sparse and 8 dense downstream evaluations).
+Unexpected missing or incompatible bundles fail explicitly rather than being
+silently dropped. Building new bundles requires a separate config with
+`precomputed_only: false`, `--build-missing-embeddings`, and a writable private
+embedding repository. See [docs/data.md](docs/data.md)
+for downloading separately and using the Python entry point.
 
 The native installer supports Ubuntu 22.04/24.04 on x86_64 and ARM64/SBSA.
 It defaults to CUDA 13.0 on H100, A100, RTX A6000 and other supported

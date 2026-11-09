@@ -19,9 +19,30 @@ def test_default_campaign_is_source_training_plus_frozen_transfer():
     campaign = load_campaign("configs/thesis.yaml")
     plan = campaign.plan()
     assert plan["source_cells"] == 690
-    assert plan["downstream_sparse_points"] == 1350
-    assert plan["downstream_dense_points"] == 15
+    assert plan["downstream_sparse_points"] == 720
+    assert plan["downstream_dense_points"] == 8
     assert campaign.downstream["mode"] == "frozen"
+    assert campaign.execution["precomputed_only"] is True
+    assert campaign.target_backbones("sop") == ("ff2048", "rn18", "convnext_tiny")
+    assert "flowers102" not in campaign.downstream["datasets"]
+
+
+def test_dataset_backbone_selection_changes_plan_without_dropping_other_targets():
+    campaign = Campaign.from_mapping({"backbones": ["rn18", "vit_b16"],
+        "methods": ["csr"], "seeds": [1227], "downstream": {
+            "datasets": ["eurosat", "sop"], "backbones": {"sop": ["rn18"]}}})
+    assert campaign.target_backbones("eurosat") == ("rn18", "vit_b16")
+    assert {cell.backbone for cell in campaign.downstream_cells("sop")} == {"rn18"}
+    assert campaign.plan()["downstream_dense_points"] == 3
+    assert campaign.plan()["downstream_sparse_points"] == 18
+
+
+@pytest.mark.parametrize("targets", [[], {"flowers102": ["rn18"]},
+    {"sop": []}, {"sop": ["vit_b16"]}, {"sop": ["rn18", "rn18"]}])
+def test_invalid_dataset_backbone_selections_are_rejected(targets):
+    with pytest.raises(ValueError, match="downstream.backbones"):
+        Campaign.from_mapping({"backbones": ["rn18"],
+            "downstream": {"datasets": ["sop"], "backbones": targets}})
 
 
 def test_smoke_and_scientific_workspaces_never_overlap(tmp_path):
@@ -42,6 +63,8 @@ def test_smoke_and_scientific_workspaces_never_overlap(tmp_path):
     {"downstream": {"eval_k": [9999]}},
     {"imagenet": {"enabled": False}, "downstream": {"enabled": False}},
     {"downstream": {"typo": True}},
+    {"execution": {"precomputed_only": True}},
+    {"execution": {"storage_mode": "direct_v1", "precomputed_only": "yes"}},
 ])
 def test_invalid_or_adaptation_configs_are_rejected(payload):
     with pytest.raises(ValueError):

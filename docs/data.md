@@ -174,6 +174,84 @@ verified on every load, and the memory-mapped cache is keyed by it.
 Approximate sizes: ff2048 10.5 GB train, the 768-d backbones 3.9 GB, rn18 2.6
 GB, dinov2 2.0 GB; validation splits are 1/25th of those.
 
+## Embeddings repository (built once, then pulled)
+
+`python -m mpsae.embeddings_hub` (also `bash embeddings.sh`) keeps every
+embedding set in one folder `<dataset>_<backbone>_<dim>` — `imagenet_ff2048_2048`,
+`sop_rn18_512`, `eurosat_dinov2_vits14_384` — locally under
+`work/embeddings-hub/` and in the HF dataset `Lukita/MPSAE-embeddings`.
+
+For reuse without any image downloads, extraction or uploads to that repository:
+
+```bash
+python -m mpsae.embeddings_hub status --config configs/precomputed.yaml
+python -m mpsae.embeddings_hub sync --download-only --config configs/precomputed.yaml
+python -m mpsae --config configs/precomputed.yaml run
+# Or install, download, train, evaluate and back up results in one command:
+bash all_in_one.sh
+```
+
+The published repository is public and downloads need no token. The all-in-one
+runner separately needs `HF_TOKEN` with write access to your private result
+backup. New feature extraction requires access to the original datasets.
+Use the same `--workspace` for the download and campaign commands.
+
+`--download-only` checks the entire selection first and lists every unavailable
+folder before downloading anything. It verifies SHA-256 hashes for reused and
+downloaded files, uses one immutable Hub revision per invocation, and never
+builds or uploads missing bundles. `configs/precomputed.yaml` also sets
+`execution.precomputed_only: true`: missing or incompatible source/target
+features stop the campaign instead of triggering extraction. Pinned target
+dataset revisions must match the linked bundle. The embedding dimensions and
+backbone weights must match the source checkpoint.
+
+On 2026-11-09, commit `f67f3f36ea13e61bf70287a14a3f7df636131dda` contained all five
+ImageNet and EuroSAT bundles, and SOP for `ff2048`, `rn18`, `convnext_tiny`.
+Flowers102 and SOP for `vit_b16`, `dinov2_vits14` were absent. The supplied
+`thesis.yaml` and `precomputed.yaml` keep all five ImageNet/EuroSAT backbones
+and SOP for its three published backbones. Flowers102 is excluded because it
+has no published embeddings; absence alone does not prove the dataset is faulty.
+Run `status` to check current coverage. Per-dataset coverage is explicit:
+
+```yaml
+downstream:
+  datasets: [eurosat, sop]
+  backbones:
+    sop: [ff2048, rn18, convnext_tiny]
+```
+
+Datasets omitted from `backbones` use all campaign backbones. The same filter
+controls Hub downloads, target evaluation, expected counts and report completion.
+The Flowers102 adapter remains available for a future validated embedding release.
+
+The explicit build/upload workflow remains available with `sync` without
+`--download-only` (and without `precomputed_only: true` in the config):
+
+* Per folder: on this machine and on the Hub -> use the local one; only on
+  this machine -> push it; only on the Hub -> pull it (every SHA-256 checked);
+  nowhere -> build it with the campaign's own extractors (`extract_source`,
+  `extract_bundle`; `storage_mode: direct_v1`), push it, verify the remote
+  hashes, and only then delete the raw data. Pushes check the local hashes
+  first and the remote hashes after.
+* Repository: `Lukita/MPSAE-embeddings` (`--repo owner/name` to change).
+  `MPSAE_EMBEDDINGS_REPO` in `.env` also selects the library for the launcher.
+  Uploads require write access to a private destination; a missing destination
+  is created private. The public source repository can be downloaded directly.
+* Downstream features use the backbone weights recorded in that backbone's
+  ImageNet folder, so ImageNet is always done first.
+* `bash all_in_one.sh` runs `embeddings_hub sync --download-only --config <campaign>` before the
+  campaign (`--skip-embeddings` turns it off) and hard-links the folders where
+  the campaign reads them: ImageNet archives into
+  `work/direct-v1/embeddings/<backbone>/`, downstream folders into
+  `work/direct-v1/benchmarks/<dataset>/hub/<backbone>/`. The campaign still runs
+  its own verification and uses a downstream folder only when its weights equal
+  the source checkpoint's. A precomputed-only campaign fails on a mismatch;
+  other campaigns retain their extraction fallback. The launcher's
+  `--build-missing-embeddings` flag enables building and uploading when the
+  selected config also sets `precomputed_only: false`.
+* The campaign's own backup then uploads these features again to `<account>/MPSAE`
+  (its artifact backup); that copy is redundant but harmless.
+
 ## Publishing
 
 Optional, and never implied by a bare run: the publish stage is skipped unless
@@ -197,9 +275,10 @@ have shrunk the gallery and made the dense gate unable to reach 71.19.
 
 ## Downstream benchmarks
 
-`data_usage.md` lists the datasets for the next phase — Flowers-102, DTD,
-VOC 2012, SPair-71k, SOP, DeepFashion In-Shop, ROxford/RParis. None are
-implemented yet. Two notes for when they are:
+The campaign implements frozen retrieval for EuroSAT RGB, Flowers102 and SOP;
+see [benchmark.md](benchmark.md) for their protocols. `data_usage.md` also
+lists planned datasets: DTD, VOC 2012, SPair-71k, DeepFashion In-Shop and
+ROxford/RParis. Two notes for those additions:
 
 * that file's DTD test split should be 40 images per class, not 10;
 * the official Oxford/Paris image archives have been withdrawn from the VGG

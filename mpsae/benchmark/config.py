@@ -17,11 +17,12 @@ from ..io import canonical_hash
 DATASET_NAMES = ("eurosat", "flowers102", "sop")
 IMAGENET_DEFAULTS = {"enabled": True, "prepare": True, "train_k": None,
                      "e1": True, "e2": True, "linear_probe": True, "timing": True}
-DOWNSTREAM_DEFAULTS = {"enabled": True, "datasets": list(DATASET_NAMES),
-                      "train_k": None, "eval_k": None, "mode": "frozen", "revisions": {}}
+DOWNSTREAM_DEFAULTS = {"enabled": True, "datasets": ["eurosat", "sop"],
+                      "train_k": None, "eval_k": None, "mode": "frozen", "revisions": {},
+                      "backbones": {}}
 EXECUTION_DEFAULTS = {"train_missing": True, "continue_on_error": True,
                      "retain_codes": False, "max_steps": 0,
-                     "storage_mode": "legacy", "cleanup_raw": False}
+                     "storage_mode": "legacy", "cleanup_raw": False, "precomputed_only": False}
 
 
 def _section(value, defaults, name):
@@ -88,11 +89,18 @@ class Campaign:
             raise ValueError("execution.storage_mode must be legacy or direct_v1")
         if result.execution["cleanup_raw"] and result.execution["storage_mode"] != "direct_v1":
             raise ValueError("cleanup_raw requires storage_mode: direct_v1")
+        if result.execution["precomputed_only"] and result.execution["storage_mode"] != "direct_v1":
+            raise ValueError("precomputed_only requires storage_mode: direct_v1")
         if result.imagenet["enabled"] and result.imagenet["e2"] and not result.imagenet["e1"]:
             raise ValueError("imagenet.e2 requires e1: true (the anchor measurement is reused)")
         if not result.imagenet["enabled"] and not result.downstream["enabled"]:
             raise ValueError("enable at least one experiment family")
         _names(result.downstream["datasets"], DATASET_NAMES, "downstream.datasets")
+        targets = result.downstream["backbones"]
+        if not isinstance(targets, dict) or set(targets) - set(result.downstream["datasets"]):
+            raise ValueError("downstream.backbones must map selected datasets to backbone lists")
+        for dataset, names in targets.items():
+            _names(names, result.backbones, f"downstream.backbones.{dataset}")
         revisions = result.downstream["revisions"]
         if not isinstance(revisions, dict) or set(revisions) - set(DATASET_NAMES):
             raise ValueError("downstream.revisions must map dataset names to HF revisions")
@@ -131,21 +139,34 @@ class Campaign:
         cells = []
         for backbone in self.backbones:
             budgets = set(self.budgets("imagenet", "train_k", backbone)) if self.imagenet["enabled"] else set()
-            if self.downstream["enabled"]:
+            if any(backbone in self.target_backbones(name) for name in self.downstream["datasets"]):
                 budgets.update(self.budgets("downstream", "train_k", backbone))
             cells.extend(grid((backbone,), self.methods, self.seeds, budgets))
         return cells
 
-    def downstream_cells(self) -> list[Cell]:
+    def target_backbones(self, dataset: str) -> tuple[str, ...]:
+        """Selected backbones for one target; omitted entries use all backbones."""
+        if not self.downstream["enabled"] or dataset not in self.downstream["datasets"]:
+            return ()
+        return tuple(self.downstream.get("backbones", {}).get(dataset, self.backbones))
+
+    def downstream_cells(self, dataset: str | None = None) -> list[Cell]:
         if not self.downstream["enabled"]:
             return []
+        selected = set(self.target_backbones(dataset)) if dataset is not None else {
+            backbone for name in self.downstream["datasets"] for backbone in self.target_backbones(name)}
         return [cell for cell in self.source_cells()
-                if cell.k in self.budgets("downstream", "train_k", cell.backbone)]
+                if cell.backbone in selected
+                and cell.k in self.budgets("downstream", "train_k", cell.backbone)]
 
     def resolved(self) -> dict[str, Any]:
         from dataclasses import asdict
 
         payload = asdict(self)
+        if not payload["downstream"].get("backbones"):
+            payload["downstream"].pop("backbones", None)
+        if not payload["execution"]["precomputed_only"]:
+            payload["execution"].pop("precomputed_only")
         # Preserve historical plan IDs when the new storage path is not selected.
         if payload["execution"]["storage_mode"] == "legacy" and not payload["execution"]["cleanup_raw"]:
             payload["execution"].pop("storage_mode")
@@ -164,8 +185,8 @@ class Campaign:
 
     def plan(self) -> dict[str, Any]:
         sparse = sum(len(self.budgets("downstream", "eval_k", c.backbone))
-                     for c in self.downstream_cells()) * len(self.downstream["datasets"])
-        dense = len(self.backbones) * len(self.downstream["datasets"]) if self.downstream["enabled"] else 0
+                     for name in self.downstream["datasets"] for c in self.downstream_cells(name))
+        dense = sum(len(self.target_backbones(name)) for name in self.downstream["datasets"])
         plan = {"name": self.name, "mode": "frozen", "plan_id": canonical_hash(self.resolved()),
                 "source_cells": len(self.source_cells()), "downstream_sparse_points": sparse,
                 "downstream_dense_points": dense, "config": self.resolved()}

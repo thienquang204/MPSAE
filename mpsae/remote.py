@@ -79,7 +79,7 @@ class RemoteSession:
             return
         token = os.environ.get("HF_TOKEN")
         if not token:
-            raise RuntimeError("Set HF_TOKEN in .env with read access to ImageNet and write access for the private MPSAE repository")
+            raise RuntimeError("Set HF_TOKEN in .env with write access for the private MPSAE result repository")
         from huggingface_hub import HfApi
 
         self.api = HfApi(token=token)

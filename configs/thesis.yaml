@@ -1,11 +1,12 @@
-# One frozen-transfer campaign. Training presets remain in mpsae/config.py.
+# Published embeddings only. Training presets remain in mpsae/config.py.
+# HF coverage checked 2026-11-09: Flowers102 has no bundles; SOP has three.
 name: thesis
 backbones: [ff2048, rn18, convnext_tiny, vit_b16, dinov2_vits14]
 methods: [csr, csrv2, mpsae, mpsaev2, csr_multitopk]
 seeds: [1227, 2026, 2027]
 imagenet:
   enabled: true
-  prepare: true
+  prepare: false
   train_k: null                  # full per-backbone E1 grid
   e1: true
   e2: true
@@ -13,14 +14,17 @@ imagenet:
   timing: true
 downstream:
   enabled: true
-  datasets: [eurosat, flowers102, sop]
+  datasets: [eurosat, sop]
+  backbones:
+    sop: [ff2048, rn18, convnext_tiny]
   train_k: null                  # 8 for ResNets, first registered anchor for modern backbones
   eval_k: null                   # first six registered budgets for each backbone
   mode: frozen
   revisions: {}                  # main is resolved once to an immutable commit
 execution:
   storage_mode: direct_v1        # isolated work/direct-v1; no FFCV image copy
-  cleanup_raw: true             # delete only after verified private HF backup
+  precomputed_only: true        # missing/incompatible bundles fail without extracting images
+  cleanup_raw: false
   train_missing: true
   continue_on_error: true
   retain_codes: false            # metrics persist; avoid accumulating TB of codes

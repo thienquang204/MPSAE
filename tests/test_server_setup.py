@@ -261,6 +261,32 @@ def test_all_in_one_uses_native_python_and_expected_setup_mode(installation, opt
         assert "SETUP:--cuda 12.8 --skip-system-packages" in calls
 
 
+@pytest.mark.parametrize("options,embeddings", [
+    ([], "sync --config configs/thesis.yaml --download-only"),
+    (["--skip-setup", "--config", "configs/smoke.yaml"], "sync --config configs/smoke.yaml --download-only"),
+    (["--skip-setup", "--build-missing-embeddings"], "sync --config configs/thesis.yaml"),
+    (["--skip-setup", "--skip-embeddings"], None), (["--sync-only"], None), (["--check"], None),
+    (["--smoke"], None),
+])
+def test_all_in_one_runs_the_embeddings_step_first(installation, options, embeddings):
+    root, installer, python, env, harness = installation
+    script = root / "all_in_one.sh"
+    _executable(script, (ROOT / "all_in_one.sh").read_text())
+    _executable(installer, '#!/usr/bin/env bash\necho "SETUP:$*" >> "$TEST_SETUP_CALLS"\n')
+    _executable(root / "activate_server.sh", '#!/usr/bin/env bash\nexport ACTIVATED_FIXTURE=1\n')
+    result = subprocess.run([BASH, str(script), *options], cwd=root, env=env,
+                            text=True, capture_output=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = (root / "calls.txt").read_text().splitlines()
+    remote = next(index for index, line in enumerate(calls) if "-m mpsae.remote" in line)
+    hub = [index for index, line in enumerate(calls) if "-m mpsae.embeddings_hub" in line]
+    if embeddings is None:
+        assert hub == []
+    else:
+        assert len(hub) == 1 and hub[0] < remote
+        assert f"-m mpsae.embeddings_hub {embeddings}" in calls[hub[0]]
+
+
 def test_all_in_one_rejects_ignored_install_options(installation):
     root, installer, python, env, harness = installation
     script = root / "all_in_one.sh"

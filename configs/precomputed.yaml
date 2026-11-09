@@ -1,0 +1,32 @@
+# Available in Lukita/MPSAE-embeddings on 2026-11-09: all five ImageNet and
+# EuroSAT backbones, plus SOP for ff2048/rn18/convnext_tiny.
+# Same fitting/evaluation and target coverage as thesis.yaml.
+name: precomputed
+backbones: [ff2048, rn18, convnext_tiny, vit_b16, dinov2_vits14]
+methods: [csr, csrv2, mpsae, mpsaev2, csr_multitopk]
+seeds: [1227, 2026, 2027]
+imagenet:
+  enabled: true
+  prepare: false
+  train_k: null
+  e1: true
+  e2: true
+  linear_probe: true
+  timing: true
+downstream:
+  enabled: true
+  datasets: [eurosat, sop]
+  backbones:
+    sop: [ff2048, rn18, convnext_tiny]
+  train_k: null
+  eval_k: null
+  mode: frozen
+  revisions: {}
+execution:
+  storage_mode: direct_v1
+  precomputed_only: true
+  cleanup_raw: false
+  train_missing: true
+  continue_on_error: true
+  retain_codes: false
+  max_steps: 0

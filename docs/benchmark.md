@@ -13,7 +13,7 @@ adversarial perturbations; those need separate datasets and protocols.
 
 ```bash
 cp .env.example .env                         # if creating a new .env
-# Fill HF_TOKEN (read + write) and WANDB_TOKEN.
+# Fill HF_TOKEN (write access for result backup); WANDB_TOKEN is optional.
 bash all_in_one.sh
 ```
 
@@ -24,6 +24,12 @@ need to be supplied. Checkpoints, feature archives and final reports are backed
 up, including partial results after failure. Retry only remote synchronization
 with `bash all_in_one.sh --sync-only`. A synthetic rehearsal via
 `bash all_in_one.sh --smoke` does not write to either service.
+
+The default campaign downloads existing embeddings: ImageNet and EuroSAT for
+all five backbones, SOP for `ff2048`, `rn18`, `convnext_tiny`. Flowers102 has no
+published bundles and is excluded. `downstream.backbones` selects backbones
+per dataset; an omitted entry uses all campaign backbones. No raw image download
+or backbone extraction runs with the default `precomputed_only: true` setting.
 
 Direct `python -m mpsae --config ...` commands below run locally. Automatic
 cloud operations belong to the all-in-one entry point (`python -m mpsae.remote`).
@@ -97,7 +103,7 @@ seeds: [1227, 2026, 2027]
 
 imagenet:
   enabled: true
-  prepare: true
+  prepare: false
   train_k: null
   e1: true
   e2: true
@@ -106,13 +112,16 @@ imagenet:
 
 downstream:
   enabled: true
-  datasets: [eurosat, flowers102, sop]
+  datasets: [eurosat, sop]
   train_k: [8]
   eval_k: [2, 4, 8, 16, 32, 64]
   mode: frozen
   revisions: {}
 
 execution:
+  storage_mode: direct_v1
+  precomputed_only: true
+  cleanup_raw: false
   train_missing: true
   continue_on_error: true
   retain_codes: false
