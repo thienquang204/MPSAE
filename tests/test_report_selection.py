@@ -125,3 +125,38 @@ def test_explicit_duplicate_training_cells_are_rejected(tmp_path):
     chosen = _run(root)
     with pytest.raises(ValueError, match="duplicate training cells"):
         figures.build_all(root, tmp_path / "reports", records=[chosen, chosen], seeds=(7,))
+
+
+def test_e2_plot_keeps_training_k_fixed_and_exports_single_seed_curves(tmp_path, monkeypatch):
+    pytest.importorskip("matplotlib")
+    from matplotlib.collections import PolyCollection
+    records = []
+    for anchor in (8, 16):
+        for method in ("csr", "mpsae"):
+            item = _run(tmp_path / "runs", method=method, k=anchor, seed=1227, log=False)
+            item["e2"] = {"anchor_k": anchor, "points": [
+                {"k": k, "top1": anchor + k / 10 + (1 if method == "mpsae" else 0)}
+                for k in (2, 8, 16, 32)]}
+            records.append(item)
+    rows = aggregate.aggregate_e2(records, seeds=(1227,))
+    assert all(row["top1_n"] == 1 and row["top1_std"] is None and row["complete"] for row in rows)
+    captured = []
+    original_save = figures.save_figure
+    def save(fig, *args, **kwargs):
+        captured.append(fig)
+        return original_save(fig, *args, **kwargs)
+    monkeypatch.setattr(figures, "save_figure", save)
+    paths = figures.figure_e2_generalisation(rows, tmp_path / "figures", "ff2048", seeds=(1227,))
+    assert {path.suffix for path in paths} == {".png", ".pdf", ".txt"}
+    assert all(path.is_file() and path.stat().st_size > 0 for path in paths)
+    for ax, anchor in zip(captured[0].axes, (8, 16)):
+        curves = [line for line in ax.lines if "(n=1)" in line.get_label()]
+        assert len(curves) == 2
+        assert list(curves[0].get_xdata()) == [2, 8, 16, 32]
+        assert list(curves[0].get_ydata()) == pytest.approx([anchor + k / 10 for k in (2, 8, 16, 32)])
+        assert ax.get_xlabel() == "Inference $K$"
+        assert not any(isinstance(collection, PolyCollection) for collection in ax.collections)
+        assert all(collection.get_offsets()[0, 0] == anchor for collection in ax.collections)
+    caption = next(path for path in paths if path.suffix == ".txt").read_text(encoding="utf-8")
+    assert "seed 1227 only (n=1)" in caption
+    assert "no between-seed standard deviation" in caption

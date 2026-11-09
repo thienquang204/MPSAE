@@ -124,15 +124,15 @@ class Campaign:
             value = value[backbone]
         if value is None:
             if section == "imagenet":
-                return spec.k_list
+                return spec.training_budgets
             if key == "eval_k":
                 return spec.k_list[:6]
             return (8,) if 8 in spec.k_list else (spec.e2_anchors[0],)
         values = _integers(value, f"{section}.{key}")
         if any(k > spec.dim for k in values):
             raise ValueError(f"{section}.{key} exceeds {backbone}'s input width {spec.dim}")
-        if key == "train_k" and not set(values) <= set(spec.k_list):
-            raise ValueError(f"{section}.{key} for {backbone} must be in {spec.k_list}")
+        if key == "train_k" and not set(values) <= set(spec.training_budgets):
+            raise ValueError(f"{section}.{key} for {backbone} must be in {spec.training_budgets}")
         return values
 
     def source_cells(self) -> list[Cell]:

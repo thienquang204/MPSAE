@@ -44,7 +44,7 @@ def test_different_budgets_modes_protocols_and_revisions_never_merge():
                record(comparison_id="data-revision-b")]
     rows = report.aggregate_records(records)
     assert len(rows) == len(records)
-    assert all(row["n"] == 1 and row["seeds_missing"] == [2026, 2027] for row in rows)
+    assert all(row["n"] == 1 and row["seeds_missing"] == [] for row in rows)
 
 
 def test_same_seed_with_two_checkpoint_evaluations_is_rejected():
@@ -75,7 +75,7 @@ def test_paired_differences_use_only_common_seeds():
     records = [record("csr", 1227, 0.5), record("csr", 2026, 0.6),
                record("mpsae", 1227, 0.6), record("mpsae", 2026, 0.8),
                record("mpsae", 2027, 0.99)]
-    row, = report.paired_differences(records)
+    row, = report.paired_differences(records, expected_seeds=(1227, 2026, 2027))
     assert row["delta_recall_at_1_mean"] == pytest.approx(0.15)
     assert row["delta_recall_at_1_std"] == pytest.approx(math.sqrt(0.005))
     assert row["delta_recall_at_1_n"] == row["n"] == 2
@@ -102,7 +102,8 @@ def test_tables_and_manifest_survive_unavailable_matplotlib(tmp_path, monkeypatc
     monkeypatch.setattr(report, "_render_figures", unavailable)
     unfinished = {**record("csr"), "complete": False}
     manifest = report.build_report([record(), unfinished], tmp_path,
-                                   expected_points=3, failures=[{"task": "failed-task"}])
+                                   expected_points=3, failures=[{"task": "failed-task"}],
+                                   expected_seeds=(1227, 2026, 2027))
     assert manifest["complete"] is False
     assert manifest["counts"]["completed_points"] == 1
     assert manifest["counts"]["missing_points"] == 2
@@ -173,3 +174,5 @@ def test_figures_render_and_export_when_matplotlib_is_installed(tmp_path):
     for paths in manifest["figures"].values():
         assert {path.rsplit(".", 1)[-1] for path in paths} == {"png", "pdf", "txt"}
         assert all(__import__("pathlib").Path(path).is_file() for path in paths)
+        caption = next(path for path in paths if path.endswith(".txt"))
+        assert "seed 1227 only (n=1)" in __import__("pathlib").Path(caption).read_text(encoding="utf-8")

@@ -255,7 +255,7 @@ def _curve(ax, rows: Sequence[Mapping[str, Any]], method: str, metric: str, *,
 def _draw_quality(rows: Sequence[Mapping[str, Any]], dense: Sequence[Mapping[str, Any]],
                   out_dir: Path, name: str, title: str, *, x: str = "eval_k") -> list[Path]:
     import matplotlib.pyplot as plt
-    from ..report.style import DENSE_STYLE, PAGE_WIDTH, save_figure
+    from ..report.style import DENSE_STYLE, PAGE_WIDTH, save_figure, seed_caption
 
     scopes = sorted({(row["dataset"], row["protocol"], row["comparison_id"]) for row in rows})
     if not scopes or not any(row.get(x if x == "eval_k" else f"{x}_mean") is not None
@@ -300,8 +300,8 @@ def _draw_quality(rows: Sequence[Mapping[str, Any]], dense: Sequence[Mapping[str
                     ax.legend(handles, labels, fontsize=6, loc="best")
         fig.suptitle(title)
         caption = (
-            f"{title}. Rows keep datasets and retrieval protocols separate. Curves show means over "
-            "training seeds and bands sample standard deviations (ddof=1), not confidence intervals; "
+            f"{title}. Rows keep datasets and retrieval protocols separate. "
+            f"{seed_caption([seed for row in rows for seed in row['seeds_present']])} "
             "n is shown in legends and tables. Recall@1 is the share of queries with a relevant first "
             "neighbour; mAP@R ranks to each query's full relevant-image count. Accuracies are percentages. "
             "Dense references are measured on the same downstream data, not copied from ImageNet. "
@@ -315,7 +315,7 @@ def _draw_quality(rows: Sequence[Mapping[str, Any]], dense: Sequence[Mapping[str
 def _draw_paired(rows: Sequence[Mapping[str, Any]], out_dir: Path,
                  name: str, title: str) -> list[Path]:
     import matplotlib.pyplot as plt
-    from ..report.style import PAGE_WIDTH, label_for, save_figure
+    from ..report.style import PAGE_WIDTH, label_for, save_figure, seed_caption
 
     scopes = sorted({(row["dataset"], row["protocol"], row["comparison_id"]) for row in rows})
     if not scopes:
@@ -345,8 +345,9 @@ def _draw_paired(rows: Sequence[Mapping[str, Any]], out_dir: Path,
         fig.suptitle(title)
         return save_figure(fig, out_dir, name, caption=(
             f"{title}. Each difference is formed within the same dataset, protocol, backbone, "
-            "training budget, inference budget and training seed before aggregation. Means and "
-            "sample standard deviations are in percentage points; unmatched seeds are excluded "
+            "training budget, inference budget and training seed before aggregation. Differences "
+            "are in percentage points. "
+            f"{seed_caption([seed for row in rows for seed in row['seeds_paired']])} Unmatched seeds are excluded "
             "and listed explicitly in the paired table. No comparison against published ImageNet "
             "numbers is included."))
     finally:

@@ -110,11 +110,10 @@ NPZ float32 arrays are mapped directly from their uncompressed ZIP members;
 there is no second extracted NPY copy. A resumable writer is temporary and is
 reclaimed after its archive is published and verified. Sparse evaluation codes
 are discarded when their metrics are durable (`retain_codes: false`). Checkpoints
-and optimizer states persist for resume; the five-backbone default has 690
-source fits and 1,365 downstream evaluation points, not the older 300/546 grid.
-The model + Adam tensor estimate for those 690 checkpoints is about 65 GB,
-before serialization overhead and other buffers. Raw ImageNet has been freed
-before these fits start.
+and optimizer states persist for resume; the five-backbone default uses seed 1227 and has 175
+source fits and 248 downstream evaluation points (240 sparse + 8 dense).
+The model + Adam tensor estimate for those 175 checkpoints is about 18 GB,
+before serialization overhead and other buffers. The default campaign pulls published embeddings and does not download raw ImageNet.
 
 The direct recipe is explicitly versioned `imagenet-direct-pil-v1`. MRL keeps
 its deterministic centre-crop approach. timm train uses per-image seeded PIL

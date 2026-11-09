@@ -232,6 +232,17 @@ def apply_style(*, family: str = "serif") -> dict[str, Any]:
 
 # ----------------------------------------------------------------------- saving
 
+def seed_caption(seeds) -> str:
+    """Describe a single run separately from a measured spread across seeds."""
+    selected = sorted(set(seeds))
+    if len(selected) == 1:
+        return (f"Results use seed {selected[0]} only (n=1); no between-seed standard "
+                "deviation or uncertainty band is estimated.")
+    return (f"Means over seeds {'/'.join(map(str, selected))}. Bands/error bars show "
+            "sample standard deviations (ddof=1) only where at least two seeds are "
+            "available; they are not confidence intervals. n is reported in legends or tables.")
+
+
 def save_figure(fig: Any, out_dir: str | Path, name: str, *,
                 caption: str | None = None) -> list[Path]:
     """Write ``<name>.png`` and ``<name>.pdf`` with identical geometry, then close.

@@ -3,11 +3,11 @@
 name: thesis
 backbones: [ff2048, rn18, convnext_tiny, vit_b16, dinov2_vits14]
 methods: [csr, csrv2, mpsae, mpsaev2, csr_multitopk]
-seeds: [1227, 2026, 2027]
+seeds: [1227]
 imagenet:
   enabled: true
   prepare: false
-  train_k: null                  # full per-backbone E1 grid
+  train_k: null                  # registered training grid; modern backbones: 12,48,96,192,384
   e1: true
   e2: true
   linear_probe: true

@@ -28,14 +28,15 @@ def test_four_times_the_budget_fits_the_dictionary():
 
 def test_e2_anchors_are_trained_budgets():
     for name, spec in BACKBONES.items():
-        assert set(spec.e2_anchors) <= set(spec.k_list), name
+        assert set(spec.e2_anchors) <= set(spec.training_budgets), name
 
 
 def test_grid_size_matches_the_plan():
     counts = effective_runs()
-    assert counts == {"ff2048": 165, "rn18": 135, "convnext_tiny": 135,
-                      "vit_b16": 135, "dinov2_vits14": 120, "total": 690}
-    assert len(grid()) == 690
+    assert counts == {"ff2048": 55, "rn18": 45, "convnext_tiny": 25,
+                      "vit_b16": 25, "dinov2_vits14": 25, "total": 175}
+    assert len(grid()) == 175
+    assert {cell.seed for cell in grid()} == {1227}
 
 
 def test_branches_partition_the_backbones():

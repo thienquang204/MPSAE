@@ -2,23 +2,22 @@
 
 Three rules drive every function here.
 
-*Partial grids still report.* 690 fits do not finish at the same time, and a
+*Partial grids still report.* 175 fits do not finish at the same time, and a
 report that refuses to render until the last seed lands is a report nobody
 reads. Every loader tolerates a missing file; every aggregate carries ``n`` and
 the list of seeds it is actually missing, so an unfinished cell announces itself
 instead of masquerading as a finished one.
 
-*Sample standard deviation, not population.* With three seeds the ``ddof=1``
-estimator is the unbiased one, and the difference from ``ddof=0`` is a factor
-1.22 -- large enough to matter in a paper.
+*Sample standard deviation, not population.* The default uses one seed, so
+standard deviation is undefined and returned as None. For explicitly selected
+multi-seed campaigns, the sample estimator uses ``ddof=1``.
 
 *Differences are paired.* A seed fixes both the initialisation and the data
 order, so the same seed under two methods is a matched pair. We report the mean
 and sample std of the per-seed difference, never a difference of means. We do
-not report p-values: n=3 cannot support them, and a significance claim from
-three seeds would be a misrepresentation.
+not report p-values or infer significance from a single seed.
 
-Pure standard library. ``statistics`` covers every estimator we need at n=3,
+Pure standard library. ``statistics`` covers every estimator we need,
 so a report renders on a machine with neither numpy nor torch installed.
 """
 from __future__ import annotations

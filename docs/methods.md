@@ -273,9 +273,10 @@ time"*. Every E2 point carries its measured `nnz` as well as the nominal
 budget, because after ReLU a code can hold far fewer than K nonzeros and a
 nominal budget can overstate the real sparsity.
 
-Three seeds (1227, 2026, 2027); 1227 is the released CSR seed. Differences
-between methods are reported paired over seeds, since the seed controls both
-initialisation and data order. No p-values: n=3 cannot support them.
+One seed (1227), the released CSR seed. Differences between methods use the
+same training seed, which controls initialisation and data order. Results have
+n=1; no between-seed standard deviation, uncertainty band or p-value is reported.
+Multiple seeds can still be explicitly selected in a separate campaign.
 
 ## What is tested
 

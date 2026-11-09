@@ -110,7 +110,7 @@ first, and values already present in the environment win over the file.
 | `--device` | `MPSAE_DEVICE` | `cuda:0` | a second GPU, or two runs on one box |
 | `--backbones` | `MPSAE_BACKBONES` | all five, branch 1 first | FFCV will not build (`ff2048` alone), or you want the paper-comparable branch finished first |
 | `--methods` | `MPSAE_METHODS` | all five | isolating a comparison, e.g. `csr,mpsae` |
-| `--seeds` | `MPSAE_SEEDS` | `1227,2026,2027` | a first pass at one seed. Note the `±` columns need ≥ 2 and the grid is specified at 3 |
+| `--seeds` | `MPSAE_SEEDS` | `1227` | one training seed by default; sample standard deviation requires at least two seeds |
 | `--k` | `MPSAE_K` | each backbone's full `k_list` | a spot check, or finishing the E2 anchors first |
 | `--workers` | `MPSAE_WORKERS` | `16` | the box has a different core count; this is the JPEG-decode worker count for both the FFCV writer and the extraction loaders |
 | `--embed-batch-size` | `MPSAE_EMBED_BATCH` | `256` | under ~24 GB VRAM. `env` warns about this explicitly |
@@ -220,20 +220,20 @@ through the run machinery. You can plan and monitor from a laptop.
 
 ```
 $ python -m mpsae plan
-MPSAE 2.0.0: 690 training cells
+MPSAE 2.0.0: 175 training cells
 
 backbone             d K budgets                                    E2 anchors              cells
 -------------------------------------------------------------------------------------------------
-ff2048            2048 2,4,8,16,32,64,128,256,512,1024,2048         8,16,32,64,128,256        165
-rn18               512 2,4,8,16,32,64,128,256,512                   8,16,32,64,128,256        135
-convnext_tiny      768 3,6,12,24,48,96,192,384,768                  3,6,12,24,48,96           135
-vit_b16            768 3,6,12,24,48,96,192,384,768                  3,6,12,24,48,96           135
-dinov2_vits14      384 3,6,12,24,48,96,192,384                      3,6,12,24,48,96           120
+ff2048            2048 2,4,8,16,32,64,128,256,512,1024,2048         8,16,32,64,128,256         55
+rn18               512 2,4,8,16,32,64,128,256,512                   8,16,32,64,128,256         45
+convnext_tiny      768 12,48,96,192,384                             12,48,96,192,384           25
+vit_b16            768 12,48,96,192,384                             12,48,96,192,384           25
+dinov2_vits14      384 12,48,96,192,384                             12,48,96,192,384           25
 -------------------------------------------------------------------------------------------------
-total                                                                                         690
+total                                                                                         175
 
 methods: csr, csrv2, mpsae, mpsaev2, csr_multitopk
-seeds:   1227, 2026, 2027
+seeds:   1227
 ```
 
 `status` prints the same shape of information about work actually done. A cell
@@ -244,13 +244,13 @@ $ python -m mpsae status
 {
   "stages": {"env": true, "imagenet": true, "ffcv": true, "embed": true,
              "publish": false, "train": false, "report": false},
-  "cells": 690,
-  "outstanding": 525,
-  "done": 165,
-  "by_backbone": {"ff2048": 0, "rn18": 135, "convnext_tiny": 135,
-                  "vit_b16": 135, "dinov2_vits14": 120},
-  "by_method": {"csr": 105, "csrv2": 105, "mpsae": 105,
-                "mpsaev2": 105, "csr_multitopk": 105}
+  "cells": 175,
+  "outstanding": 120,
+  "done": 55,
+  "by_backbone": {"ff2048": 0, "rn18": 45, "convnext_tiny": 25,
+                  "vit_b16": 25, "dinov2_vits14": 25},
+  "by_method": {"csr": 24, "csrv2": 24, "mpsae": 24,
+                "mpsaev2": 24, "csr_multitopk": 24}
 }
 ```
 

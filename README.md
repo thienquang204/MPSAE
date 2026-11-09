@@ -75,7 +75,7 @@ bundles: all ImageNet and EuroSAT backbones, plus SOP for `ff2048`, `rn18` and
 Flowers102 is excluded from these campaigns because no bundles are published;
 this does not establish a dataset defect. SOP remains enabled for its three
 available backbones through `downstream.backbones.sop`. Plans, downloads and
-reports use this same selection (720 sparse and 8 dense downstream evaluations).
+reports use this same selection (240 sparse and 8 dense downstream evaluations).
 Unexpected missing or incompatible bundles fail explicitly rather than being
 silently dropped. Building new bundles requires a separate config with
 `precomputed_only: false`, `--build-missing-embeddings`, and a writable private
@@ -147,15 +147,27 @@ changing k at inference *"might lead to sub-optimal performance"*. Because
 post-ReLU a code can have far fewer than K nonzeros, every E2 point carries
 its **measured** nnz alongside the nominal budget.
 
-| backbone | d | recipe | preset | K budgets | E2 anchors | cells |
-|---|---|---|---|---|---|---|
-| `ff2048` | 2048 | MRL | Table 3 | 2,4,…,2048 | 8…256 | 165 |
-| `rn18` | 512 | CSRv2 | Table 9 | 2,4,…,512 | 8…256 | 135 |
-| `convnext_tiny` | 768 | CSRv2 | Table 3 | 3,6,…,768 | 3…96 | 135 |
-| `vit_b16` | 768 | CSRv2 | Table 3 | 3,6,…,768 | 3…96 | 135 |
-| `dinov2_vits14` | 384 | CSRv2 | Table 9 | 3,6,…,384 | 3…96 | 120 |
+The campaign uses **seed 1227 only**. E2 automatically writes
+`e2_generalisation_<backbone>.png` and `.pdf` under the campaign's
+`reports/thesis/<plan_id>/imagenet/figures/` directory. Each panel fixes the
+training K; its x-axis sweeps every registered inference K and its y-axis shows
+ImageNet 1-NN top-1 accuracy. The curves compare methods, the dashed vertical
+line marks training K, and hollow rings mark inference at the training K.
+Faint curves show separate models trained at each K for comparison. There are
+six training anchors for each ResNet and five for each modern backbone, reused from E1; E2 adds no training runs.
+Single-seed curves carry no between-seed standard-deviation bands. Modern backbones
+train only at K=12,48,96,192,384; inference retains the original grid, including
+K values without separate checkpoints. Downstream uses their K=12 checkpoint.
 
-690 cells = backbone × K × 5 methods × 3 seeds (1227, 2026, 2027).
+| backbone | d | recipe | preset | Training K budgets | E2 anchors | cells |
+|---|---|---|---|---|---|---|
+| `ff2048` | 2048 | MRL | Table 3 | 2,4,…,2048 | 8…256 | 55 |
+| `rn18` | 512 | CSRv2 | Table 9 | 2,4,…,512 | 8…256 | 45 |
+| `convnext_tiny` | 768 | CSRv2 | Table 3 | 12,48,96,192,384 | 12,48,96,192,384 | 25 |
+| `vit_b16` | 768 | CSRv2 | Table 3 | 12,48,96,192,384 | 12,48,96,192,384 | 25 |
+| `dinov2_vits14` | 384 | CSRv2 | Table 9 | 12,48,96,192,384 | 12,48,96,192,384 | 25 |
+
+175 cells = backbone x K x 5 methods x seed 1227.
 K never exceeds the backbone's own width, so every point is a compression.
 The 768-d backbones are treated like FF2048, the 384-d one like RN18.
 

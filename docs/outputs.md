@@ -338,12 +338,18 @@ panel supports travels with the image instead of being re-invented in LaTeX.
 | `backbone_summary` | the headline overview: accuracy vs K for every method, one panel per backbone, with our own dense 1-NN as the rule in each panel |
 | `e1_curves_<backbone>` | does our objective beat CSR/CSRv2 at matched K. Published curves are overlaid only on `ff2048`, in grey dashes, labelled published |
 | `e1_delta_<backbone>_vs_csr`, `e1_delta_<backbone>_vs_csrv2` | the same claim, paired per seed. This is the figure the headline sentence points at |
-| `e2_generalisation_<backbone>` | the claim CSRv2 §3 makes and neither paper tests: one checkpoint trained at K\*, evaluated at every budget, with the per-K E1 curve drawn faintly behind as the honest ceiling |
+| `e2_generalisation_<backbone>` | the claim CSRv2 §3 makes and neither paper tests: one checkpoint trained at K\*, evaluated at every budget, with the per-K E1 curve drawn faintly behind as a matched-K reference, not a guaranteed upper bound |
 | `e2_nnz_<backbone>` | where a larger nominal K stops buying real sparsity, plotted against measured nnz rather than the budget |
 | `efficiency_<backbone>` | the trade-off CSR argues for, in the two units a deployment pays in: query wall-clock and index bytes. No band on the cost axes, because wall-clock spread is a property of the hardware, not the method |
 | `training_<backbone>_k<K>` | internal diagnostic, not a paper figure: total loss, loss components, realised k-annealing and dead latents, one line per method per seed with no averaging, at the median trained K |
 
 ## Reading the numbers honestly
+
+The default campaign uses seed **1227** only. Its curves have `n=1`, its
+standard-deviation fields are empty, and no between-seed bands/error bars are
+drawn. The multi-seed statistics below apply when multiple seeds are explicitly
+selected. E2 panels hold training K fixed while sweeping the full inference-K
+grid; hollow rings identify the matched training/inference K point.
 
 **`±` is a sample standard deviation over seeds, with `ddof=1`.** It is a
 spread, not a confidence interval, and not a standard error. At n=3 the

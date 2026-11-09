@@ -139,7 +139,7 @@ def command_plan(options: PipelineOptions) -> int:
     print("-" * len(header))
     for name in options.backbones:
         spec = BACKBONES[name]
-        print(f"{name:16s} {spec.dim:5d} {','.join(map(str, spec.k_list)):<44s} "
+        print(f"{name:16s} {spec.dim:5d} {','.join(map(str, spec.training_budgets)):<44s} "
               f"{','.join(map(str, spec.e2_anchors)):<22s} {counts[name]:6d}")
     print("-" * len(header))
     print(f"{'total':16s} {'':5s} {'':44s} {'':22s} {len(cells):6d}")

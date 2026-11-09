@@ -19,7 +19,7 @@ BASELINES = ("csr", "csrv2")
 OURS = ("mpsae", "mpsaev2")
 
 #: Seeds for every (backbone, method, K) cell. 1227 is the released CSR seed.
-SEEDS = (1227, 2026, 2027)
+SEEDS = (1227,)
 
 
 # ------------------------------------------------------------ train preset
@@ -95,6 +95,8 @@ class Backbone:
     #: Published dense 1-NN top-1 to verify the embedding pipeline against.
     reference_dense_top1: float | None = None
     notes: str = ""
+    #: Train fewer checkpoints while retaining the full inference grid in k_list.
+    train_k_list: tuple[int, ...] | None = None
 
     def __post_init__(self) -> None:
         if not self.k_list or sorted(self.k_list) != list(self.k_list):
@@ -103,10 +105,17 @@ class Backbone:
             raise ValueError(f"{self.name}: K must not exceed the embedding dimension {self.dim}")
         if 4 * min(self.k_list) > self.preset.hidden_dim:
             raise ValueError(f"{self.name}: the 4K reconstruction view exceeds hidden_dim")
-        if not set(self.e2_anchors) <= set(self.k_list):
+        if (not self.training_budgets or sorted(set(self.training_budgets)) != list(self.training_budgets)
+                or not set(self.training_budgets) <= set(self.k_list)):
+            raise ValueError(f"{self.name}: training budgets must be a sorted nonempty subset of K list")
+        if not set(self.e2_anchors) <= set(self.training_budgets):
             raise ValueError(f"{self.name}: E2 anchors must be trained K values")
         if self.recipe not in ("mrl", "csrv2"):
             raise ValueError(f"{self.name}: unknown embedding recipe {self.recipe!r}")
+
+    @property
+    def training_budgets(self) -> tuple[int, ...]:
+        return self.k_list if self.train_k_list is None else self.train_k_list
 
     @property
     def archive_stem(self) -> str:
@@ -115,6 +124,7 @@ class Backbone:
 
 _POW2 = (2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048)
 _TIMES3 = (3, 6, 12, 24, 48, 96, 192, 384, 768)
+_MODERN_TRAIN_K = (12, 48, 96, 192, 384)
 _IMAGENET_STATS = ((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
 _HALF_STATS = ((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
 
@@ -151,7 +161,8 @@ BACKBONES: Mapping[str, Backbone] = {
         source="timm/convnext_tiny.fb_in1k",
         preset=FF2048_PRESET,
         k_list=_TIMES3,
-        e2_anchors=(3, 6, 12, 24, 48, 96),
+        train_k_list=_MODERN_TRAIN_K,
+        e2_anchors=_MODERN_TRAIN_K,
         normalize=None,
         notes="d=768, treated like FF2048.",
     ),
@@ -162,7 +173,8 @@ BACKBONES: Mapping[str, Backbone] = {
         source="timm/vit_base_patch16_224.augreg_in21k_ft_in1k",
         preset=FF2048_PRESET,
         k_list=_TIMES3,
-        e2_anchors=(3, 6, 12, 24, 48, 96),
+        train_k_list=_MODERN_TRAIN_K,
+        e2_anchors=_MODERN_TRAIN_K,
         normalize=None,
         notes="d=768, treated like FF2048. Same augreg family CSR used for ViT-S/L.",
     ),
@@ -173,7 +185,8 @@ BACKBONES: Mapping[str, Backbone] = {
         source="timm/vit_small_patch14_dinov2.lvd142m",
         preset=TIMM_PRESET,
         k_list=_TIMES3[:8],
-        e2_anchors=(3, 6, 12, 24, 48, 96),
+        train_k_list=_MODERN_TRAIN_K,
+        e2_anchors=_MODERN_TRAIN_K,
         normalize=None,
         notes="d=384, treated like RN18. Built with img_size=224 (pos-embed interpolated).",
     ),
@@ -210,7 +223,7 @@ def grid(backbones=BACKBONE_ORDER, methods=METHODS, seeds=SEEDS,
     cells = []
     for name in backbones:
         spec = BACKBONES[name]
-        for k in spec.k_list:
+        for k in spec.training_budgets:
             if k_values is not None and k not in set(k_values):
                 continue
             for method in methods:
@@ -239,7 +252,7 @@ def initial_topk(k: int, hidden_dim: int) -> int:
 
 def effective_runs(backbones=BACKBONE_ORDER) -> dict[str, int]:
     """Run counts per backbone, for planning GPU time."""
-    counts = {name: len(BACKBONES[name].k_list) * len(METHODS) * len(SEEDS)
+    counts = {name: len(BACKBONES[name].training_budgets) * len(METHODS) * len(SEEDS)
               for name in backbones}
     counts["total"] = sum(counts.values())
     return counts

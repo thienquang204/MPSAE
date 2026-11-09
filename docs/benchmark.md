@@ -99,7 +99,7 @@ configuration records the settings actually requested.
 name: thesis
 backbones: [ff2048, rn18]
 methods: [csr, csrv2, mpsae, mpsaev2, csr_multitopk]
-seeds: [1227, 2026, 2027]
+seeds: [1227]
 
 imagenet:
   enabled: true
@@ -128,7 +128,7 @@ execution:
   max_steps: 0
 ```
 
-`imagenet.train_k: null` means the selected backbones' full original training
+`imagenet.train_k: null` means the selected backbones' registered training
 grids. A list restricts the source fits. `downstream.train_k` selects which
 ImageNet checkpoints are evaluated; `eval_k` changes their inference budget
 without changing any weights. Missing required source checkpoints are trained

@@ -37,7 +37,7 @@ from .aggregate import (aggregate_e1, aggregate_e2, load_dense_references, load_
                         paired_difference, training_summary, write_tables)
 from .style import (BACKDROP_STYLE, BAND_ALPHA, COLUMN_WIDTH, DENSE_STYLE, PAGE_WIDTH,
                     PUBLISHED_STYLE, apply_style, backbone_label, label_for,
-                    method_style, save_figure)
+                    method_style, save_figure, seed_caption)
 
 
 def _pyplot() -> Any:
@@ -281,10 +281,8 @@ def figure_e1_curves(rows: Sequence[Mapping[str, Any]], out_dir: str | Path, bac
     caption = (
         "1-NN top-1 on ImageNet-1K as a function of the active dimension K, "
         f"{backbone_label(backbone)}. "
-        f"Lines are the mean over configured seeds {'/'.join(map(str, seeds))} "
-        "and bands the sample standard deviation "
-        "(ddof=1); they are a spread, not a confidence interval, and n is given per series in the "
-        "legend. Grey dashed series are values transcribed from the published papers, not measured "
+        f"{seed_caption(seeds)} "
+        "Grey dashed series are values transcribed from the published papers, not measured "
         "by us"
         + (" (" + "; ".join(provenance) + ")." if provenance else ".")
     )
@@ -336,7 +334,8 @@ def figure_e1_delta(records: Sequence[Mapping[str, Any]], out_dir: str | Path, b
         xs = [k * shift for k, _, _, _ in points]
         ks.extend(k for k, _, _, _ in points)
         ax.errorbar(xs, [m for _, m, _, _ in points],
-                    yerr=[s if s is not None else 0.0 for _, _, s, _ in points],
+                    yerr=([s if s is not None else 0.0 for _, _, s, _ in points]
+                          if any(s is not None for _, _, s, _ in points) else None),
                     color=style["color"], marker=style["marker"], linestyle=style["linestyle"],
                     linewidth=1.1, markersize=3.8, capsize=2.0, elinewidth=0.8,
                     zorder=style["zorder"],
@@ -351,8 +350,8 @@ def figure_e1_delta(records: Sequence[Mapping[str, Any]], out_dir: str | Path, b
     caption = (
         f"Per-seed improvement in 1-NN top-1 over {label_for(control)} on "
         f"{backbone_label(backbone)}, "
-        "in percentage points. Each marker is the mean of the per-seed differences and each bar "
-        "their sample standard deviation (ddof=1); the seed fixes both initialisation and data "
+        f"in percentage points. {seed_caption(seeds)} Differences are paired within each seed; "
+        "the seed fixes both initialisation and data "
         "order, so a shared seed is a matched pair and the difference cancels that nuisance "
         "variation. These are descriptive differences; no p-values are reported. Markers "
         "are offset slightly in K so overlapping bars stay readable."
@@ -369,8 +368,7 @@ def figure_e2_generalisation(rows: Sequence[Mapping[str, Any]], out_dir: str | P
     """Small multiples, one panel per E2 anchor K. ``rows`` from ``aggregate_e2``.
 
     ``e1_rows`` (from ``aggregate_e1``) is drawn faintly behind each panel as
-    the "trained at this K" upper reference: the honest ceiling for a single
-    checkpoint evaluated at a K it was not trained for.
+    the "trained at this K" reference, rather than a guaranteed upper bound.
     """
     log = get_logger("report")
     subset = _for_backbone(rows, backbone)
@@ -396,6 +394,11 @@ def figure_e2_generalisation(rows: Sequence[Mapping[str, Any]], out_dir: str | P
                 continue
             ks.extend(xs)
             _plot_method(ax, xs, means, stds, counts, method=method, markersize=2.8)
+            at_anchor = [(x, y) for x, y in zip(xs, means) if x == anchor]
+            if at_anchor:
+                ax.scatter(*zip(*at_anchor), s=30, facecolors="none",
+                           edgecolors=method_style(method)["color"], linewidths=0.8,
+                           zorder=5, label="_nolegend_")
             if e1_subset:
                 bx, bmeans, _, _ = _series(e1_subset, method=method)
                 if bx:
@@ -425,14 +428,14 @@ def figure_e2_generalisation(rows: Sequence[Mapping[str, Any]], out_dir: str | P
         "could generalize to different k at test time\"; neither paper measures it, and this is "
         "that measurement. The faint line behind each panel is the per-K E1 curve of the same "
         "method — models trained at each K — and is a per-K reference, not a guaranteed "
-        f"upper bound. Means over configured seeds {'/'.join(map(str, seeds))}, bands are sample "
-        "standard deviations (ddof=1), n in the legend."
+        f"upper bound. Hollow rings mark inference K equal to training K*. {seed_caption(seeds)}"
     )
     return save_figure(fig, out_dir, f"e2_generalisation_{backbone}", caption=caption)
 
 
 def figure_e2_nnz(rows: Sequence[Mapping[str, Any]], out_dir: str | Path, backbone: str, *,
-                  e1_rows: Sequence[Mapping[str, Any]] | None = None) -> list[Path]:
+                  e1_rows: Sequence[Mapping[str, Any]] | None = None,
+                  seeds: Sequence[int] = SEEDS) -> list[Path]:
     """Accuracy vs the *measured* mean nnz. ``rows`` from ``aggregate_e2``.
 
     Nominal K is an upper bound on the number of nonzeros, not the count: the
@@ -482,7 +485,7 @@ def figure_e2_nnz(rows: Sequence[Mapping[str, Any]], out_dir: str | Path, backbo
         "fewer than K nonzeros and the nominal budget overstates the cost; the point at which a "
         "curve flattens is the point at which raising K stops buying real sparsity. Bold curves "
         "are models trained at each K (E1); faint curves are single E2 checkpoints swept across "
-        "inference K. Means over seeds, bands are sample standard deviations (ddof=1)."
+        f"inference K. {seed_caption(seeds)}"
     )
     return save_figure(fig, out_dir, f"e2_nnz_{backbone}", caption=caption)
 
@@ -618,9 +621,8 @@ def figure_backbone_summary(rows: Sequence[Mapping[str, Any]], out_dir: str | Pa
     _dedup_legend(fig, axes[:len(present)], ncol=min(5, len(METHODS)), y=-0.02,
                   strip_counts=True)
     caption = (
-        "1-NN top-1 on ImageNet-1K against the active dimension K, for every backbone. Means over "
-        f"configured seeds {'/'.join(map(str, seeds))}, bands are sample standard deviations "
-        "(ddof=1); per-series n is in "
+        "1-NN top-1 on ImageNet-1K against the active dimension K, for every backbone. "
+        f"{seed_caption(seeds)} Per-series n is in "
         "the accompanying table, since it can differ between panels. The black dashed rule in each "
         "panel is our own dense (un-compressed) 1-NN accuracy for that backbone. "
         + ("The y-axis is shared across panels."
@@ -786,7 +788,7 @@ def build_all(root: str | Path, out_dir: str | Path, *,
             (f"e2_generalisation_{backbone}",
              lambda b=backbone: figure_e2_generalisation(e2, figure_dir, b, e1_rows=e1, seeds=seeds)),
             (f"e2_nnz_{backbone}",
-             lambda b=backbone: figure_e2_nnz(e2, figure_dir, b, e1_rows=e1)),
+             lambda b=backbone: figure_e2_nnz(e2, figure_dir, b, e1_rows=e1, seeds=seeds)),
             (f"efficiency_{backbone}", lambda b=backbone: figure_efficiency(e1, figure_dir, b)),
             (f"training_{backbone}", lambda b=backbone: figure_training(training, figure_dir, b)),
         ])

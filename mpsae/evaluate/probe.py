@@ -12,7 +12,7 @@ The encoder is never updated. Only training labels fit the probe; the validation
 labels score it once, at the final epoch, with no early stopping and no
 selection, so the number is not optimistically biased.
 
-It runs once per (backbone, method, K, seed) -- 690 cells in the plan's E1 grid
+It runs once per (backbone, method, K, seed) -- 175 cells in the plan's E1 grid
 alone -- so it is deliberately cheap: ten epochs of one matrix multiply per
 batch, with the codes densified on the GPU a batch at a time.
 """

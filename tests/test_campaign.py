@@ -18,11 +18,12 @@ from mpsae.config import Cell
 def test_default_campaign_is_source_training_plus_frozen_transfer():
     campaign = load_campaign("configs/thesis.yaml")
     plan = campaign.plan()
-    assert plan["source_cells"] == 690
-    assert plan["downstream_sparse_points"] == 720
+    assert plan["source_cells"] == 175
+    assert plan["downstream_sparse_points"] == 240
     assert plan["downstream_dense_points"] == 8
     assert campaign.downstream["mode"] == "frozen"
     assert campaign.execution["precomputed_only"] is True
+    assert campaign.seeds == (1227,)
     assert campaign.target_backbones("sop") == ("ff2048", "rn18", "convnext_tiny")
     assert "flowers102" not in campaign.downstream["datasets"]
 
@@ -35,6 +36,19 @@ def test_dataset_backbone_selection_changes_plan_without_dropping_other_targets(
     assert {cell.backbone for cell in campaign.downstream_cells("sop")} == {"rn18"}
     assert campaign.plan()["downstream_dense_points"] == 3
     assert campaign.plan()["downstream_sparse_points"] == 18
+
+
+@pytest.mark.parametrize("config", ["configs/thesis.yaml", "configs/precomputed.yaml"])
+@pytest.mark.parametrize("backbone", ["convnext_tiny", "vit_b16", "dinov2_vits14"])
+def test_modern_backbones_train_only_requested_checkpoints_but_keep_inference_grid(config, backbone):
+    from mpsae.config import BACKBONES
+    campaign = load_campaign(config)
+    expected = (12, 48, 96, 192, 384)
+    assert {cell.k for cell in campaign.source_cells() if cell.backbone == backbone} == set(expected)
+    assert campaign.budgets("downstream", "train_k", backbone) == (12,)
+    assert BACKBONES[backbone].e2_anchors == expected
+    assert {3, 6, 24} <= set(BACKBONES[backbone].k_list)
+    assert (768 in BACKBONES[backbone].k_list) == (backbone != "dinov2_vits14")
 
 
 @pytest.mark.parametrize("targets", [[], {"flowers102": ["rn18"]},
