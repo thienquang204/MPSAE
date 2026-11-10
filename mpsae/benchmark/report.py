@@ -35,7 +35,8 @@ MEASUREMENT_METRICS = (
     "code_bytes_per_image", "index_bytes", "search_ms_per_query",
 )
 METRICS = ACCURACY_METRICS + MEASUREMENT_METRICS
-PAIRS = (("mpsae", "csr"), ("mpsaev2", "csrv2"), ("csr_multitopk", "csr"))
+PAIRS = (("mpsae", "csr"), ("mpsaev2", "csrv2"), ("csr_multitopk", "csr"),
+         ("mpsaev2", "mpsae"))
 _SCOPE = ("dataset", "protocol", "comparison_id", "backbone", "mode", "train_k", "eval_k")
 _ALIASES = {"queries": "query_count", "gallery_rows": "gallery_count",
             "seconds": "search_seconds"}

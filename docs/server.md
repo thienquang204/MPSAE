@@ -47,8 +47,13 @@ CUDA OOM; SAE training batch sizes remain the scientific presets.
 
 ## Dataset lifecycle
 
-The default `configs/thesis.yaml` selects all five registered backbones and
-`execution.storage_mode: direct_v1`, `cleanup_raw: true`:
+The default `configs/thesis.yaml` selects ResNet-50, ResNet-18 and ViT with
+`storage_mode: direct_v1`, `precomputed_only: true`, and `cleanup_raw: false`.
+It downloads/reuses selected published embeddings, then trains and evaluates
+the sparse models. It does not extract backbones or remove raw images.
+
+For an explicitly configured extraction campaign (`precomputed_only: false`,
+`cleanup_raw: true`), the optional dataset lifecycle is:
 
 1. Check all selected pretrained models on the GPU before downloading. Reuse ImageNet JPEGs at `work/imagenet`; complete missing download shards.
 2. Extract all selected backbones directly from JPEG batches. No full FFCV copy.
@@ -110,9 +115,9 @@ NPZ float32 arrays are mapped directly from their uncompressed ZIP members;
 there is no second extracted NPY copy. A resumable writer is temporary and is
 reclaimed after its archive is published and verified. Sparse evaluation codes
 are discarded when their metrics are durable (`retain_codes: false`). Checkpoints
-and optimizer states persist for resume; the five-backbone main-result default uses seed 1227 and has 35
-source fits and 68 downstream evaluation points (60 sparse + 8 dense).
-The model + Adam tensor estimate for those 35 checkpoints is about 3.5 GB,
+and optimizer states persist for resume; the three-backbone main-paper default uses seed 1227 and has 20
+source fits and 40 downstream evaluation points (35 sparse + 5 dense).
+The model + Adam tensor estimate for those 20 checkpoints is about 2.6 GB,
 before serialization overhead and other buffers. The default campaign pulls published embeddings and does not download raw ImageNet.
 
 The direct recipe is explicitly versioned `imagenet-direct-pil-v1`. MRL keeps

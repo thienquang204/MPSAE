@@ -1,9 +1,9 @@
-# Main-result experiment. Previous grid: ../large_scale_abblation.md.
-# Available in Lukita/MPSAE-embeddings on 2026-11-09: all five ImageNet and
-# EuroSAT backbones, plus SOP for ff2048/rn18/convnext_tiny.
+# Main-paper first pass. Previous 35-fit setup: ../large_scale_abblation.md.
+# Selected published embeddings: ImageNet/EuroSAT for ff2048/rn18/vit_b16;
+# SOP for ff2048/rn18.
 # Same fitting/evaluation and target coverage as thesis.yaml.
 name: precomputed
-backbones: [ff2048, rn18, convnext_tiny, vit_b16, dinov2_vits14]
+backbones: [ff2048, rn18, vit_b16]
 methods: [csr, csrv2, mpsae, mpsaev2, csr_multitopk]
 seeds: [1227]
 imagenet:
@@ -11,16 +11,12 @@ imagenet:
   prepare: false
   train_k:
     ff2048: [8, 64]
-    rn18: [8, 64]
-    convnext_tiny: [12]
+    rn18: [8]
     vit_b16: [12]
-    dinov2_vits14: [12]
   eval_k:                       # E2 inference budgets; E1 evaluates at train_k
     ff2048: [8, 64]
-    rn18: [8, 64]
-    convnext_tiny: [12]
+    rn18: [8]
     vit_b16: [12]
-    dinov2_vits14: [12]
   e1: true
   e2: true
   linear_probe: true
@@ -35,19 +31,15 @@ downstream:
   enabled: true
   datasets: [eurosat, sop]
   backbones:
-    sop: [ff2048, rn18, convnext_tiny]
+    sop: [ff2048, rn18]
   train_k:
     ff2048: [8]
     rn18: [8]
-    convnext_tiny: [12]
     vit_b16: [12]
-    dinov2_vits14: [12]
   eval_k:
     ff2048: [8, 64]
-    rn18: [8, 64]
-    convnext_tiny: [12]
+    rn18: [8]
     vit_b16: [12]
-    dinov2_vits14: [12]
   mode: frozen
   revisions: {}
 execution:

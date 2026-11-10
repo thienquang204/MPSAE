@@ -16,7 +16,7 @@ import sys
 from typing import Any
 
 from .. import __version__
-from ..config import BACKBONES, Cell, training_preset
+from ..config import BACKBONES, METHOD_VARIANTS, Cell, training_preset
 from ..io import atomic_json, canonical_hash, exclusive_lock, read_json, sha256_file
 from ..logs import get_logger, setup_logging
 from .config import Campaign
@@ -110,6 +110,10 @@ def checkpoint_record(cell: Cell, root: Path, *, smoke=False,
     actual = tuple(identity.get(key) for key in ("backbone", "method", "target_k", "seed"))
     if expected != actual or summary.get("cell") != cell.__dict__:
         raise RuntimeError(f"{directory}: checkpoint does not identify the selected source cell")
+    variant = METHOD_VARIANTS.get(cell.method)
+    if variant and (identity.get("objective") or {}).get("variant") != variant:
+        raise RuntimeError(f"{directory}: checkpoint uses a different {cell.method} objective variant; "
+                           f"expected {variant}")
     synthetic = any("synthetic" in str(value.get("recipe", "")).lower()
                     for value in identity.get("data", {}).values() if isinstance(value, dict))
     if synthetic != smoke:

@@ -7,6 +7,7 @@ import json
 import pytest
 
 from mpsae.report import aggregate, figures
+from mpsae.config import Cell, METHOD_VARIANTS
 
 
 def _write(path, payload):
@@ -15,8 +16,10 @@ def _write(path, payload):
 
 
 def _run(root, *, method="csr", k=8, seed=7, top1=60.0, log=True):
-    path = root / "ff2048" / method / f"k{k}" / f"seed{seed}"
+    path = root / Cell("ff2048", method, k, seed).slug
     config = {"code_version": "2.0.0", "total_steps": 10}
+    if method in METHOD_VARIANTS:
+        config["identity"] = {"objective": {"variant": METHOD_VARIANTS[method]}}
     e1 = {"top1": top1, "k": k, "seed": seed, "method": method, "backbone": "ff2048"}
     _write(path / "config.json", config)
     _write(path / "eval_e1.json", e1)
@@ -118,6 +121,18 @@ def test_training_summary_explicit_selection_ignores_malformed_unselected_log(tm
     rows = aggregate.training_summary(root, selected_cells=[("ff2048", "csr", 8, 7)])
     assert len(rows) == 1 and rows[0]["method"] == "csr"
     assert aggregate.training_summary(root, selected_cells=[]) == []
+
+
+def test_imagenet_reports_added_instance_cl_as_a_paired_ablation(tmp_path, monkeypatch):
+    root = tmp_path / "runs"
+    records = [_run(root, method="mpsae", top1=61, log=False),
+               _run(root, method="mpsaev2", top1=60, log=False)]
+    _tables_only(monkeypatch)
+    manifest = figures.build_all(root, tmp_path / "reports", records=records, seeds=(7,))
+    with open(manifest["tables"]["paired_mpsaev2_vs_mpsae"]["csv"], encoding="utf-8", newline="") as handle:
+        row, = list(csv.DictReader(handle))
+    assert float(row["delta_top1_mean"]) == -1
+    assert row["seeds_paired"] == "7"
 
 
 def test_explicit_duplicate_training_cells_are_rejected(tmp_path):

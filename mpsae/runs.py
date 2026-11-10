@@ -75,7 +75,7 @@ class RunSettings:
 
 
 def cell_dir(settings: RunSettings, cell: Cell) -> Path:
-    return Path(settings.root) / cell.backbone / cell.method / f"k{cell.k}" / f"seed{cell.seed}"
+    return Path(settings.root) / cell.slug
 
 
 def _evaluate_module():

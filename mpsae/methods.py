@@ -5,7 +5,7 @@
     csr             fixed K             K, 4K, K            gamma * inbatch_cl
     csrv2           annealed k(t)       k, 4k, k            gamma * label_based_cl
     mpsae           fixed K             K, 4K, 2K           2 * OT matching gap
-    mpsaev2         annealed k(t)       k, 4k, 2k           2 * OT matching gap
+    mpsaev2         fixed K             K, 4K, 2K           2 * OT gap + gamma * inbatch_cl
     csr_multitopk   fixed K             K, 4K, 2K           gamma * inbatch_cl  (+ L(2K)/8)
 
 Every method gates exactly three times per step, so the dead-latent counter --
@@ -23,11 +23,12 @@ Shared objective (released CSR):
 
     L = L(k) + 0.125 * L(4k) + (1/32) * NMSE_aux + gamma * L_reg
 
-``mpsaev2`` is the "variant B" the user selected: the *main* budget anneals, so
-it is CSRv2 with the contrastive term replaced by the OT gap, and a comparison
-against ``csrv2`` also includes the MPSAE batch-size setting. The alternative
-(fixed main budget, annealed OT views only) is recorded in
-``docs/notes/mpsaev2_legacy_A.md`` and is not implemented.
+``mpsaev2`` keeps the fixed-K MPSAE objective and adds CSR's instance
+contrastive term on the main K code. Its 2K view is used by OT, without an
+additional 2K reconstruction loss. It shares MPSAE's batch size and gate
+sequence, so this comparison isolates the added contrastive term. The former
+annealed MPSAEv2 objective is a different recipe and cannot be resumed as this
+variant.
 """
 from __future__ import annotations
 
@@ -37,16 +38,16 @@ from typing import Any
 import torch
 
 from . import losses, ot
-from .config import METHODS, TrainPreset, initial_topk
+from .config import METHODS, METHOD_VARIANTS, TrainPreset, initial_topk
 from .model import SparseAutoencoder
 from .schedules import current_k
 
 #: Methods whose main Top-K budget follows the CSRv2 annealing curriculum.
-ANNEALED = ("csrv2", "mpsaev2")
-#: Methods regularised by the OT matching gap instead of a contrastive loss.
+ANNEALED = ("csrv2",)
+#: Methods regularised by the OT matching gap, optionally together with CL.
 OT_METHODS = ("mpsae", "mpsaev2")
 #: Methods using a released contrastive loss.
-CL_METHODS = ("csr", "csrv2", "csr_multitopk")
+CL_METHODS = ("csr", "csrv2", "mpsaev2", "csr_multitopk")
 #: Methods with the additional L(2K)/8 reconstruction term.
 MULTITOPK = ("csr_multitopk",)
 
@@ -91,8 +92,10 @@ def describe(method: str, k: int, preset: TrainPreset) -> dict[str, Any]:
         "reconstruction": ["L(k)", "L(4k)/8"] + (["L(2k)/8"] if method in MULTITOPK else []),
         "aux": {"k_aux": preset.k_aux, "coef": preset.aux_coef,
                 "dead_threshold": preset.dead_threshold, "gates_per_step": 3},
-        "gate_sequence": ["k", "4k", "k" if method in CL_METHODS and method not in MULTITOPK else "2k"],
+        "gate_sequence": ["k", "4k", "2k" if method in OT_METHODS or method in MULTITOPK else "k"],
     }
+    if method == "mpsaev2":
+        described["variant"] = METHOD_VARIANTS[method]
     if method in ANNEALED:
         described["annealing"] = {"shape": "linear", "k_init": initial_topk(k, preset.hidden_dim),
                                   "k_final": k, "decay_ratio": preset.k_decay_ratio,
@@ -194,7 +197,7 @@ def compute_step(method: str, sae: SparseAutoencoder, x: torch.Tensor, *,
         components["contrastive"] = preset.cl_coef * regulariser
         if collect_metrics:
             metric_tensors["loss_contrastive"] = regulariser
-    else:
+    if method in OT_METHODS:
         gap, gap_stats = ot.matching_gap(
             z_main, z_middle, z_wide, mass=preset.ot_mass, eta=preset.ot_eta,
             max_iters=preset.ot_max_iters, tol=preset.ot_tol,

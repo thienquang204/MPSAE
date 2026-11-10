@@ -89,6 +89,15 @@ def test_paired_differences_never_cross_dataset_revision():
         record("csr", comparison_id="one"), record("mpsae", comparison_id="two")]) == []
 
 
+def test_hybrid_is_paired_with_mpsae_to_measure_added_instance_cl():
+    rows = report.paired_differences([
+        record("mpsae", value=0.7), record("mpsaev2", value=0.65)], expected_seeds=(1227,))
+    row, = rows
+    assert (row["treatment"], row["control"]) == ("mpsaev2", "mpsae")
+    assert row["delta_recall_at_1_mean"] == pytest.approx(-0.05)
+    assert row["seeds_paired"] == [1227]
+
+
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), -0.1, 70.0])
 def test_nonfinite_or_percentage_accuracies_cannot_be_reported(value):
     with pytest.raises(ValueError):

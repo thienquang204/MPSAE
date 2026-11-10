@@ -3,11 +3,12 @@
 Working notes for this repository. Not a release document.
 
 **What we claim.** CSR sparsifies a frozen embedding with a tied Top-K
-autoencoder and regularises the codes with a contrastive term. We replace that
-term with an entropic **multi-marginal partial-OT matching gap** that couples
-the codes of the *same* example across three budgets (K, 2K, 4K). Inference is
-unchanged — the same Top-K code. Training changes the objective and uses the
-MPSAE-specific optimisation settings below.
+autoencoder and regularises the codes with a contrastive term. MPSAE replaces
+that term with an entropic **multi-marginal partial-OT matching gap** across
+three budgets (K, 2K, 4K). Current MPSAEv2 combines the OT gap with instance
+contrastive learning at fixed K. Both use the same Top-K inference code and
+the MPSAE-specific optimisation settings below; their effectiveness is tested
+against the baselines.
 
 **Ground rules.** Settings follow the published papers (CSR Table 3/9, CSRv2
 Table 11). Algorithms follow the *released code*. Where the released code
@@ -60,8 +61,8 @@ bash all_in_one.sh
 # Add --skip-setup when the server environment is already installed.
 ```
 
-The default config selects all five ImageNet/EuroSAT backbones and SOP for
-`ff2048`, `rn18`, `convnext_tiny`, whose bundles are
+The default config selects ImageNet/EuroSAT for `ff2048`, `rn18`, `vit_b16`
+and SOP for `ff2048`, `rn18`, whose bundles are
 available in [Lukita/MPSAE-embeddings](https://huggingface.co/datasets/Lukita/MPSAE-embeddings).
 Training still fits the sparse autoencoders. The download step verifies hashes
 and links archives into `work/direct-v1/`; the campaign checks dimensions,
@@ -71,11 +72,11 @@ on missing or incompatible features instead of extracting them.
 As checked on 2026-11-09, the repository has 13 of the full campaign's 20
 bundles: all ImageNet and EuroSAT backbones, plus SOP for `ff2048`, `rn18` and
 `convnext_tiny`. Flowers102 and the other two SOP backbones are missing.
-`configs/thesis.yaml` and `configs/precomputed.yaml` select those 13 bundles.
+`configs/thesis.yaml` and `configs/precomputed.yaml` now select 8 of those bundles.
 Flowers102 is excluded from these campaigns because no bundles are published;
-this does not establish a dataset defect. SOP remains enabled for its three
-available backbones through `downstream.backbones.sop`. Plans, downloads and
-reports use this same selection (60 sparse and 8 dense downstream evaluations).
+this does not establish a dataset defect. SOP remains enabled for the two selected
+ResNets through `downstream.backbones.sop`. Plans, downloads and
+reports use this same selection (35 sparse and 5 dense downstream evaluations).
 Unexpected missing or incompatible bundles fail explicitly rather than being
 silently dropped. Building new bundles requires a separate config with
 `precomputed_only: false`, `--build-missing-embeddings`, and a writable private
@@ -154,9 +155,9 @@ training K; its x-axis sweeps the campaign's selected inference K values and its
 ImageNet 1-NN top-1 accuracy. The curves compare methods, the dashed vertical
 line marks training K, and hollow rings mark inference at the training K.
 Faint curves show separate models trained at each K for comparison. There are
-two selected training anchors for each ResNet and one for each modern backbone,
-reused from E1; E2 adds no training runs. With only K=12 selected, a modern
-backbone's E2 panel has a single point and adds no cross-budget measurement.
+two selected training anchors for ResNet-50 and one each for ResNet-18 and ViT,
+reused from E1; E2 adds no training runs. ResNet-18 and ViT E2 panels each
+have a single point and add no cross-budget measurement.
 Single-seed curves carry no between-seed standard-deviation bands. The two shipped
 campaigns select the main-result budgets below for E1, E2 inference and downstream inference.
 Downstream reuses the K=8 ResNet checkpoints and K=12 modern-backbone checkpoints.
@@ -164,13 +165,11 @@ Downstream reuses the K=8 ResNet checkpoints and K=12 modern-backbone checkpoint
 | backbone | d | recipe | preset | Training K budgets | E2 anchors | cells |
 |---|---|---|---|---|---|---|
 | `ff2048` | 2048 | MRL | Table 3 | 8,64 | 8,64 | 10 |
-| `rn18` | 512 | CSRv2 | Table 9 | 8,64 | 8,64 | 10 |
-| `convnext_tiny` | 768 | CSRv2 | Table 3 | 12 | 12 | 5 |
+| `rn18` | 512 | CSRv2 | Table 9 | 8 | 8 | 5 |
 | `vit_b16` | 768 | CSRv2 | Table 3 | 12 | 12 | 5 |
-| `dinov2_vits14` | 384 | CSRv2 | Table 9 | 12 | 12 | 5 |
 
-35 cells = the selected backbone/K pairs x 5 methods x seed 1227.
-The previous 80-fit setup is preserved, including exact YAML and resolved presets,
+20 cells = the selected backbone/K pairs x 5 methods x seed 1227.
+The previous 35-fit and original 80-fit setups are preserved, including exact YAML and resolved presets,
 in [`large_scale_abblation.md`](large_scale_abblation.md) for a later ablation.
 The wider reference grids remain registered for explicit custom campaigns.
 K never exceeds the backbone's own width, so every point is a compression.
@@ -190,10 +189,11 @@ with CSR include the batch-size and update-count differences where applicable.
 | `csr` | fixed | K, 4K, K | γ · `inbatch_cl` | — |
 | `csrv2` | annealed | k, 4k, k | γ · `label_based_cl` | — |
 | `mpsae` | fixed | K, 4K, 2K | 2 · OT gap | — |
-| `mpsaev2` | annealed | k, 4k, 2k | 2 · OT gap | — |
+| `mpsaev2` | fixed | K, 4K, 2K | 2 · OT gap + γ · `inbatch_cl` | — |
 | `csr_multitopk` | fixed | K, 4K, 2K | γ · `inbatch_cl` | L(2K)/8 |
 
-Shared objective: `L(k) + 0.125·L(4k) + (1/32)·NMSE_aux + γ·L_reg`.
+Shared reconstruction: `B(k) = L(k) + 0.125·L(4k) + (1/32)·NMSE_aux`.
+Add the weighted regulariser(s) and extra reconstruction listed above.
 
 Every method gates exactly **three** times per step, so `dead_threshold=30`
 means the same thing for all of them. For the baselines that is the released
@@ -201,16 +201,32 @@ sequence verbatim: CSR runs three forward passes, the third only to build a
 duplicate contrastive view. Ours spend the third gate on the 2K view they
 actually consume.
 
-`csr_multitopk` is the control for the OT claim. It shares `csr`'s gates and
-contrastive term and adds only `L(2K)/8`, providing a control for supervising
-a 2K view. MPSAE uses the batch size described above. It
+`csr_multitopk` is the control for supervising a 2K view. It shares `csr`'s
+K/4K reconstruction and contrastive term, adds `L(2K)/8`, and uses the 2K view
+for its third activity-counter update. MPSAE uses the batch size described above. It
 follows CSRv2 App. G's "Diverse Multi-TopK" ablation in spirit.
 
-`mpsaev2` is **variant B**: the main budget anneals, so it is `csrv2` with the
-contrastive term swapped for the OT gap, with the MPSAE batch size of 1024.
-Variant A (fixed main budget, annealed OT views only) is
-specified in [`docs/notes/mpsaev2_legacy_A.md`](docs/notes/mpsaev2_legacy_A.md)
-and is deliberately not implemented.
+`mpsaev2` now uses **fixed K with both OT and instance contrastive learning**:
+`B(K) + 2·gap(z_K,z_2K,z_4K) + γ·C_instance(z_K)`. It needs no labels and adds
+no `L(2K)/8` reconstruction. The contrastive coefficient is 0.1 for ResNet-50,
+ConvNeXt and ViT, and 1.0 for ResNet-18 and DINO; temperature is 0.2. The
+contrastive term operates on the existing K code, so the three activity-counter
+updates remain K, 4K, 2K. Against MPSAE, this isolates the added contrastive term
+under the same batch size and fixed-budget schedule. Better accuracy is a
+hypothesis to test, not an assumed outcome.
+ImageNet reports include `paired_mpsaev2_vs_mpsae`; downstream paired tables
+also include this treatment/control pair, alongside the existing comparisons.
+Each difference uses matching seeds and evaluation settings.
+
+Only `csrv2` anneals in the current method set. The former MPSAEv2 **variant B**
+(annealed main budget with OT only) is retired; its checkpoints are incompatible
+with the new objective. Historical variants A and B are described in
+[`docs/notes/mpsaev2_legacy_A.md`](docs/notes/mpsaev2_legacy_A.md).
+New hybrid fits use `runs/<backbone>/mpsaev2__fixed_ot_cl_v1/k<K>/seed<SEED>/`
+and record objective variant `fixed_ot_cl_v1`, while reports retain the logical
+method name `mpsaev2`. Existing unversioned MPSAEv2 directories remain intact
+and are excluded from current-method reports. The hybrid starts a new fit;
+compatible checkpoints for the other methods remain reusable.
 
 ---
 

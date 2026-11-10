@@ -34,7 +34,7 @@ from ..config import BACKBONE_ORDER, BACKBONES, BASELINES, METHODS, OURS, SEEDS
 from ..logs import get_logger
 from . import reference
 from .aggregate import (aggregate_e1, aggregate_e2, load_dense_references, load_runs,
-                        paired_difference, training_summary, write_tables)
+                        paired_difference, training_summary, validate_result_variant, write_tables)
 from .style import (BACKDROP_STYLE, BAND_ALPHA, COLUMN_WIDTH, DENSE_STYLE, PAGE_WIDTH,
                     PUBLISHED_STYLE, apply_style, backbone_label, label_for,
                     method_style, save_figure, seed_caption)
@@ -709,6 +709,8 @@ def build_all(root: str | Path, out_dir: str | Path, *,
                           for record in records}
         if len(selected_cells) != len(records):
             raise ValueError("explicit report selection contains duplicate training cells")
+        for record in records:
+            validate_result_variant(record)
     else:
         records = load_runs(root, backbones=backbones)
         selected_cells = None
@@ -734,18 +736,18 @@ def build_all(root: str | Path, out_dir: str | Path, *,
                              ("training_summary", training)):
         manifest["tables"][name] = {key: str(path) for key, path
                                     in write_tables(table_rows, table_dir, name).items()}
-    for control in BASELINES:
-        for treatment in tuple(OURS) + ("csr_multitopk",):
-            if treatment == control:
-                continue
-            rows = paired_difference(records, treatment=treatment, control=control, seeds=seeds)
-            if not rows:
-                manifest["skipped"].append(
-                    f"table paired_{treatment}_vs_{control}: no paired seeds")
-                continue
-            name = f"paired_{treatment}_vs_{control}"
-            manifest["tables"][name] = {key: str(path) for key, path
-                                        in write_tables(rows, table_dir, name).items()}
+    pairs = [(treatment, control) for control in BASELINES
+             for treatment in tuple(OURS) + ("csr_multitopk",) if treatment != control]
+    pairs.append(("mpsaev2", "mpsae"))  # fixed-K OT + CL versus fixed-K OT
+    for treatment, control in pairs:
+        rows = paired_difference(records, treatment=treatment, control=control, seeds=seeds)
+        if not rows:
+            manifest["skipped"].append(
+                f"table paired_{treatment}_vs_{control}: no paired seeds")
+            continue
+        name = f"paired_{treatment}_vs_{control}"
+        manifest["tables"][name] = {key: str(path) for key, path
+                                    in write_tables(rows, table_dir, name).items()}
     if dense:
         rows = [{"backbone": name, "dim": BACKBONES[name].dim if name in BACKBONES else None,
                  "top1_mean": payload.get("top1"), "top1_std": None, "top1_n": 1,

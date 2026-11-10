@@ -28,7 +28,7 @@ import re
 import statistics
 from typing import Any, Iterable, Mapping, Sequence
 
-from ..config import BACKBONES, METHODS, SEEDS, grid
+from ..config import BACKBONES, METHODS, METHOD_VARIANTS, SEEDS, Cell, grid, method_from_directory
 from ..io import read_json, read_jsonl
 from ..logs import get_logger
 
@@ -94,8 +94,9 @@ def load_runs(root: str | Path, *, backbones: Sequence[str] | None = None) -> li
             log.warning("skipping unknown backbone directory %s", backbone_dir)
             continue
         for method_dir in sorted(p for p in backbone_dir.iterdir() if p.is_dir()):
-            if method_dir.name not in METHODS:
-                log.warning("skipping unknown method directory %s", method_dir)
+            method = method_from_directory(method_dir.name)
+            if method is None:
+                log.warning("skipping historical or unknown method directory %s", method_dir)
                 continue
             for k_dir in sorted(p for p in method_dir.iterdir() if p.is_dir()):
                 match = _K_DIR.match(k_dir.name)
@@ -105,8 +106,10 @@ def load_runs(root: str | Path, *, backbones: Sequence[str] | None = None) -> li
                     seed_match = _SEED_DIR.match(seed_dir.name)
                     if seed_match is None:
                         continue
-                    records.append(_load_one(seed_dir, backbone, method_dir.name,
-                                             int(match.group(1)), int(seed_match.group(1))))
+                    record = _load_one(seed_dir, backbone, method,
+                                       int(match.group(1)), int(seed_match.group(1)))
+                    validate_result_variant(record)
+                    records.append(record)
 
     expected = {(c.backbone, c.method, c.k, c.seed) for c in grid()
                 if wanted is None or c.backbone in wanted}
@@ -135,6 +138,32 @@ def _load_one(path: Path, backbone: str, method: str, k: int, seed: int) -> dict
             "has_train_log": (path / "train.jsonl").is_file(),
             "code_version": (config or {}).get("code_version"),
             "complete": e1 is not None, "missing": missing}
+
+
+def validate_result_variant(record: Mapping[str, Any]) -> None:
+    """A directory name cannot establish the objective behind measurements.
+
+    Current partial runs may not have written their config yet. Once a run has
+    E1 results or E2 points, require its saved objective to identify the current
+    variant, including when records were supplied directly to the report API.
+    """
+    expected = METHOD_VARIANTS.get(record.get("method"))
+    if not expected:
+        return
+    e2 = record.get("e2")
+    has_results = (record.get("e1") is not None
+                   or isinstance(e2, Mapping) and bool(e2.get("points")))
+    if not has_results:
+        return
+    config = record.get("config") or {}
+    identity = config.get("identity") or {}
+    objective = identity.get("objective") or {}
+    if objective.get("variant") != expected:
+        location = record.get("path", (record.get("backbone"), record.get("k"),
+                                       record.get("seed")))
+        raise ValueError(f"{location}: {record['method']} results have a missing or different "
+                         f"objective variant; expected {expected}. Historical measurements "
+                         "cannot be reported as the current method.")
 
 
 def load_dense_references(root: str | Path) -> dict[str, dict[str, Any]]:
@@ -361,7 +390,7 @@ def training_summary(root: str | Path, *, max_curve_points: int = 400,
                     or isinstance(k, bool) or not isinstance(k, int) or k < 1
                     or isinstance(seed, bool) or not isinstance(seed, int) or seed < 0):
                 raise ValueError(f"invalid selected training cell: {(backbone, method, k, seed)}")
-        paths = sorted(base / backbone / method / f"k{k}" / f"seed{seed}" / "train.jsonl"
+        paths = sorted(base / Cell(backbone, method, k, seed).slug / "train.jsonl"
                        for backbone, method, k, seed in cells)
 
     for path in paths:
@@ -371,7 +400,10 @@ def training_summary(root: str | Path, *, max_curve_points: int = 400,
         k_match, seed_match = _K_DIR.match(seed_dir.parent.name), _SEED_DIR.match(seed_dir.name)
         if k_match is None or seed_match is None:
             continue
-        backbone, method = seed_dir.parents[2].name, seed_dir.parents[1].name
+        backbone = seed_dir.parents[2].name
+        method = method_from_directory(seed_dir.parents[1].name)
+        if method is None:
+            continue
         if wanted is not None and backbone not in wanted:
             continue
         log_records = read_jsonl(path)

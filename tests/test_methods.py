@@ -13,7 +13,7 @@ import pytest
 # Must precede the mpsae imports: these modules import torch at module scope.
 pytest.importorskip("torch")
 
-from mpsae import methods  # noqa: E402
+from mpsae import losses, methods  # noqa: E402
 from mpsae.config import FF2048_PRESET, METHODS  # noqa: E402
 from mpsae.model import build_sae  # noqa: E402
 
@@ -64,7 +64,7 @@ def test_component_sets_are_as_designed(torch, preset, batch, labels):
         "csr": {"mse_k", "mse_4k", "aux", "contrastive"},
         "csrv2": {"mse_k", "mse_4k", "aux", "contrastive"},
         "mpsae": {"mse_k", "mse_4k", "aux", "ot"},
-        "mpsaev2": {"mse_k", "mse_4k", "aux", "ot"},
+        "mpsaev2": {"mse_k", "mse_4k", "aux", "ot", "contrastive"},
         "csr_multitopk": {"mse_k", "mse_2k", "mse_4k", "aux", "contrastive"},
     }
     for method, names in expected.items():
@@ -85,8 +85,8 @@ def test_multitopk_differs_from_csr_only_by_the_2k_term(torch, preset, batch, la
 
 
 def test_mpsae_differs_from_multitopk_by_ot_versus_contrastive(torch, preset, batch, labels):
-    """Same three gates and the same reconstruction spine; only the
-    regulariser changes. That is the comparison the ablation supports."""
+    """The common reconstruction terms match; the control also adds R_2K/8
+    and exchanges the OT regularizer for instance contrastive learning."""
     _, ours = _run(torch, "mpsae", preset, batch, labels)
     _, ablation = _run(torch, "csr_multitopk", preset, batch, labels)
     for shared in ("mse_k", "mse_4k", "aux"):
@@ -96,28 +96,69 @@ def test_mpsae_differs_from_multitopk_by_ot_versus_contrastive(torch, preset, ba
 
 def test_annealed_methods_start_wide_and_end_at_the_target(torch, preset, batch, labels):
     total = 100
-    for method in ("csrv2", "mpsaev2"):
+    for method in ("csrv2",):
         start = methods.plan_budget(method, K, preset, step=0, total_steps=total)
         end = methods.plan_budget(method, K, preset, step=total - 1, total_steps=total)
         assert start == methods.initial_topk(K, HIDDEN) > K, method
         assert end == K, method
-    for method in ("csr", "mpsae", "csr_multitopk"):
-        assert methods.plan_budget(method, K, preset, step=0, total_steps=total) == K, method
+    for method in ("csr", "mpsae", "mpsaev2", "csr_multitopk"):
+        for step in (0, 35, 70, 99):
+            assert methods.plan_budget(method, K, preset, step=step, total_steps=total) == K, method
 
 
-def test_mpsaev2_is_csrv2_with_ot_in_place_of_the_contrastive_term(torch, preset, batch, labels):
-    """Variant B, as chosen: the *main* budget anneals in both, so the only
-    difference is the regulariser. Variant A (fixed main budget, annealed OT
-    views) is documented in docs/notes/mpsaev2_legacy_A.md and not implemented.
-    """
-    total = 10
-    for step in (0, 3, 9):
-        assert (methods.plan_budget("mpsaev2", K, preset, step=step, total_steps=total)
-                == methods.plan_budget("csrv2", K, preset, step=step, total_steps=total))
-    _, annealed = _run(torch, "mpsaev2", preset, batch, labels, step=0, total=total)
-    _, fixed = _run(torch, "mpsae", preset, batch, labels, step=0, total=total)
-    assert annealed.training_k > fixed.training_k
-    assert set(annealed.components) == set(fixed.components)
+@pytest.mark.parametrize("step", [0, 3, 9])
+@pytest.mark.parametrize("gamma", [0.1, 1.0])
+@pytest.mark.parametrize("collect_metrics", [True, False])
+def test_mpsaev2_adds_instance_cl_to_fixed_mpsae_in_loss_and_gradient(
+        torch, preset, batch, labels, step, gamma, collect_metrics):
+    """Both regularizers must contribute, with no curriculum or R_2K term."""
+    preset = replace(preset, cl_coef=gamma)
+    hybrid = _model(torch)
+    reference = _model(torch)
+    actual = methods.compute_step("mpsaev2", hybrid, batch, k=K, preset=preset,
+                                   step=step, total_steps=10, labels=None,
+                                   collect_metrics=collect_metrics)
+    base = methods.compute_step("mpsae", reference, batch, k=K, preset=preset,
+                                 step=step, total_steps=10, labels=None,
+                                 collect_metrics=collect_metrics)
+    # Use the generic doubled-view implementation, not the optimized helper.
+    main, _ = reference.gate(reference.pre_activations(batch), K)
+    contrastive = losses.inbatch_cl(main, main, preset.cl_temperature)
+    expected = base.loss + gamma * contrastive
+    assert actual.training_k == base.training_k == K
+    assert set(actual.components) == set(base.components) | {"contrastive"}
+    assert "mse_2k" not in actual.components
+    for name in base.components:
+        torch.testing.assert_close(actual.components[name], base.components[name])
+    torch.testing.assert_close(actual.components["contrastive"], gamma * contrastive,
+                               atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(actual.loss, expected, atol=1e-6, rtol=1e-6)
+    actual.loss.backward()
+    expected.backward()
+    for mine, theirs in zip(hybrid.parameters(), reference.parameters()):
+        torch.testing.assert_close(mine.grad, theirs.grad, atol=1e-6, rtol=1e-5)
+    assert torch.equal(hybrid.stats_last_nonzero, reference.stats_last_nonzero)
+    if collect_metrics:
+        assert actual.metrics["loss_contrastive"] == pytest.approx(float(contrastive.detach()))
+        assert actual.metrics["loss_ot"] == base.metrics["loss_ot"]
+        assert (actual.metrics["training_k"], actual.metrics["view_2k"],
+                actual.metrics["view_4k"]) == (K, 2 * K, 4 * K)
+    else:
+        assert actual.metrics == {}
+
+
+def test_mpsaev2_ignores_labels_and_records_the_fixed_hybrid_recipe(torch, preset, batch, labels):
+    _, unsupervised = _run(torch, "mpsaev2", preset, batch, None, total=10)
+    _, with_labels = _run(torch, "mpsaev2", preset, batch, labels, total=10)
+    torch.testing.assert_close(unsupervised.loss, with_labels.loss, atol=0, rtol=0)
+    described = methods.describe("mpsaev2", K, preset)
+    assert described["variant"] == "fixed_ot_cl_v1"
+    assert "annealing" not in described
+    assert described["gate_sequence"] == ["k", "4k", "2k"]
+    assert described["contrastive"]["loss"] == "inbatch_cl"
+    assert described["contrastive"]["weight"] == preset.cl_coef
+    assert described["ot"]["weight"] == preset.ot_weight
+    assert described["reconstruction"] == ["L(k)", "L(4k)/8"]
 
 
 def test_only_csrv2_requires_labels(torch, preset, batch, labels):

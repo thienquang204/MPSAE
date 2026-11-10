@@ -8,7 +8,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from mpsae import losses, methods
+from mpsae import losses, methods, ot
 from mpsae.config import FF2048_PRESET, METHODS
 from mpsae.model import build_sae
 
@@ -71,7 +71,7 @@ def _preset():
 
 
 def _reference_cl_step(method, sae, x, labels, preset, step, total_steps):
-    """Pre-optimization execution, using generic doubled contrastive views."""
+    """Reference gate bookkeeping with generic doubled contrastive views."""
     k = methods.plan_budget(method, 2, preset, step=step, total_steps=total_steps)
     pre = sae.pre_activations(x)
     main, _ = sae.gate(pre, k)
@@ -81,20 +81,26 @@ def _reference_cl_step(method, sae, x, labels, preset, step, total_steps):
     wide, _ = sae.gate(pre, min(4 * k, sae.hidden_dim))
     sae.count_activity(pre, min(4 * k, sae.hidden_dim))
     middle = None
-    if method == "csr_multitopk":
+    if method in ("csr_multitopk", "mpsaev2"):
         middle, _ = sae.gate(pre, min(2 * k, sae.hidden_dim))
     sae.count_activity(pre, min(2 * k, sae.hidden_dim) if middle is not None else k)
     result = losses.mse(reconstruction, x) + preset.nested_coef * losses.mse(sae.decode(wide), x)
     result = result + preset.aux_coef * losses.normalized_mse(
         sae.decode(aux), losses.auxk_target(x, reconstruction, sae.pre_bias))
-    if middle is not None:
+    if method == "csr_multitopk":
         result = result + preset.nested_coef * losses.mse(sae.decode(middle), x)
+    if method == "mpsaev2":
+        gap, _ = ot.matching_gap(main, middle, wide, mass=preset.ot_mass, eta=preset.ot_eta,
+                                 max_iters=preset.ot_max_iters, tol=preset.ot_tol,
+                                 microbatch=preset.ot_microbatch,
+                                 max_refine_iters=preset.ot_max_refine_iters)
+        result = result + preset.ot_weight * gap
     contrastive = (losses.label_based_cl(main, main, labels, preset.cl_temperature)
                    if method == "csrv2" else losses.inbatch_cl(main, main, preset.cl_temperature))
     return result + preset.cl_coef * contrastive
 
 
-@pytest.mark.parametrize("method", ["csr", "csrv2", "csr_multitopk"])
+@pytest.mark.parametrize("method", ["csr", "csrv2", "csr_multitopk", "mpsaev2"])
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_optimized_full_steps_preserve_gradients_updates_and_counters(method, device):
     if device == "cuda" and not torch.cuda.is_available():

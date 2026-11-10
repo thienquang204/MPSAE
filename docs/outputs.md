@@ -32,6 +32,11 @@ leave behind, and a file that exists is complete.
 
 ## `runs/<backbone>/<method>/k<K>/seed<S>/`
 
+The directory segment normally matches the logical method name. Current
+MPSAEv2 instead uses `mpsaev2__fixed_ot_cl_v1` to separate its fixed-K hybrid
+objective from the retired annealed OT-only fits; metadata still records
+`method: mpsaev2` and `objective.variant: fixed_ot_cl_v1`.
+
 Six possible files. `config.json`, `train.jsonl`, `checkpoint.pt` and
 `summary.json` come from the fit; `eval_e1.json` from the per-K measurement;
 `eval_e2.json` only at an E2 anchor budget; `failure.json` only if the cell
@@ -58,7 +63,7 @@ never finished. It is the authoritative record of what was asked for.
 | `format` | `mpsae-fit-v2`, the checkpoint layout |
 | `code_version` | `mpsae.__version__` at fit time |
 | `backbone`, `method`, `target_k`, `seed` | the cell |
-| `objective` | `methods.describe(...)`: the exact loss composition, the gate budgets, the regulariser and its weight, and for our methods the OT settings (`weight`, `cost`, `mass`, `eta`, `microbatch`, `max_iters`, `tol`, `views`) |
+| `objective` | `methods.describe(...)`: loss composition, gate budgets, regularisers and their weights, and OT settings where applicable (`weight`, `cost`, `mass`, `eta`, `microbatch`, `max_iters`, `tol`, `views`). Current MPSAEv2 also records `variant: fixed_ot_cl_v1`, with both `contrastive` and `ot` settings and no `annealing` field |
 | `optimizer` | `{name: Adam, lr, betas, eps, weight_decay, schedule: constant, grad_clip: null, decay_applies_to}`. The last field records that decay is coupled L2 over *all* parameters including biases, as the release does — not AdamW's decoupled form |
 | `schedule` | `{epochs, batch_size, batches_per_epoch, total_steps, drop_last: false}` |
 | `precision` | `{params: float32, autocast: false, tf32: false}` |
@@ -279,7 +284,7 @@ Always present:
 | `lr` | the preset learning rate. Constant by construction: the release builds `StepLR(step_size=10, gamma=1)`, which never changes it |
 | `rows` | rows in that batch. The final batch of an epoch is short — `drop_last=False`, as released |
 | `elapsed` | **cumulative** wall-clock since the fit began, including time from earlier resumptions |
-| `training_k` | the budget actually used at this step. Equal to K for the fixed methods; annealed for `csrv2`/`mpsaev2` |
+| `training_k` | the budget actually used at this step. Equal to K for `csr`, `mpsae`, current `mpsaev2`, and `csr_multitopk`; annealed only for `csrv2` |
 | `view_2k`, `view_4k` | the other two gate budgets, `min(2k, h)` and `min(4k, h)` |
 | `loss_mse_k`, `loss_mse_4k`, `loss_aux` | the three shared terms, **unweighted** — the weights (`0.125`, `1/32`) are applied in the total, not in these diagnostics |
 | `loss_total` | the weighted sum actually backpropagated |
@@ -293,9 +298,17 @@ Method-dependent:
 | field | present for |
 |---|---|
 | `loss_mse_2k` | `csr_multitopk` — the extra `L(2K)/8` reconstruction, unweighted |
-| `loss_contrastive` | `csr`, `csrv2`, `csr_multitopk` — unweighted regulariser |
+| `loss_contrastive` | `csr`, `csrv2`, `csr_multitopk`, current `mpsaev2` — unweighted contrastive term; label-based only for `csrv2`, instance-based otherwise |
 | `loss_ot` | `mpsae`, `mpsaev2` — the unweighted matching gap |
 | `ot_*` | the same two methods: solver diagnostics averaged over the OT groups in the batch — `ot_mass`, `ot_mass_error`, `ot_cap_violation`, `ot_constraint_error`, `ot_iterations`, `ot_refinement_iterations`, `ot_objective_refinement`, `ot_negative_gap`, `ot_diagonal_plan_mass`, `ot_cost_mean`, `ot_cost_std_over_eta`, `ot_groups`, plus the worst case across groups in `ot_cost_min`, `ot_cost_max`, `ot_mass_error_max`, `ot_cap_violation_max` |
+
+Current MPSAEv2 records both `loss_contrastive` and `loss_ot`, with fixed
+`training_k`. Its objective identity includes `variant: fixed_ot_cl_v1`, and
+its fit directory is `runs/<backbone>/mpsaev2__fixed_ot_cl_v1/k<K>/seed<SEED>/`.
+Reports still label the method `mpsaev2`; older unversioned MPSAEv2 directories
+are retained but excluded from current-method reports. The resolved campaign's
+`method_variants` mapping distinguishes the current report plan from the old
+annealed OT-only plan.
 
 **`elapsed` is cumulative, not per-record.** Summing it across a file multiplies
 the true total by the number of records. The total wall-clock of a fit is
@@ -319,13 +332,20 @@ about what `±` means.
 |---|---|---|
 | `e1_accuracy` | (backbone, method, K) | `top1`, `probe_top1`, `probe_top5`, `nnz`, `empty_queries`, `search_seconds`, `train_seconds`, `gpu_hours`, `index_bytes`, each as `_mean`/`_std`/`_n`, plus `seeds_present`, `seeds_missing`, `complete`, `code_versions` |
 | `e2_generalisation` | (backbone, method, anchor K, inference K) | `top1`, `nnz`, `empty_queries`, `search_seconds` as above, plus `at_anchor`, `seeds_present`, `seeds_missing`, `complete` |
-| `training_summary` | one fit | `logged_records`, `last_step`, `total_steps`, `finished`, `train_seconds`, `gpu_hours`, `step_seconds_mean`, `residency`, `final_*` for each loss and sparsity field, and `k_schedule` — the realised annealing as `step:k` change points, which is how you check that a `csrv2`/`mpsaev2` fit annealed the way its config claims |
-| `paired_<treatment>_vs_<control>` | (backbone, K) | per-seed differences for every treatment in `mpsae`, `mpsaev2`, `csr_multitopk` against each control in `csr`, `csrv2`: `delta_top1`, `delta_probe_top1`, `delta_nnz` as mean/std/n, plus `treatment_top1`, `control_top1` as context, and `seeds_paired`, `seeds_missing`, `seeds_unpaired` |
+| `training_summary` | one fit | `logged_records`, `last_step`, `total_steps`, `finished`, `train_seconds`, `gpu_hours`, `step_seconds_mean`, `residency`, `final_*` for each loss and sparsity field, and `k_schedule` — realised budgets as `step:k` change points; only `csrv2` should anneal in current runs |
+| `paired_<treatment>_vs_<control>` | (backbone, K) | per-seed differences for every treatment in `mpsae`, `mpsaev2`, `csr_multitopk` against each control in `csr`, `csrv2`, plus the direct `mpsaev2` versus `mpsae` comparison: `delta_top1`, `delta_probe_top1`, `delta_nnz` as mean/std/n, plus `treatment_top1`, `control_top1` as context, and `seeds_paired`, `seeds_missing`, `seeds_unpaired` |
 | `dense_reference` | backbone | our measured dense 1-NN beside the published value, kept in separate columns so the two can never be conflated |
 
 A metric nobody measured is dropped as a column rather than rendered as a column
 of em-dashes — `probe_top5` with `--no-probe`, or `probe_top1` in the E2 table,
 where the sweep deliberately runs no probes.
+
+`paired_mpsaev2_vs_mpsae` reports the added-instance-contrastive ablation on
+ImageNet. The downstream report likewise includes this pair in
+`downstream/tables/paired.{json,csv,md}`, with `treatment: mpsaev2` and
+`control: mpsae`, alongside its existing pairs. Each downstream difference
+matches the dataset/protocol, backbone, training K, inference K and seed and
+records the two evaluation IDs; it is not a subtraction of unrelated averages.
 
 ### `reports/figures/`
 

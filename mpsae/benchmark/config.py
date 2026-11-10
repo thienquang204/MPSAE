@@ -11,7 +11,7 @@ from pathlib import Path
 import re
 from typing import Any
 
-from ..config import BACKBONES, METHODS, SEEDS, Cell, grid, training_preset
+from ..config import BACKBONES, METHODS, METHOD_VARIANTS, SEEDS, Cell, grid, training_preset
 from ..io import canonical_hash
 from ..timing_config import timing_config
 
@@ -177,6 +177,10 @@ class Campaign:
         from dataclasses import asdict
 
         payload = asdict(self)
+        variants = {method: METHOD_VARIANTS[method] for method in self.methods
+                    if method in METHOD_VARIANTS}
+        if variants:
+            payload["method_variants"] = variants
         if not payload["downstream"].get("backbones"):
             payload["downstream"].pop("backbones", None)
         if not payload["execution"]["precomputed_only"]:

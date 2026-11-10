@@ -26,7 +26,7 @@ with `bash all_in_one.sh --sync-only`. A synthetic rehearsal via
 `bash all_in_one.sh --smoke` does not write to either service.
 
 The default campaign downloads existing embeddings: ImageNet and EuroSAT for
-all five backbones, SOP for `ff2048`, `rn18`, `convnext_tiny`. Flowers102 has no
+`ff2048`, `rn18`, `vit_b16`, and SOP for `ff2048`, `rn18`. Flowers102 has no
 published bundles and is excluded. `downstream.backbones` selects backbones
 per dataset; an omitted entry uses all campaign backbones. No raw image download
 or backbone extraction runs with the default `precomputed_only: true` setting.
@@ -140,13 +140,13 @@ only when `train_missing` is enabled. Existing compatible completed fits are
 reused. `max_steps: 0` uses the full source training schedule; a positive cap is
 part of fit identity and does not turn a capped fit into a full-fit checkpoint.
 
-The shipped five-backbone campaigns select the main-result setup: `[8,64]`
-for both ResNets and `[12]` for ConvNeXt, ViT and DINO in all three evaluation
-families. With five methods and seed 1227 this is 35 source fits, 35 E2 anchor
-records (55 points including reused E1 measurements), and 60 sparse + 8 dense
-downstream evaluations. Modern-backbone E2 records contain only their E1 point;
-cross-budget E2 evaluation remains only for the ResNets. The previous 80-fit
-selection is archived in [`large_scale_abblation.md`](../large_scale_abblation.md),
+The shipped three-backbone campaigns select the main-paper first pass: `[8,64]`
+for ResNet-50, `[8]` for ResNet-18 and `[12]` for ViT in all three evaluation
+families. With five methods and seed 1227 this is 20 source fits, 20 E2 anchor
+records (30 points including reused E1 measurements), and 35 sparse + 5 dense
+downstream evaluations. ResNet-18 and ViT E2 records contain only their E1 point;
+cross-budget E2 evaluation remains only for ResNet-50. The previous 35-fit and original 80-fit
+selections are archived in [`large_scale_abblation.md`](../large_scale_abblation.md),
 including both YAML files and resolved training presets. Dense baselines still use their
 full backbone representations. Earlier unselected E2 measurements are retained
 in `eval_e2.json` under `cached_points`; only selected `points` enter the report.

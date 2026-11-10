@@ -18,6 +18,20 @@ METHODS = ("csr", "csrv2", "mpsae", "mpsaev2", "csr_multitopk")
 BASELINES = ("csr", "csrv2")
 OURS = ("mpsae", "mpsaev2")
 
+# A changed objective gets its own storage namespace and campaign identity.
+# The unversioned mpsaev2 directory belongs to the former annealed OT-only fit.
+METHOD_VARIANTS = {"mpsaev2": "fixed_ot_cl_v1"}
+
+
+def method_directory(method: str) -> str:
+    variant = METHOD_VARIANTS.get(method)
+    return f"{method}__{variant}" if variant else method
+
+
+def method_from_directory(directory: str) -> str | None:
+    """Decode only current method directories, never relabel historical fits."""
+    return next((method for method in METHODS if method_directory(method) == directory), None)
+
 #: Seeds for every (backbone, method, K) cell. 1227 is the released CSR seed.
 SEEDS = (1227,)
 
@@ -211,7 +225,7 @@ class Cell:
 
     @property
     def slug(self) -> str:
-        return f"{self.backbone}/{self.method}/k{self.k}/seed{self.seed}"
+        return f"{self.backbone}/{method_directory(self.method)}/k{self.k}/seed{self.seed}"
 
     def spec(self) -> Backbone:
         return BACKBONES[self.backbone]

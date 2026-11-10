@@ -22,7 +22,7 @@ import shutil
 from typing import Any
 
 from . import __version__
-from .config import BACKBONES, BACKBONE_ORDER, Backbone
+from .config import BACKBONES, BACKBONE_ORDER, METHODS, METHOD_VARIANTS, Backbone
 from .io import atomic_json, human_bytes, read_json
 from .logs import banner, get_logger, log_environment, setup_logging, stage
 
@@ -440,8 +440,14 @@ def run_all(options: PipelineOptions, *, only: str | None = None) -> dict[str, A
 
     outcomes: dict[str, Any] = {}
     for name in chosen:
+        identity = {"version": __version__, "options": asdict(options)}
+        if name in ("train", "report"):
+            variants = {method: METHOD_VARIANTS[method] for method in (options.methods or METHODS)
+                        if method in METHOD_VARIANTS}
+            if variants:
+                identity["method_variants"] = variants
         with stage(name, options.paths.state, force=options.forced(name),
-                   identity={"version": __version__, "options": asdict(options)},
+                   identity=identity,
                    description=f"stage {name}") as detail:
             if not detail.get("skipped"):
                 detail.update(HANDLERS[name](options) or {})
@@ -462,8 +468,7 @@ def status(options: PipelineOptions) -> dict[str, Any]:
                  options.seeds or SEEDS, options.k_values)
     outstanding = []
     for cell in cells:
-        path = (options.paths.runs / cell.backbone / cell.method
-                / f"k{cell.k}" / f"seed{cell.seed}" / "eval_e1.json")
+        path = options.paths.runs / cell.slug / "eval_e1.json"
         record = read_json(path)
         if not record or "top1" not in record:
             outstanding.append(cell)

@@ -208,8 +208,8 @@ backbone weights must match the source checkpoint.
 On 2026-11-09, commit `f67f3f36ea13e61bf70287a14a3f7df636131dda` contained all five
 ImageNet and EuroSAT bundles, and SOP for `ff2048`, `rn18`, `convnext_tiny`.
 Flowers102 and SOP for `vit_b16`, `dinov2_vits14` were absent. The supplied
-`thesis.yaml` and `precomputed.yaml` keep all five ImageNet/EuroSAT backbones
-and SOP for its three published backbones. Flowers102 is excluded because it
+`thesis.yaml` and `precomputed.yaml` select ImageNet/EuroSAT for `ff2048`,
+`rn18`, `vit_b16` and SOP for the two selected ResNets. Flowers102 is excluded because it
 has no published embeddings; absence alone does not prove the dataset is faulty.
 Run `status` to check current coverage. Per-dataset coverage is explicit:
 
@@ -217,7 +217,7 @@ Run `status` to check current coverage. Per-dataset coverage is explicit:
 downstream:
   datasets: [eurosat, sop]
   backbones:
-    sop: [ff2048, rn18, convnext_tiny]
+    sop: [ff2048, rn18]
 ```
 
 Datasets omitted from `backbones` use all campaign backbones. The same filter

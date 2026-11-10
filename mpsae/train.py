@@ -21,7 +21,7 @@ import time
 from typing import Any
 
 from . import methods
-from .config import BACKBONES, Backbone, Cell, TrainPreset, training_preset
+from .config import BACKBONES, METHOD_VARIANTS, Backbone, Cell, TrainPreset, training_preset
 from .features import Bundle, BatchSource
 from .io import atomic_json, canonical_hash, exclusive_lock, read_json, read_jsonl, truncate_jsonl
 from .logs import MetricWriter, Progress, format_duration, get_logger
@@ -414,6 +414,10 @@ def load_fitted(cell: Cell, out_dir: str | Path, spec: Backbone, *, device) -> A
                 "target_k": cell.k, "seed": cell.seed}
     if any(identity.get(key) != value for key, value in expected.items()):
         raise RuntimeError(f"{out_dir}: checkpoint belongs to a different training cell")
+    variant = METHOD_VARIANTS.get(cell.method)
+    if variant and (identity.get("objective") or {}).get("variant") != variant:
+        raise RuntimeError(f"{out_dir}: checkpoint uses a different {cell.method} objective variant; "
+                           f"expected {variant}")
     if saved.get("next_step") != summary.get("steps"):
         raise RuntimeError(f"{out_dir}: checkpoint and summary disagree on step count")
     model = build_sae(spec.dim, spec.preset.hidden_dim, seed=cell.seed,

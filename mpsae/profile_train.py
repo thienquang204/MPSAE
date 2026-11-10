@@ -16,7 +16,7 @@ import time
 from typing import Any
 
 from . import __version__
-from .config import BACKBONES, METHODS, training_preset
+from .config import BACKBONES, METHODS, METHOD_VARIANTS, training_preset
 from .io import atomic_json, sha256_file
 
 
@@ -99,6 +99,10 @@ def run_profile(args: argparse.Namespace) -> dict[str, Any]:
                                ("target_k", args.k)):
                 if key in identity and identity[key] != value:
                     raise ValueError(f"checkpoint {key}={identity[key]!r} differs from {value!r}")
+            variant = METHOD_VARIANTS.get(args.method)
+            if variant and (identity.get("objective") or {}).get("variant") != variant:
+                raise ValueError(f"checkpoint uses a different {args.method} objective variant; "
+                                 f"expected {variant}")
             model.load_state_dict(saved["model"], strict=True)
             checkpoint_position = int(saved.get("next_step", 0))
             checkpoint = {"path": str(args.checkpoint.resolve()),
@@ -210,6 +214,7 @@ def run_profile(args: argparse.Namespace) -> dict[str, Any]:
             "format": "mpsae-training-profile-v1", "scientific_result": False,
             "backbone": args.backbone, "method": args.method, "target_k": args.k,
             "seed": args.seed, "preset": asdict(preset), "data": data_info,
+            "objective": methods.describe(args.method, args.k, preset),
             "checkpoint": checkpoint, "optimizer_state": "fresh",
             "precision": {"dtype": "float32", "autocast": False, "tf32": False},
             "schedule": {"total_steps": schedule_steps, "start_step": start_step,
