@@ -1,22 +1,20 @@
-# Main-paper first pass. Previous 35-fit setup: ../large_scale_abblation.md.
-# Selected published embeddings: ImageNet/EuroSAT for ff2048/rn18/vit_b16;
-# SOP for ff2048/rn18.
+# Two-setting main campaign. Previous 20-fit setup: ../large_scale_abblation.md.
+# Selected published embeddings: ImageNet/EuroSAT for ff2048/vit_b16;
+# SOP for ff2048.
 # Same fitting/evaluation and target coverage as thesis.yaml.
 name: precomputed
-backbones: [ff2048, rn18, vit_b16]
+backbones: [ff2048, vit_b16]
 methods: [csr, csrv2, mpsae, mpsaev2, csr_multitopk]
 seeds: [1227]
 imagenet:
   enabled: true
   prepare: false
   train_k:
-    ff2048: [8, 64]
-    rn18: [8]
-    vit_b16: [12]
+    ff2048: [8]
+    vit_b16: [8]
   eval_k:                       # E2 inference budgets; E1 evaluates at train_k
-    ff2048: [8, 64]
-    rn18: [8]
-    vit_b16: [12]
+    ff2048: [8]
+    vit_b16: [8]
   e1: true
   e2: true
   linear_probe: true
@@ -31,15 +29,13 @@ downstream:
   enabled: true
   datasets: [eurosat, sop]
   backbones:
-    sop: [ff2048, rn18]
+    sop: [ff2048]
   train_k:
     ff2048: [8]
-    rn18: [8]
-    vit_b16: [12]
+    vit_b16: [8]
   eval_k:
-    ff2048: [8, 64]
-    rn18: [8]
-    vit_b16: [12]
+    ff2048: [8]
+    vit_b16: [8]
   mode: frozen
   revisions: {}
 execution:

@@ -26,7 +26,8 @@ Shared objective (released CSR):
 ``mpsaev2`` keeps the fixed-K MPSAE objective and adds CSR's instance
 contrastive term on the main K code. Its 2K view is used by OT, without an
 additional 2K reconstruction loss. It shares MPSAE's batch size and gate
-sequence, so this comparison isolates the added contrastive term. The former
+sequence. MPSAEv2 now trains for 15 epochs versus MPSAE's 10, so their
+reported comparison also includes training duration. The former
 annealed MPSAEv2 objective is a different recipe and cannot be resumed as this
 variant.
 """

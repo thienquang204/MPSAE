@@ -477,3 +477,16 @@ A few things that are easy to get wrong when reading this tree directly:
   down-samples each `train.jsonl` to at most 400 curve points under
   `row["curve"]`. The `curve` key is excluded from every table; it exists so the
   diagnostic figure and the table are backed by the same numbers.
+
+### MPSAEv2 training duration
+
+MPSAEv2 uses 15 epochs (other methods keep 10). A compatible 10-epoch
+fit is extended in the same directory with model, optimizer and RNG state
+retained. During extension, `summary.json` is marked incomplete. At the
+end, `checkpoint.pt` and `summary.json` agree on the new signature,
+`schedule.epochs: 15`, and `next_step == steps == schedule.total_steps`.
+For an uncapped run this is `15 * ceil(train_rows / 1024)`. Checkpoints
+are still saved periodically; only the final checkpoint is a completed
+15-epoch result. Synthetic smoke tests may remain capped; real campaign
+checkpoint imports require all 15 epochs. Evaluation caches use the new
+signature/checkpoint hash. Existing archived settings remain historical.

@@ -33,7 +33,7 @@ while (( $# )); do
             cat <<'HELP'
 Usage: bash all_in_one.sh [options]
   Default: detect GPU/CPU, install compatible dependencies, run thesis.yaml,
-           download selected embeddings (three ImageNet/EuroSAT backbones, two SOP backbones),
+           download selected embeddings (two ImageNet/EuroSAT backbones, one SOP backbone),
            upload private HF MPSAE
            artifacts and log to W&B project cvpr when WANDB_TOKEN is supplied.
   --skip-setup   Reuse the installed environment and resume the campaign.

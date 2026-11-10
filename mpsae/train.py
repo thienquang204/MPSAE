@@ -21,7 +21,7 @@ import time
 from typing import Any
 
 from . import methods
-from .config import BACKBONES, METHOD_VARIANTS, Backbone, Cell, TrainPreset, training_preset
+from .config import BACKBONES, METHOD_EPOCHS, METHOD_VARIANTS, Backbone, Cell, TrainPreset, training_preset
 from .features import Bundle, BatchSource
 from .io import atomic_json, canonical_hash, exclusive_lock, read_json, read_jsonl, truncate_jsonl
 from .logs import MetricWriter, Progress, format_duration, get_logger
@@ -140,14 +140,34 @@ def compatible_fit_identity(saved: dict[str, Any], requested: dict[str, Any]) ->
     return canonical_hash(saved) == canonical_hash(comparable)
 
 
+def can_extend_mpsaev2(saved: dict[str, Any], requested: dict[str, Any]) -> bool:
+    """Only extend the identical fixed-K, constant-LR recipe from 10 to 15 epochs."""
+    if saved.get("method") != "mpsaev2" or requested.get("method") != "mpsaev2":
+        return False
+    old, new = saved.get("schedule", {}), requested.get("schedule", {})
+    per_epoch = old.get("batches_per_epoch")
+    if (old.get("epochs") != 10 or new.get("epochs") != 15
+            or not isinstance(per_epoch, int) or isinstance(per_epoch, bool) or per_epoch < 1
+            or old.get("total_steps") != 10 * per_epoch
+            or new.get("total_steps") != 15 * per_epoch
+            or saved.get("objective", {}).get("annealing") is not None
+            or saved.get("optimizer", {}).get("schedule") != "constant"):
+        return False
+    extended = deepcopy(saved)
+    extended["schedule"].update(epochs=15, total_steps=15 * per_epoch)
+    return compatible_fit_identity(extended, requested)
+
+
 def _existing_identity(record: dict[str, Any], path: Path,
-                       requested: dict[str, Any]) -> tuple[dict[str, Any], str]:
+                       requested: dict[str, Any], *, allow_extension: bool = False
+                       ) -> tuple[dict[str, Any], str]:
     """Verify an existing artifact before any output is rewritten."""
     identity, signature = record.get("identity"), record.get("signature")
     if (not isinstance(identity, dict) or not isinstance(signature, str)
             or canonical_hash(identity) != signature):
         raise RuntimeError(f"{path} has an invalid training identity/signature")
-    if not compatible_fit_identity(identity, requested):
+    if not (compatible_fit_identity(identity, requested)
+            or allow_extension and can_extend_mpsaev2(identity, requested)):
         raise RuntimeError(
             f"{path} belongs to a different recipe ({signature} != {canonical_hash(requested)}). "
             "Move it aside rather than resuming across a settings change.")
@@ -218,34 +238,57 @@ def _fit(cell: Cell, bundle: Bundle, out_dir: str | Path, settings: FitSettings,
     # Check before writing config.json, deleting anything, or allocating the
     # fitting matrix. Rejected resumes must leave their metadata untouched.
     if existing_config is not None:
-        _existing_identity(existing_config, config_path, identity)
+        _existing_identity(existing_config, config_path, identity, allow_extension=True)
     saved = None
     if checkpoint_path.is_file():
         saved = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-        saved_identity, saved_signature = _existing_identity(saved, checkpoint_path, identity)
-        if existing_config is not None and existing_config.get("signature") != saved_signature:
+        saved_identity, saved_signature = _existing_identity(saved, checkpoint_path, identity,
+                                                            allow_extension=True)
+        if (existing_config is not None and existing_config.get("signature") != saved_signature
+                and not (can_extend_mpsaev2(saved_identity, identity)
+                         or can_extend_mpsaev2(existing_config["identity"], identity))):
             raise RuntimeError(f"{out_dir}: config and checkpoint disagree on the recipe")
         position = saved.get("next_step")
         if isinstance(position, bool) or not isinstance(position, int) or not 0 <= position <= total:
             raise RuntimeError(f"{checkpoint_path}: invalid next_step {position!r}")
+        if can_extend_mpsaev2(saved_identity, identity) and position > saved_identity["schedule"]["total_steps"]:
+            raise RuntimeError(f"{checkpoint_path}: next_step exceeds the saved 10-epoch schedule")
     if finished is not None:
-        _, finished_signature = _existing_identity(finished, summary_path, identity)
-        if saved and saved["signature"] != finished_signature:
+        _, finished_signature = _existing_identity(finished, summary_path, identity,
+                                                    allow_extension=True)
+        if (saved and saved["signature"] != finished_signature
+                and not (can_extend_mpsaev2(saved_identity, identity)
+                         or can_extend_mpsaev2(finished["identity"], identity))):
             raise RuntimeError(f"{out_dir}: checkpoint and summary disagree on the recipe")
+    extending = any(can_extend_mpsaev2(record["identity"], identity)
+                    for record in (saved, existing_config, finished) if record is not None)
     if finished and finished.get("complete"):
         if saved is None:
             raise FileNotFoundError(f"{out_dir}: completed summary has no checkpoint")
-        if finished.get("steps") != total or saved["next_step"] != total:
+        finished_total = finished["identity"]["schedule"]["total_steps"] if extending else total
+        if finished.get("steps") != finished_total or saved["next_step"] != finished_total:
             raise RuntimeError(f"{out_dir}: completed summary and checkpoint disagree on step count")
-        if not settings.force:
+        if not settings.force and not extending:
             log.info("already trained (%d steps, %s)", finished["steps"],
                      format_duration(finished["train_seconds"]))
             return finished
-        log.warning("retraining from scratch (--force); discarding the completed fit")
-        for stale in (summary_path, checkpoint_path, out_dir / "train.jsonl"):
-            stale.unlink(missing_ok=True)
-        saved, existing_config = None, None
-    if saved is not None:
+        if settings.force:
+            log.warning("retraining from scratch (--force); discarding the completed fit")
+            for stale in (summary_path, checkpoint_path, out_dir / "train.jsonl"):
+                stale.unlink(missing_ok=True)
+            saved, existing_config = None, None
+    if extending:
+        # Keep weights, Adam, RNG and activity counters. Only the requested
+        # stopping point and signature change. Mixed old/new metadata after an
+        # interruption is accepted above only for this exact duration change.
+        if finished is not None:
+            atomic_json(summary_path, {**finished, "complete": False})
+        if existing_config is not None:
+            existing_config = {**existing_config, "identity": identity,
+                               "signature": signature, "total_steps": total}
+            atomic_json(config_path, existing_config)
+        log.info("extending identical MPSAEv2 training from 10 to 15 epochs")
+    elif saved is not None:
         # Preserve the original identity, including legacy missing provenance,
         # so resumed checkpoints and their existing evaluation caches keep the
         # same fit signature. The identical archive bytes were checked above.
@@ -420,6 +463,12 @@ def load_fitted(cell: Cell, out_dir: str | Path, spec: Backbone, *, device) -> A
                            f"expected {variant}")
     if saved.get("next_step") != summary.get("steps"):
         raise RuntimeError(f"{out_dir}: checkpoint and summary disagree on step count")
+    if cell.method in METHOD_EPOCHS:
+        schedule = identity.get("schedule", {})
+        if (schedule.get("epochs") != METHOD_EPOCHS[cell.method]
+                or saved["next_step"] != schedule.get("total_steps")):
+            raise RuntimeError(f"{out_dir}: MPSAEv2 checkpoint has not completed the requested "
+                               f"{METHOD_EPOCHS[cell.method]}-epoch schedule")
     model = build_sae(spec.dim, spec.preset.hidden_dim, seed=cell.seed,
                       dead_threshold=spec.preset.dead_threshold, device=device)
     model.load_state_dict(saved["model"], strict=True)

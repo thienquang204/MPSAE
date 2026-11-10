@@ -21,6 +21,7 @@ OURS = ("mpsae", "mpsaev2")
 # A changed objective gets its own storage namespace and campaign identity.
 # The unversioned mpsaev2 directory belongs to the former annealed OT-only fit.
 METHOD_VARIANTS = {"mpsaev2": "fixed_ot_cl_v1"}
+METHOD_EPOCHS = {"mpsaev2": 15}
 
 
 def method_directory(method: str) -> str:
@@ -81,9 +82,11 @@ TIMM_PRESET = TrainPreset(name="paper-table9", batch_size=1024, cl_coef=1.0)
 
 
 def training_preset(method: str, preset: TrainPreset) -> TrainPreset:
-    """Resolve the MPSAE batch size while preserving baseline recipes."""
+    """Resolve method-specific batch size and duration; preserve other settings."""
     if method not in METHODS:
         raise ValueError(f"unknown method {method!r}")
+    if method == "mpsaev2":
+        return replace(preset, batch_size=1024, epochs=METHOD_EPOCHS[method])
     return replace(preset, batch_size=1024) if method in OURS else preset
 
 
@@ -186,9 +189,9 @@ BACKBONES: Mapping[str, Backbone] = {
         recipe="csrv2",
         source="timm/vit_base_patch16_224.augreg_in21k_ft_in1k",
         preset=FF2048_PRESET,
-        k_list=_TIMES3,
-        train_k_list=_MODERN_TRAIN_K,
-        e2_anchors=_MODERN_TRAIN_K,
+        k_list=tuple(sorted((8, *_TIMES3))),
+        train_k_list=(8, *_MODERN_TRAIN_K),
+        e2_anchors=(8, *_MODERN_TRAIN_K),
         normalize=None,
         notes="d=768, treated like FF2048. Same augreg family CSR used for ViT-S/L.",
     ),

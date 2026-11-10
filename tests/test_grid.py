@@ -7,6 +7,23 @@ from mpsae.config import (BACKBONES, BRANCH1, BRANCH2, METHODS, SEEDS, effective
                           grid, initial_topk)
 
 
+def test_only_mpsaev2_gets_fifteen_epochs_without_other_preset_changes():
+    from dataclasses import asdict
+    from mpsae.config import training_preset
+    from mpsae.report.style import label_for
+    for spec in BACKBONES.values():
+        for method in METHODS:
+            expected = asdict(spec.preset)
+            if method in ("mpsae", "mpsaev2"):
+                expected["batch_size"] = 1024
+            if method == "mpsaev2":
+                expected["epochs"] = 15
+            actual = training_preset(method, spec.preset)
+            assert asdict(actual) == expected
+            assert training_preset(method, actual) == actual
+    assert label_for("mpsaev2") == "MPSAEv2"
+
+
 def test_every_budget_fits_the_embedding():
     """A budget above the backbone's own width is not a compression."""
     for name, spec in BACKBONES.items():
@@ -34,8 +51,8 @@ def test_e2_anchors_are_trained_budgets():
 def test_grid_size_matches_the_plan():
     counts = effective_runs()
     assert counts == {"ff2048": 55, "rn18": 45, "convnext_tiny": 25,
-                      "vit_b16": 25, "dinov2_vits14": 25, "total": 175}
-    assert len(grid()) == 175
+                      "vit_b16": 30, "dinov2_vits14": 25, "total": 180}
+    assert len(grid()) == 180
     assert {cell.seed for cell in grid()} == {1227}
 
 

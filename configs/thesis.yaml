@@ -1,21 +1,19 @@
-# Main-paper first pass. Previous 35-fit setup: ../large_scale_abblation.md.
+# Two-setting main campaign. Previous 20-fit setup: ../large_scale_abblation.md.
 # Published embeddings only. Training presets remain in mpsae/config.py.
-# Selected published bundles: ImageNet/EuroSAT for all three; SOP for ResNets.
+# Selected published bundles: ImageNet/EuroSAT for both; SOP for ResNet-50.
 name: thesis
-backbones: [ff2048, rn18, vit_b16]
+backbones: [ff2048, vit_b16]
 methods: [csr, csrv2, mpsae, mpsaev2, csr_multitopk]
 seeds: [1227]
 imagenet:
   enabled: true
   prepare: false
   train_k:
-    ff2048: [8, 64]
-    rn18: [8]
-    vit_b16: [12]
+    ff2048: [8]
+    vit_b16: [8]
   eval_k:                       # E2 inference budgets; E1 evaluates at train_k
-    ff2048: [8, 64]
-    rn18: [8]
-    vit_b16: [12]
+    ff2048: [8]
+    vit_b16: [8]
   e1: true
   e2: true
   linear_probe: true
@@ -30,15 +28,13 @@ downstream:
   enabled: true
   datasets: [eurosat, sop]
   backbones:
-    sop: [ff2048, rn18]
+    sop: [ff2048]
   train_k:                      # reuse one ImageNet checkpoint per method/backbone
     ff2048: [8]
-    rn18: [8]
-    vit_b16: [12]
+    vit_b16: [8]
   eval_k:
-    ff2048: [8, 64]
-    rn18: [8]
-    vit_b16: [12]
+    ff2048: [8]
+    vit_b16: [8]
   mode: frozen
   revisions: {}                  # main is resolved once to an immutable commit
 execution:

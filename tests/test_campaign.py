@@ -18,14 +18,14 @@ from mpsae.config import Cell
 def test_default_campaign_is_source_training_plus_frozen_transfer():
     campaign = load_campaign("configs/thesis.yaml")
     plan = campaign.plan()
-    assert plan["source_cells"] == 20
-    assert plan["downstream_sparse_points"] == 35
-    assert plan["downstream_dense_points"] == 5
+    assert plan["source_cells"] == 10
+    assert plan["downstream_sparse_points"] == 15
+    assert plan["downstream_dense_points"] == 3
     assert campaign.downstream["mode"] == "frozen"
     assert campaign.execution["precomputed_only"] is True
     assert campaign.seeds == (1227,)
-    assert campaign.target_backbones("sop") == ("ff2048", "rn18")
-    assert campaign.backbones == ("ff2048", "rn18", "vit_b16")
+    assert campaign.target_backbones("sop") == ("ff2048",)
+    assert campaign.backbones == ("ff2048", "vit_b16")
     assert "flowers102" not in campaign.downstream["datasets"]
 
 
@@ -41,9 +41,8 @@ def test_dataset_backbone_selection_changes_plan_without_dropping_other_targets(
 
 @pytest.mark.parametrize("config", ["configs/thesis.yaml", "configs/precomputed.yaml"])
 @pytest.mark.parametrize("backbone,expected,anchor", [
-    ("ff2048", (8, 64), 8),
-    ("rn18", (8,), 8),
-    ("vit_b16", (12,), 12),
+    ("ff2048", (8,), 8),
+    ("vit_b16", (8,), 8),
 ])
 def test_campaigns_restrict_training_e2_and_downstream_to_requested_budgets(config, backbone, expected, anchor):
     from mpsae.config import BACKBONES

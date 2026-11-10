@@ -61,8 +61,8 @@ bash all_in_one.sh
 # Add --skip-setup when the server environment is already installed.
 ```
 
-The default config selects ImageNet/EuroSAT for `ff2048`, `rn18`, `vit_b16`
-and SOP for `ff2048`, `rn18`, whose bundles are
+The default config selects ImageNet/EuroSAT for `ff2048`, `vit_b16`
+and SOP for `ff2048`, whose bundles are
 available in [Lukita/MPSAE-embeddings](https://huggingface.co/datasets/Lukita/MPSAE-embeddings).
 Training still fits the sparse autoencoders. The download step verifies hashes
 and links archives into `work/direct-v1/`; the campaign checks dimensions,
@@ -72,11 +72,11 @@ on missing or incompatible features instead of extracting them.
 As checked on 2026-11-09, the repository has 13 of the full campaign's 20
 bundles: all ImageNet and EuroSAT backbones, plus SOP for `ff2048`, `rn18` and
 `convnext_tiny`. Flowers102 and the other two SOP backbones are missing.
-`configs/thesis.yaml` and `configs/precomputed.yaml` now select 8 of those bundles.
+`configs/thesis.yaml` and `configs/precomputed.yaml` now select 5 of those bundles.
 Flowers102 is excluded from these campaigns because no bundles are published;
-this does not establish a dataset defect. SOP remains enabled for the two selected
-ResNets through `downstream.backbones.sop`. Plans, downloads and
-reports use this same selection (35 sparse and 5 dense downstream evaluations).
+this does not establish a dataset defect. SOP remains enabled for the selected
+ResNet-50 through `downstream.backbones.sop`. Plans, downloads and
+reports use this same selection (15 sparse and 3 dense downstream evaluations).
 Unexpected missing or incompatible bundles fail explicitly rather than being
 silently dropped. Building new bundles requires a separate config with
 `precomputed_only: false`, `--build-missing-embeddings`, and a writable private
@@ -155,21 +155,20 @@ training K; its x-axis sweeps the campaign's selected inference K values and its
 ImageNet 1-NN top-1 accuracy. The curves compare methods, the dashed vertical
 line marks training K, and hollow rings mark inference at the training K.
 Faint curves show separate models trained at each K for comparison. There are
-two selected training anchors for ResNet-50 and one each for ResNet-18 and ViT,
-reused from E1; E2 adds no training runs. ResNet-18 and ViT E2 panels each
-have a single point and add no cross-budget measurement.
+one selected training anchor at K=8 for each of ResNet-50 and ViT, reused
+from E1; E2 adds no training runs. Both E2 panels have a single point and
+add no cross-budget measurement.
 Single-seed curves carry no between-seed standard-deviation bands. The two shipped
 campaigns select the main-result budgets below for E1, E2 inference and downstream inference.
-Downstream reuses the K=8 ResNet checkpoints and K=12 modern-backbone checkpoints.
+Downstream reuses the K=8 checkpoints for both backbones.
 
 | backbone | d | recipe | preset | Training K budgets | E2 anchors | cells |
 |---|---|---|---|---|---|---|
-| `ff2048` | 2048 | MRL | Table 3 | 8,64 | 8,64 | 10 |
-| `rn18` | 512 | CSRv2 | Table 9 | 8 | 8 | 5 |
-| `vit_b16` | 768 | CSRv2 | Table 3 | 12 | 12 | 5 |
+| `ff2048` | 2048 | MRL | Table 3 | 8 | 8 | 5 |
+| `vit_b16` | 768 | CSRv2 | Table 3 | 8 | 8 | 5 |
 
-20 cells = the selected backbone/K pairs x 5 methods x seed 1227.
-The previous 35-fit and original 80-fit setups are preserved, including exact YAML and resolved presets,
+10 cells = the selected backbone/K pairs x 5 methods x seed 1227.
+The previous 20-fit, 35-fit and original 80-fit setups are preserved, including exact YAML and resolved presets,
 in [`large_scale_abblation.md`](large_scale_abblation.md) for a later ablation.
 The wider reference grids remain registered for explicit custom campaigns.
 K never exceeds the backbone's own width, so every point is a compression.
@@ -180,8 +179,9 @@ The 768-d backbones are treated like FF2048, the 384-d one like RN18.
 `mpsae` and `mpsaev2` use training batches of **1024** on every backbone and
 the original constant learning rate of **4e-5**. Baseline batch sizes retain
 their backbone presets. OT solver limits remain **400** initial iterations
-and **8000** refinement iterations; early stopping still applies. Epochs,
-OT group size and loss weights retain their existing settings. Comparisons
+and **8000** refinement iterations; early stopping still applies. **MPSAEv2 trains
+for 15 epochs; all other methods retain 10 epochs.** OT group size, loss weights
+and the MPSAEv2 objective remain unchanged. Comparisons
 with CSR include the batch-size and update-count differences where applicable.
 
 | method | K during training | gates/step | regulariser | extra reconstruction |
@@ -211,12 +211,22 @@ follows CSRv2 App. G's "Diverse Multi-TopK" ablation in spirit.
 no `L(2K)/8` reconstruction. The contrastive coefficient is 0.1 for ResNet-50,
 ConvNeXt and ViT, and 1.0 for ResNet-18 and DINO; temperature is 0.2. The
 contrastive term operates on the existing K code, so the three activity-counter
-updates remain K, 4K, 2K. Against MPSAE, this isolates the added contrastive term
-under the same batch size and fixed-budget schedule. Better accuracy is a
-hypothesis to test, not an assumed outcome.
+updates remain K, 4K, 2K. Against MPSAE, the objective adds contrastive loss;
+MPSAEv2 now also trains for 15 epochs versus MPSAE's 10. Batch size and fixed K
+match, but this comparison includes training duration. Better accuracy remains
+a hypothesis to test.
 ImageNet reports include `paired_mpsaev2_vs_mpsae`; downstream paired tables
 also include this treatment/control pair, alongside the existing comparisons.
 Each difference uses matching seeds and evaluation settings.
+
+MPSAEv2 is displayed as `MPSAEv2`; its internal key and objective variant
+remain `mpsaev2` and `fixed_ot_cl_v1`. An otherwise identical 10-epoch
+checkpoint continues through epoch 15 with its weights, Adam state, RNG
+and activity counters preserved. Only the stopping point changes; the
+constant learning rate and fixed-K loss are unchanged. A different loss,
+optimizer, seed or dataset still prevents continuation. The completed
+15-epoch fit receives a new signature, so E1/E2 and downstream results
+are recomputed for the final weights. Interrupted extensions resume.
 
 Only `csrv2` anneals in the current method set. The former MPSAEv2 **variant B**
 (annealed main budget with OT only) is retired; its checkpoints are incompatible

@@ -47,7 +47,7 @@ CUDA OOM; SAE training batch sizes remain the scientific presets.
 
 ## Dataset lifecycle
 
-The default `configs/thesis.yaml` selects ResNet-50, ResNet-18 and ViT with
+The default `configs/thesis.yaml` selects ResNet-50 and ViT at K=8 with
 `storage_mode: direct_v1`, `precomputed_only: true`, and `cleanup_raw: false`.
 It downloads/reuses selected published embeddings, then trains and evaluates
 the sparse models. It does not extract backbones or remove raw images.
@@ -115,9 +115,9 @@ NPZ float32 arrays are mapped directly from their uncompressed ZIP members;
 there is no second extracted NPY copy. A resumable writer is temporary and is
 reclaimed after its archive is published and verified. Sparse evaluation codes
 are discarded when their metrics are durable (`retain_codes: false`). Checkpoints
-and optimizer states persist for resume; the three-backbone main-paper default uses seed 1227 and has 20
-source fits and 40 downstream evaluation points (35 sparse + 5 dense).
-The model + Adam tensor estimate for those 20 checkpoints is about 2.6 GB,
+and optimizer states persist for resume; the two-backbone default uses seed 1227 and has 10
+source fits and 18 downstream evaluation points (15 sparse + 3 dense).
+The model + Adam tensor estimate for those 10 checkpoints is about 1.4 GB,
 before serialization overhead and other buffers. The default campaign pulls published embeddings and does not download raw ImageNet.
 
 The direct recipe is explicitly versioned `imagenet-direct-pil-v1`. MRL keeps

@@ -149,7 +149,7 @@ def _checkpoint(directory, experiment, *, retired):
     from mpsae.model import build_sae
     from mpsae.train import fit_identity
 
-    identity = fit_identity(cell, bundle, spec.preset, total_steps=1, per_epoch=1,
+    identity = fit_identity(cell, bundle, spec.preset, total_steps=15, per_epoch=1,
                             code_version=__version__)
     if retired:
         identity = deepcopy(identity)
@@ -161,11 +161,11 @@ def _checkpoint(directory, experiment, *, retired):
     model = build_sae(spec.dim, spec.preset.hidden_dim, seed=cell.seed)
     directory.mkdir(parents=True, exist_ok=True)
     torch.save({"identity": identity, "signature": signature,
-                "model": model.state_dict(), "next_step": 1}, directory / "checkpoint.pt")
+                "model": model.state_dict(), "next_step": 15}, directory / "checkpoint.pt")
     atomic_json(directory / "config.json", {"identity": identity, "signature": signature,
                                             "code_version": __version__})
     atomic_json(directory / "summary.json", {"identity": identity, "signature": signature,
-        "complete": True, "steps": 1, "cell": cell.__dict__})
+        "complete": True, "steps": 15, "cell": cell.__dict__})
     return {p.name: p.read_bytes() for p in directory.iterdir() if p.is_file()}
 
 

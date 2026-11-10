@@ -22,7 +22,7 @@ import shutil
 from typing import Any
 
 from . import __version__
-from .config import BACKBONES, BACKBONE_ORDER, METHODS, METHOD_VARIANTS, Backbone
+from .config import BACKBONES, BACKBONE_ORDER, METHODS, METHOD_EPOCHS, METHOD_VARIANTS, Backbone
 from .io import atomic_json, human_bytes, read_json
 from .logs import banner, get_logger, log_environment, setup_logging, stage
 
@@ -446,6 +446,10 @@ def run_all(options: PipelineOptions, *, only: str | None = None) -> dict[str, A
                         if method in METHOD_VARIANTS}
             if variants:
                 identity["method_variants"] = variants
+            epochs = {method: METHOD_EPOCHS[method] for method in (options.methods or METHODS)
+                      if method in METHOD_EPOCHS}
+            if epochs:
+                identity["method_epochs"] = epochs
         with stage(name, options.paths.state, force=options.forced(name),
                    identity=identity,
                    description=f"stage {name}") as detail:

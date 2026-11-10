@@ -77,8 +77,9 @@ L    = B(k) + method-specific weighted regulariser(s) + extra reconstruction
 the original constant learning rate of **4e-5**. `csr`, `csrv2` and
 `csr_multitopk` retain their backbone batch-size presets. OT solver limits
 remain **400** initial iterations and **8000** refinement iterations;
-convergence can stop a solve earlier. Epochs, OT groups of 32, loss weights
-and tolerances retain their configured values. Update counts and CSRv2's annealing
+convergence can stop a solve earlier. MPSAEv2 trains for **15 epochs**; the
+other methods retain **10 epochs**. OT groups of 32, loss weights and tolerances
+retain their configured values. Update counts and CSRv2's annealing
 schedule are computed from the effective batch size. Run identities and campaign metadata
 record the effective recipe; checkpoints with different settings cannot resume.
 
@@ -210,11 +211,22 @@ There is no additional 2K reconstruction loss. The K code is reused for the
 contrastive term, leaving the three activity-counter updates at K, 4K and 2K.
 
 Against MPSAE, the added instance contrastive term is the objective change:
-architecture, fixed K, batch size and reconstruction terms match. Against
+architecture, fixed K, batch size and reconstruction terms match. MPSAEv2
+now receives 15 epochs versus MPSAE's 10, so the measured comparison includes
+this training-duration difference as well. Against
 CSR-multitopK, both the OT term and the presence of `L(2K)/8` differ, and batch
 sizes differ on the 4096-row baseline presets. The hybrid is an ablation to
 measure whether retaining full-batch discrimination helps; no performance gain
 is established by choosing this objective.
+
+MPSAEv2 is displayed as `MPSAEv2`; its internal key and objective variant
+remain `mpsaev2` and `fixed_ot_cl_v1`. An otherwise identical 10-epoch
+checkpoint continues through epoch 15 with its weights, Adam state, RNG
+and activity counters preserved. Only the stopping point changes; the
+constant learning rate and fixed-K loss are unchanged. A different loss,
+optimizer, seed or dataset still prevents continuation. The completed
+15-epoch fit receives a new signature, so E1/E2 and downstream results
+are recomputed for the final weights. Interrupted extensions resume.
 
 This replaces the formerly implemented **variant B**, whose main budget
 annealed and whose regularizer was OT only. Old variant-B checkpoints cannot
@@ -242,8 +254,9 @@ update, so:
   including batch-size and update-count differences where applicable;
 * **csr_multitopk > csr** measures the extra 2K reconstruction and its activity
   update under the same backbone batch preset;
-* **MPSAEv2 versus MPSAE** measures adding instance contrastive learning while
-  retaining the fixed K, OT, reconstruction and batch settings.
+* **MPSAEv2 versus MPSAE** compares instance contrastive plus 15 epochs
+  against MPSAE at 10 epochs, with the same fixed K, OT, reconstruction and
+  batch settings. It is no longer an equal-duration loss-only ablation.
 
 The report explicitly includes this last comparison: ImageNet writes
 `paired_mpsaev2_vs_mpsae`, and downstream `paired` tables include rows with

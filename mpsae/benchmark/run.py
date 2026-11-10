@@ -16,7 +16,7 @@ import sys
 from typing import Any
 
 from .. import __version__
-from ..config import BACKBONES, METHOD_VARIANTS, Cell, training_preset
+from ..config import BACKBONES, METHOD_EPOCHS, METHOD_VARIANTS, Cell, training_preset
 from ..io import atomic_json, canonical_hash, exclusive_lock, read_json, sha256_file
 from ..logs import get_logger, setup_logging
 from .config import Campaign
@@ -118,6 +118,15 @@ def checkpoint_record(cell: Cell, root: Path, *, smoke=False,
                     for value in identity.get("data", {}).values() if isinstance(value, dict))
     if synthetic != smoke:
         raise RuntimeError(f"{directory}: synthetic and scientific artifacts cannot be mixed")
+    if cell.method in METHOD_EPOCHS:
+        schedule = identity.get("schedule", {})
+        epochs = METHOD_EPOCHS[cell.method]
+        per_epoch, total = schedule.get("batches_per_epoch"), schedule.get("total_steps")
+        if (schedule.get("epochs") != epochs or summary.get("steps") != total
+                or not isinstance(per_epoch, int) or isinstance(per_epoch, bool) or per_epoch < 1
+                or not isinstance(total, int) or isinstance(total, bool) or total < 1
+                or not smoke and total != epochs * per_epoch):
+            raise RuntimeError(f"{directory}: MPSAEv2 needs a completed {epochs}-epoch checkpoint")
     provenance = _weights(cell, root) if require_provenance and not smoke else {}
     return {"checkpoint_id": sha256_file(path), "path": str(path), "signature": signature,
             "cell": cell.__dict__, "scientific": not smoke,

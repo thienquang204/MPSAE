@@ -69,7 +69,7 @@ METHOD_STYLE: Mapping[str, Mapping[str, Any]] = {
     "mpsae": {"color": _OURS_PRIMARY, "marker": "o", "linestyle": "-",
               "label": "MPSAE (ours)", "zorder": 3.0},
     "mpsaev2": {"color": _OURS_SECONDARY, "marker": "D", "linestyle": "-",
-                "label": "MPSAEv2 (ours)", "zorder": 3.1},
+                "label": "MPSAEv2", "zorder": 3.1},
 }
 
 #: Published overlays: one neutral grey dashed language, markers only to tell

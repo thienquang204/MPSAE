@@ -16,6 +16,84 @@ from mpsae.features import BatchSource, Bundle, Split  # noqa: E402
 from mpsae.train import FitSettings, fit, fit_identity, load_fitted  # noqa: E402
 
 
+@pytest.mark.parametrize("interrupt_at", [None, 10, 12])
+def test_mpsaev2_extends_ten_epochs_to_identical_fifteen_epoch_fit(
+        experiment, tmp_path, monkeypatch, interrupt_at):
+    from mpsae import config, train
+    from mpsae.benchmark.run import checkpoint_record
+    from mpsae.io import read_json, read_jsonl
+
+    cell, bundle, spec, settings = experiment
+    cell = replace(cell, method="mpsaev2")
+    experiment = cell, bundle, spec, settings
+    out = tmp_path / "runs" / cell.slug
+    with monkeypatch.context() as old_schedule:
+        old_schedule.setitem(config.METHOD_EPOCHS, "mpsaev2", 10)
+        old = _fit(experiment, out)
+    assert old["steps"] == 10
+    with pytest.raises(RuntimeError, match="15-epoch"):
+        load_fitted(cell, out, spec, device="cpu")
+    with pytest.raises(RuntimeError, match="15-epoch"):
+        checkpoint_record(cell, tmp_path, require_provenance=False)
+
+    if interrupt_at is not None:
+        compute = train.methods.compute_step
+        def interrupted(*args, **kwargs):
+            if kwargs["step"] == interrupt_at:
+                raise RuntimeError("interrupted extension")
+            return compute(*args, **kwargs)
+        with monkeypatch.context() as stopped:
+            stopped.setattr(train.methods, "compute_step", interrupted)
+            with pytest.raises(RuntimeError, match="interrupted extension"):
+                _fit(experiment, out)
+        assert not read_json(out / "summary.json")["complete"]
+        with pytest.raises(FileNotFoundError, match="completed"):
+            load_fitted(cell, out, spec, device="cpu")
+
+    extended = _fit(experiment, out)
+    reference = tmp_path / "reference"
+    fresh = _fit(experiment, reference)
+    assert extended["steps"] == fresh["steps"] == 15
+    assert extended["signature"] == fresh["signature"] != old["signature"]
+    assert extended["identity"]["objective"] == old["identity"]["objective"]
+    assert extended["identity"]["optimizer"] == old["identity"]["optimizer"]
+    left = torch.load(out / "checkpoint.pt", weights_only=False)
+    right = torch.load(reference / "checkpoint.pt", weights_only=False)
+    assert left["next_step"] == 15
+    assert left["identity"]["schedule"]["epochs"] == 15
+    torch.testing.assert_close(left["model"], right["model"], rtol=0, atol=0)
+    torch.testing.assert_close(left["optimizer"], right["optimizer"], rtol=0, atol=0)
+    assert [row["step"] for row in read_jsonl(out / "train.jsonl")] == list(range(1, 16))
+    assert not load_fitted(cell, out, spec, device="cpu").training
+    assert checkpoint_record(cell, tmp_path, require_provenance=False)["signature"] == fresh["signature"]
+    before = _snapshot(out)
+    assert _fit(experiment, out) == extended
+    assert _snapshot(out) == before
+
+
+@pytest.mark.parametrize("change", ["lr", "cl_coef", "seed", "data"])
+def test_epoch_extension_still_rejects_any_other_recipe_change(
+        experiment, tmp_path, monkeypatch, change):
+    from mpsae import config
+    cell, bundle, spec, settings = experiment
+    cell = replace(cell, method="mpsaev2")
+    with monkeypatch.context() as old_schedule:
+        old_schedule.setitem(config.METHOD_EPOCHS, "mpsaev2", 10)
+        _fit((cell, bundle, spec, settings), tmp_path)
+    before = _snapshot(tmp_path)
+    if change in ("lr", "cl_coef"):
+        spec = replace(spec, preset=replace(spec.preset, **{change: getattr(spec.preset, change) * 2}))
+    elif change == "seed":
+        cell = replace(cell, seed=99)
+    else:
+        identity = deepcopy(bundle.identity)
+        identity["train"]["sha256"] = "f" * 64
+        bundle = replace(bundle, identity=identity)
+    with pytest.raises(RuntimeError, match="different recipe"):
+        _fit((cell, bundle, spec, settings), tmp_path)
+    assert _snapshot(tmp_path) == before
+
+
 @pytest.fixture
 def experiment():
     generator = np.random.default_rng(54)

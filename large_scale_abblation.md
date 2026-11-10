@@ -2534,3 +2534,823 @@ Source hashes at capture (the working source includes the new MPSAEv2 objective)
 - `mpsae/ot.py`: `6ee6357f49d5c207e4c1829c67b9753b424d4d2f279376fce3c84053271137ea`
 
 To restore this 35-fit selection, copy the YAML from this section to a separate campaign file and give it a distinct name. The original 80-fit YAML above remains unchanged.
+
+
+## Archived 20-fit campaign before ResNet-50 and ViT at K=8
+
+Captured (UTC): 2026-11-10T08:54:19.977783+00:00
+
+This is a settings snapshot, not measured results. It preserves ResNet-50
+at K=8,64; ResNet-18 at K=8; and ViT at K=12. Five methods and seed
+1227 give 20 source fits, 20 E2 anchor records / 30 points, and
+35 sparse + 5 dense downstream evaluations. EuroSAT uses all three
+backbones; SOP uses the two ResNets. MPSAEv2 uses the fixed-K OT plus
+instance-contrastive objective for 15 epochs; other methods use 10.
+
+### Previous `configs/thesis.yaml`
+
+SHA256 of original file bytes: `ad71a354dcc1c28017804fe2c86a955b6a0ab107ffe75526f5fb9cac2720f027`
+
+```yaml
+# Main-paper first pass. Previous 35-fit setup: ../large_scale_abblation.md.
+# Published embeddings only. Training presets remain in mpsae/config.py.
+# Selected published bundles: ImageNet/EuroSAT for all three; SOP for ResNets.
+name: thesis
+backbones: [ff2048, rn18, vit_b16]
+methods: [csr, csrv2, mpsae, mpsaev2, csr_multitopk]
+seeds: [1227]
+imagenet:
+  enabled: true
+  prepare: false
+  train_k:
+    ff2048: [8, 64]
+    rn18: [8]
+    vit_b16: [12]
+  eval_k:                       # E2 inference budgets; E1 evaluates at train_k
+    ff2048: [8, 64]
+    rn18: [8]
+    vit_b16: [12]
+  e1: true
+  e2: true
+  linear_probe: true
+  timing: true
+  timing_query_batch: 512
+  timing_warmup: 100
+  timing_rounds: 2000
+  timing_gallery_chunk: 32768
+  timing_build_entry_cap: 4194304
+  timing_retry_skipped: false
+downstream:
+  enabled: true
+  datasets: [eurosat, sop]
+  backbones:
+    sop: [ff2048, rn18]
+  train_k:                      # reuse one ImageNet checkpoint per method/backbone
+    ff2048: [8]
+    rn18: [8]
+    vit_b16: [12]
+  eval_k:
+    ff2048: [8, 64]
+    rn18: [8]
+    vit_b16: [12]
+  mode: frozen
+  revisions: {}                  # main is resolved once to an immutable commit
+execution:
+  storage_mode: direct_v1        # isolated work/direct-v1; no FFCV image copy
+  precomputed_only: true        # missing/incompatible bundles fail without extracting images
+  cleanup_raw: false
+  train_missing: true
+  continue_on_error: true
+  retain_codes: false            # metrics persist; avoid accumulating TB of codes
+  max_steps: 0
+  train_log_every: 10
+  checkpoint_every: 100
+  feature_residency: auto
+```
+
+### Previous `configs/precomputed.yaml`
+
+SHA256 of original file bytes: `1e870f264dd99e6eb15606c744fba4b06da760599a02130de8778b298bd54326`
+
+```yaml
+# Main-paper first pass. Previous 35-fit setup: ../large_scale_abblation.md.
+# Selected published embeddings: ImageNet/EuroSAT for ff2048/rn18/vit_b16;
+# SOP for ff2048/rn18.
+# Same fitting/evaluation and target coverage as thesis.yaml.
+name: precomputed
+backbones: [ff2048, rn18, vit_b16]
+methods: [csr, csrv2, mpsae, mpsaev2, csr_multitopk]
+seeds: [1227]
+imagenet:
+  enabled: true
+  prepare: false
+  train_k:
+    ff2048: [8, 64]
+    rn18: [8]
+    vit_b16: [12]
+  eval_k:                       # E2 inference budgets; E1 evaluates at train_k
+    ff2048: [8, 64]
+    rn18: [8]
+    vit_b16: [12]
+  e1: true
+  e2: true
+  linear_probe: true
+  timing: true
+  timing_query_batch: 512
+  timing_warmup: 100
+  timing_rounds: 2000
+  timing_gallery_chunk: 32768
+  timing_build_entry_cap: 4194304
+  timing_retry_skipped: false
+downstream:
+  enabled: true
+  datasets: [eurosat, sop]
+  backbones:
+    sop: [ff2048, rn18]
+  train_k:
+    ff2048: [8]
+    rn18: [8]
+    vit_b16: [12]
+  eval_k:
+    ff2048: [8, 64]
+    rn18: [8]
+    vit_b16: [12]
+  mode: frozen
+  revisions: {}
+execution:
+  storage_mode: direct_v1
+  precomputed_only: true
+  cleanup_raw: false
+  train_missing: true
+  continue_on_error: true
+  retain_codes: false
+  max_steps: 0
+  train_log_every: 10
+  checkpoint_every: 100
+  feature_residency: auto
+```
+
+### Resolved 20-fit thesis plan and training presets
+
+```json
+{
+  "name": "thesis",
+  "mode": "frozen",
+  "plan_id": "2aa1d192ff437f2d2ef809542ca62734f8fa1fa7b4625df03424cc4a6c6a1173",
+  "source_cells": 20,
+  "downstream_sparse_points": 35,
+  "downstream_dense_points": 5,
+  "config": {
+    "name": "thesis",
+    "backbones": [
+      "ff2048",
+      "rn18",
+      "vit_b16"
+    ],
+    "methods": [
+      "csr",
+      "csrv2",
+      "mpsae",
+      "mpsaev2",
+      "csr_multitopk"
+    ],
+    "seeds": [
+      1227
+    ],
+    "imagenet": {
+      "enabled": true,
+      "prepare": false,
+      "train_k": {
+        "ff2048": [
+          8,
+          64
+        ],
+        "rn18": [
+          8
+        ],
+        "vit_b16": [
+          12
+        ]
+      },
+      "eval_k": {
+        "ff2048": [
+          8,
+          64
+        ],
+        "rn18": [
+          8
+        ],
+        "vit_b16": [
+          12
+        ]
+      },
+      "e1": true,
+      "e2": true,
+      "linear_probe": true,
+      "timing": true,
+      "timing_query_batch": 512,
+      "timing_warmup": 100,
+      "timing_rounds": 2000,
+      "timing_gallery_chunk": 32768,
+      "timing_build_entry_cap": 4194304,
+      "timing_retry_skipped": false
+    },
+    "downstream": {
+      "enabled": true,
+      "datasets": [
+        "eurosat",
+        "sop"
+      ],
+      "train_k": {
+        "ff2048": [
+          8
+        ],
+        "rn18": [
+          8
+        ],
+        "vit_b16": [
+          12
+        ]
+      },
+      "eval_k": {
+        "ff2048": [
+          8,
+          64
+        ],
+        "rn18": [
+          8
+        ],
+        "vit_b16": [
+          12
+        ]
+      },
+      "mode": "frozen",
+      "revisions": {},
+      "backbones": {
+        "sop": [
+          "ff2048",
+          "rn18"
+        ]
+      }
+    },
+    "execution": {
+      "train_missing": true,
+      "continue_on_error": true,
+      "retain_codes": false,
+      "max_steps": 0,
+      "storage_mode": "direct_v1",
+      "cleanup_raw": false,
+      "precomputed_only": true,
+      "train_log_every": 10,
+      "checkpoint_every": 100,
+      "feature_residency": "auto"
+    },
+    "method_variants": {
+      "mpsaev2": "fixed_ot_cl_v1"
+    },
+    "presets": {
+      "ff2048": {
+        "name": "paper-table3",
+        "hidden_dim": 8192,
+        "lr": 4e-05,
+        "weight_decay": 0.0001,
+        "adam_eps": 6.25e-10,
+        "adam_betas": [
+          0.9,
+          0.999
+        ],
+        "epochs": 10,
+        "batch_size": 4096,
+        "k_aux": 512,
+        "aux_coef": 0.03125,
+        "nested_coef": 0.125,
+        "cl_coef": 0.1,
+        "cl_temperature": 0.2,
+        "dead_threshold": 30,
+        "k_decay_ratio": 0.7,
+        "ot_weight": 2.0,
+        "ot_mass": 0.9,
+        "ot_eta": 0.2,
+        "ot_microbatch": 32,
+        "ot_max_iters": 400,
+        "ot_max_refine_iters": 8000,
+        "ot_tol": 0.0001
+      },
+      "rn18": {
+        "name": "paper-table9",
+        "hidden_dim": 8192,
+        "lr": 4e-05,
+        "weight_decay": 0.0001,
+        "adam_eps": 6.25e-10,
+        "adam_betas": [
+          0.9,
+          0.999
+        ],
+        "epochs": 10,
+        "batch_size": 1024,
+        "k_aux": 512,
+        "aux_coef": 0.03125,
+        "nested_coef": 0.125,
+        "cl_coef": 1.0,
+        "cl_temperature": 0.2,
+        "dead_threshold": 30,
+        "k_decay_ratio": 0.7,
+        "ot_weight": 2.0,
+        "ot_mass": 0.9,
+        "ot_eta": 0.2,
+        "ot_microbatch": 32,
+        "ot_max_iters": 400,
+        "ot_max_refine_iters": 8000,
+        "ot_tol": 0.0001
+      },
+      "vit_b16": {
+        "name": "paper-table3",
+        "hidden_dim": 8192,
+        "lr": 4e-05,
+        "weight_decay": 0.0001,
+        "adam_eps": 6.25e-10,
+        "adam_betas": [
+          0.9,
+          0.999
+        ],
+        "epochs": 10,
+        "batch_size": 4096,
+        "k_aux": 512,
+        "aux_coef": 0.03125,
+        "nested_coef": 0.125,
+        "cl_coef": 0.1,
+        "cl_temperature": 0.2,
+        "dead_threshold": 30,
+        "k_decay_ratio": 0.7,
+        "ot_weight": 2.0,
+        "ot_mass": 0.9,
+        "ot_eta": 0.2,
+        "ot_microbatch": 32,
+        "ot_max_iters": 400,
+        "ot_max_refine_iters": 8000,
+        "ot_tol": 0.0001
+      }
+    },
+    "method_presets": {
+      "ff2048": {
+        "csr": {
+          "name": "paper-table3",
+          "hidden_dim": 8192,
+          "lr": 4e-05,
+          "weight_decay": 0.0001,
+          "adam_eps": 6.25e-10,
+          "adam_betas": [
+            0.9,
+            0.999
+          ],
+          "epochs": 10,
+          "batch_size": 4096,
+          "k_aux": 512,
+          "aux_coef": 0.03125,
+          "nested_coef": 0.125,
+          "cl_coef": 0.1,
+          "cl_temperature": 0.2,
+          "dead_threshold": 30,
+          "k_decay_ratio": 0.7,
+          "ot_weight": 2.0,
+          "ot_mass": 0.9,
+          "ot_eta": 0.2,
+          "ot_microbatch": 32,
+          "ot_max_iters": 400,
+          "ot_max_refine_iters": 8000,
+          "ot_tol": 0.0001
+        },
+        "csrv2": {
+          "name": "paper-table3",
+          "hidden_dim": 8192,
+          "lr": 4e-05,
+          "weight_decay": 0.0001,
+          "adam_eps": 6.25e-10,
+          "adam_betas": [
+            0.9,
+            0.999
+          ],
+          "epochs": 10,
+          "batch_size": 4096,
+          "k_aux": 512,
+          "aux_coef": 0.03125,
+          "nested_coef": 0.125,
+          "cl_coef": 0.1,
+          "cl_temperature": 0.2,
+          "dead_threshold": 30,
+          "k_decay_ratio": 0.7,
+          "ot_weight": 2.0,
+          "ot_mass": 0.9,
+          "ot_eta": 0.2,
+          "ot_microbatch": 32,
+          "ot_max_iters": 400,
+          "ot_max_refine_iters": 8000,
+          "ot_tol": 0.0001
+        },
+        "mpsae": {
+          "name": "paper-table3",
+          "hidden_dim": 8192,
+          "lr": 4e-05,
+          "weight_decay": 0.0001,
+          "adam_eps": 6.25e-10,
+          "adam_betas": [
+            0.9,
+            0.999
+          ],
+          "epochs": 10,
+          "batch_size": 1024,
+          "k_aux": 512,
+          "aux_coef": 0.03125,
+          "nested_coef": 0.125,
+          "cl_coef": 0.1,
+          "cl_temperature": 0.2,
+          "dead_threshold": 30,
+          "k_decay_ratio": 0.7,
+          "ot_weight": 2.0,
+          "ot_mass": 0.9,
+          "ot_eta": 0.2,
+          "ot_microbatch": 32,
+          "ot_max_iters": 400,
+          "ot_max_refine_iters": 8000,
+          "ot_tol": 0.0001
+        },
+        "mpsaev2": {
+          "name": "paper-table3",
+          "hidden_dim": 8192,
+          "lr": 4e-05,
+          "weight_decay": 0.0001,
+          "adam_eps": 6.25e-10,
+          "adam_betas": [
+            0.9,
+            0.999
+          ],
+          "epochs": 15,
+          "batch_size": 1024,
+          "k_aux": 512,
+          "aux_coef": 0.03125,
+          "nested_coef": 0.125,
+          "cl_coef": 0.1,
+          "cl_temperature": 0.2,
+          "dead_threshold": 30,
+          "k_decay_ratio": 0.7,
+          "ot_weight": 2.0,
+          "ot_mass": 0.9,
+          "ot_eta": 0.2,
+          "ot_microbatch": 32,
+          "ot_max_iters": 400,
+          "ot_max_refine_iters": 8000,
+          "ot_tol": 0.0001
+        },
+        "csr_multitopk": {
+          "name": "paper-table3",
+          "hidden_dim": 8192,
+          "lr": 4e-05,
+          "weight_decay": 0.0001,
+          "adam_eps": 6.25e-10,
+          "adam_betas": [
+            0.9,
+            0.999
+          ],
+          "epochs": 10,
+          "batch_size": 4096,
+          "k_aux": 512,
+          "aux_coef": 0.03125,
+          "nested_coef": 0.125,
+          "cl_coef": 0.1,
+          "cl_temperature": 0.2,
+          "dead_threshold": 30,
+          "k_decay_ratio": 0.7,
+          "ot_weight": 2.0,
+          "ot_mass": 0.9,
+          "ot_eta": 0.2,
+          "ot_microbatch": 32,
+          "ot_max_iters": 400,
+          "ot_max_refine_iters": 8000,
+          "ot_tol": 0.0001
+        }
+      },
+      "rn18": {
+        "csr": {
+          "name": "paper-table9",
+          "hidden_dim": 8192,
+          "lr": 4e-05,
+          "weight_decay": 0.0001,
+          "adam_eps": 6.25e-10,
+          "adam_betas": [
+            0.9,
+            0.999
+          ],
+          "epochs": 10,
+          "batch_size": 1024,
+          "k_aux": 512,
+          "aux_coef": 0.03125,
+          "nested_coef": 0.125,
+          "cl_coef": 1.0,
+          "cl_temperature": 0.2,
+          "dead_threshold": 30,
+          "k_decay_ratio": 0.7,
+          "ot_weight": 2.0,
+          "ot_mass": 0.9,
+          "ot_eta": 0.2,
+          "ot_microbatch": 32,
+          "ot_max_iters": 400,
+          "ot_max_refine_iters": 8000,
+          "ot_tol": 0.0001
+        },
+        "csrv2": {
+          "name": "paper-table9",
+          "hidden_dim": 8192,
+          "lr": 4e-05,
+          "weight_decay": 0.0001,
+          "adam_eps": 6.25e-10,
+          "adam_betas": [
+            0.9,
+            0.999
+          ],
+          "epochs": 10,
+          "batch_size": 1024,
+          "k_aux": 512,
+          "aux_coef": 0.03125,
+          "nested_coef": 0.125,
+          "cl_coef": 1.0,
+          "cl_temperature": 0.2,
+          "dead_threshold": 30,
+          "k_decay_ratio": 0.7,
+          "ot_weight": 2.0,
+          "ot_mass": 0.9,
+          "ot_eta": 0.2,
+          "ot_microbatch": 32,
+          "ot_max_iters": 400,
+          "ot_max_refine_iters": 8000,
+          "ot_tol": 0.0001
+        },
+        "mpsae": {
+          "name": "paper-table9",
+          "hidden_dim": 8192,
+          "lr": 4e-05,
+          "weight_decay": 0.0001,
+          "adam_eps": 6.25e-10,
+          "adam_betas": [
+            0.9,
+            0.999
+          ],
+          "epochs": 10,
+          "batch_size": 1024,
+          "k_aux": 512,
+          "aux_coef": 0.03125,
+          "nested_coef": 0.125,
+          "cl_coef": 1.0,
+          "cl_temperature": 0.2,
+          "dead_threshold": 30,
+          "k_decay_ratio": 0.7,
+          "ot_weight": 2.0,
+          "ot_mass": 0.9,
+          "ot_eta": 0.2,
+          "ot_microbatch": 32,
+          "ot_max_iters": 400,
+          "ot_max_refine_iters": 8000,
+          "ot_tol": 0.0001
+        },
+        "mpsaev2": {
+          "name": "paper-table9",
+          "hidden_dim": 8192,
+          "lr": 4e-05,
+          "weight_decay": 0.0001,
+          "adam_eps": 6.25e-10,
+          "adam_betas": [
+            0.9,
+            0.999
+          ],
+          "epochs": 15,
+          "batch_size": 1024,
+          "k_aux": 512,
+          "aux_coef": 0.03125,
+          "nested_coef": 0.125,
+          "cl_coef": 1.0,
+          "cl_temperature": 0.2,
+          "dead_threshold": 30,
+          "k_decay_ratio": 0.7,
+          "ot_weight": 2.0,
+          "ot_mass": 0.9,
+          "ot_eta": 0.2,
+          "ot_microbatch": 32,
+          "ot_max_iters": 400,
+          "ot_max_refine_iters": 8000,
+          "ot_tol": 0.0001
+        },
+        "csr_multitopk": {
+          "name": "paper-table9",
+          "hidden_dim": 8192,
+          "lr": 4e-05,
+          "weight_decay": 0.0001,
+          "adam_eps": 6.25e-10,
+          "adam_betas": [
+            0.9,
+            0.999
+          ],
+          "epochs": 10,
+          "batch_size": 1024,
+          "k_aux": 512,
+          "aux_coef": 0.03125,
+          "nested_coef": 0.125,
+          "cl_coef": 1.0,
+          "cl_temperature": 0.2,
+          "dead_threshold": 30,
+          "k_decay_ratio": 0.7,
+          "ot_weight": 2.0,
+          "ot_mass": 0.9,
+          "ot_eta": 0.2,
+          "ot_microbatch": 32,
+          "ot_max_iters": 400,
+          "ot_max_refine_iters": 8000,
+          "ot_tol": 0.0001
+        }
+      },
+      "vit_b16": {
+        "csr": {
+          "name": "paper-table3",
+          "hidden_dim": 8192,
+          "lr": 4e-05,
+          "weight_decay": 0.0001,
+          "adam_eps": 6.25e-10,
+          "adam_betas": [
+            0.9,
+            0.999
+          ],
+          "epochs": 10,
+          "batch_size": 4096,
+          "k_aux": 512,
+          "aux_coef": 0.03125,
+          "nested_coef": 0.125,
+          "cl_coef": 0.1,
+          "cl_temperature": 0.2,
+          "dead_threshold": 30,
+          "k_decay_ratio": 0.7,
+          "ot_weight": 2.0,
+          "ot_mass": 0.9,
+          "ot_eta": 0.2,
+          "ot_microbatch": 32,
+          "ot_max_iters": 400,
+          "ot_max_refine_iters": 8000,
+          "ot_tol": 0.0001
+        },
+        "csrv2": {
+          "name": "paper-table3",
+          "hidden_dim": 8192,
+          "lr": 4e-05,
+          "weight_decay": 0.0001,
+          "adam_eps": 6.25e-10,
+          "adam_betas": [
+            0.9,
+            0.999
+          ],
+          "epochs": 10,
+          "batch_size": 4096,
+          "k_aux": 512,
+          "aux_coef": 0.03125,
+          "nested_coef": 0.125,
+          "cl_coef": 0.1,
+          "cl_temperature": 0.2,
+          "dead_threshold": 30,
+          "k_decay_ratio": 0.7,
+          "ot_weight": 2.0,
+          "ot_mass": 0.9,
+          "ot_eta": 0.2,
+          "ot_microbatch": 32,
+          "ot_max_iters": 400,
+          "ot_max_refine_iters": 8000,
+          "ot_tol": 0.0001
+        },
+        "mpsae": {
+          "name": "paper-table3",
+          "hidden_dim": 8192,
+          "lr": 4e-05,
+          "weight_decay": 0.0001,
+          "adam_eps": 6.25e-10,
+          "adam_betas": [
+            0.9,
+            0.999
+          ],
+          "epochs": 10,
+          "batch_size": 1024,
+          "k_aux": 512,
+          "aux_coef": 0.03125,
+          "nested_coef": 0.125,
+          "cl_coef": 0.1,
+          "cl_temperature": 0.2,
+          "dead_threshold": 30,
+          "k_decay_ratio": 0.7,
+          "ot_weight": 2.0,
+          "ot_mass": 0.9,
+          "ot_eta": 0.2,
+          "ot_microbatch": 32,
+          "ot_max_iters": 400,
+          "ot_max_refine_iters": 8000,
+          "ot_tol": 0.0001
+        },
+        "mpsaev2": {
+          "name": "paper-table3",
+          "hidden_dim": 8192,
+          "lr": 4e-05,
+          "weight_decay": 0.0001,
+          "adam_eps": 6.25e-10,
+          "adam_betas": [
+            0.9,
+            0.999
+          ],
+          "epochs": 15,
+          "batch_size": 1024,
+          "k_aux": 512,
+          "aux_coef": 0.03125,
+          "nested_coef": 0.125,
+          "cl_coef": 0.1,
+          "cl_temperature": 0.2,
+          "dead_threshold": 30,
+          "k_decay_ratio": 0.7,
+          "ot_weight": 2.0,
+          "ot_mass": 0.9,
+          "ot_eta": 0.2,
+          "ot_microbatch": 32,
+          "ot_max_iters": 400,
+          "ot_max_refine_iters": 8000,
+          "ot_tol": 0.0001
+        },
+        "csr_multitopk": {
+          "name": "paper-table3",
+          "hidden_dim": 8192,
+          "lr": 4e-05,
+          "weight_decay": 0.0001,
+          "adam_eps": 6.25e-10,
+          "adam_betas": [
+            0.9,
+            0.999
+          ],
+          "epochs": 10,
+          "batch_size": 4096,
+          "k_aux": 512,
+          "aux_coef": 0.03125,
+          "nested_coef": 0.125,
+          "cl_coef": 0.1,
+          "cl_temperature": 0.2,
+          "dead_threshold": 30,
+          "k_decay_ratio": 0.7,
+          "ot_weight": 2.0,
+          "ot_mass": 0.9,
+          "ot_eta": 0.2,
+          "ot_microbatch": 32,
+          "ot_max_iters": 400,
+          "ot_max_refine_iters": 8000,
+          "ot_tol": 0.0001
+        }
+      }
+    },
+    "resolved_budgets": {
+      "ff2048": {
+        "imagenet_train_k": [
+          8,
+          64
+        ],
+        "imagenet_eval_k": [
+          8,
+          64
+        ],
+        "downstream_train_k": [
+          8
+        ],
+        "downstream_eval_k": [
+          8,
+          64
+        ]
+      },
+      "rn18": {
+        "imagenet_train_k": [
+          8
+        ],
+        "imagenet_eval_k": [
+          8
+        ],
+        "downstream_train_k": [
+          8
+        ],
+        "downstream_eval_k": [
+          8
+        ]
+      },
+      "vit_b16": {
+        "imagenet_train_k": [
+          12
+        ],
+        "imagenet_eval_k": [
+          12
+        ],
+        "downstream_train_k": [
+          12
+        ],
+        "downstream_eval_k": [
+          12
+        ]
+      }
+    }
+  },
+  "storage_estimate": {
+    "imagenet_features_bytes": {
+      "ff2048": 10915569400,
+      "rn18": 2736879352,
+      "vit_b16": 4099994360
+    },
+    "total_imagenet_features_bytes": 17752443112,
+    "active_writer_upper_bytes": 10915569400,
+    "model_and_adam_tensor_bytes": 2644700160,
+    "reserve_bytes": 10737418240,
+    "excluded": "raw images, download/Arrow caches, model weights, environment, downstream features, sparse evaluation cache, checkpoint overhead"
+  }
+}
+```
+
+Source hashes at capture:
+
+- `mpsae/config.py`: `aa150f9d86b6eb265200d375720f17c746a2f08bff96e546805a1f58ee54829d`
+- `mpsae/methods.py`: `aced2459549c644bee8381de2965c8ebccc7f90521ef15fe254bbf6d73075e92`
+- `mpsae/losses.py`: `b142b53862d9f793bd7f83ae8003142b87434de796052518535887bd8bffd27e`
+- `mpsae/ot.py`: `6ee6357f49d5c207e4c1829c67b9753b424d4d2f279376fce3c84053271137ea`
+- `mpsae/train.py`: `cf8c3ec505c107088c0b89299990a2d649e5549a534e825e0caa856649a73281`
