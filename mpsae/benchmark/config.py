@@ -11,7 +11,8 @@ from pathlib import Path
 import re
 from typing import Any
 
-from ..config import BACKBONES, METHODS, METHOD_VARIANTS, SEEDS, Cell, grid, training_preset
+from ..config import (BACKBONES, INFERENCE_BUDGETS, METHODS, METHOD_VARIANTS, SEEDS,
+                      Cell, grid, inference_budgets, training_preset)
 from ..io import canonical_hash
 from ..timing_config import timing_config
 
@@ -137,6 +138,8 @@ class Campaign:
                 raise ValueError(f"{section}.{key} mapping needs exactly the selected backbones")
             value = value[backbone]
         if value is None:
+            if key == "eval_k" and backbone in INFERENCE_BUDGETS:
+                return inference_budgets(backbone)
             if section == "imagenet":
                 return spec.k_list if key == "eval_k" else spec.training_budgets
             if key == "eval_k":

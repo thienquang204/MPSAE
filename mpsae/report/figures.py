@@ -22,7 +22,7 @@ from ..config import BACKBONE_ORDER, BACKBONES, BASELINES, METHODS, OURS, SEEDS
 from ..logs import get_logger
 from .aggregate import (aggregate_e1, aggregate_e2, load_dense_references, load_runs,
                         paired_difference, training_summary, validate_result_variant, write_tables)
-from .style import (BAND_ALPHA, COLUMN_WIDTH, DENSE_STYLE, PAGE_WIDTH,
+from .style import (BAND_ALPHA, COLUMN_WIDTH, PAGE_WIDTH,
                     apply_style, backbone_label, label_for,
                     method_style, save_figure, seed_caption)
 
@@ -138,11 +138,6 @@ def _plot_method(ax: Any, xs, means, stds, counts, *, method: str,
                         zorder=style["zorder"] - 0.5)
 
 
-def _annotate_rule(ax: Any, value: float) -> None:
-    """Our measured dense accuracy; details belong in the caption."""
-    ax.axhline(value, label="Dense", **DENSE_STYLE)
-
-
 def _dedup_legend(fig: Any, axes: Sequence[Any], *, ncol: int, y: float = -0.01) -> None:
     """Shared short labels; per-point seed counts remain in the tables."""
     handles: list[Any] = []
@@ -173,6 +168,7 @@ def figure_e1_curves(rows: Sequence[Mapping[str, Any]], out_dir: str | Path, bac
 
     The std band is the sample std over seeds, not a confidence interval, and
     the caption says so. All plotted results come from the selected experiment.
+    ``measured_dense`` is accepted for older callers; references are table-only.
     """
     log = get_logger("report")
     subset = _for_backbone(rows, backbone)
@@ -189,16 +185,13 @@ def figure_e1_curves(rows: Sequence[Mapping[str, Any]], out_dir: str | Path, bac
         ks.extend(xs)
         _plot_method(ax, xs, means, stds, counts, method=method)
 
-    if measured_dense and measured_dense.get("top1") is not None:
-        _annotate_rule(ax, float(measured_dense["top1"]))
     _log2_k_axis(ax, ks)
     ax.set_ylabel("1-NN (%)")
     ax.set_title(backbone_label(backbone))
     _dedup_legend(fig, [ax], ncol=3)
     caption = (
         f"ImageNet 1-NN accuracy for {backbone_label(backbone)}. Each point uses a model "
-        "trained and evaluated at the same K. Dense, when present, is measured in this "
-        f"experiment. {seed_caption(seeds)}"
+        f"trained and evaluated at the same K. {seed_caption(seeds)}"
     )
     return save_figure(fig, out_dir, f"e1_curves_{backbone}", caption=caption)
 
@@ -275,7 +268,24 @@ def figure_e1_delta(records: Sequence[Mapping[str, Any]], out_dir: str | Path, b
 # ------------------------------------------------------- E2: one checkpoint, many K
 
 def _inference_figure(rows, out_dir, name, *, x="k", seeds=SEEDS, dense=None):
-    """One row per backbone/training K. Every curve is one fixed-checkpoint sweep."""
+    """Export at most two backbone/training-K groups per publication figure."""
+    groups = sorted({(row["backbone"], int(row["anchor_k"])) for row in rows})
+    if len(groups) <= 2:
+        return _inference_page(rows, out_dir, name, x=x, seeds=seeds)
+    pages = (len(groups) + 1) // 2
+    written = []
+    for page, first in enumerate(range(0, len(groups), 2), start=1):
+        selected = set(groups[first:first + 2])
+        panel_rows = [row for row in rows
+                      if (row["backbone"], int(row["anchor_k"])) in selected]
+        page_name = name if page == 1 else f"{name}_part{page}"
+        written.extend(_inference_page(panel_rows, out_dir, page_name,
+                                       x=x, seeds=seeds, page_note=f"Part {page} of {pages}. "))
+    return written
+
+
+def _inference_page(rows, out_dir, name, *, x="k", seeds=SEEDS, page_note=""):
+    """One row per backbone/training K, with a shared method legend."""
     groups = sorted({(row["backbone"], int(row["anchor_k"])) for row in rows})
     metrics = [(field, label) for field, label in
                (("probe_top1", "Linear probe (%)"), ("top1", "1-NN (%)"))
@@ -308,9 +318,6 @@ def _inference_figure(rows, out_dir, name, *, x="k", seeds=SEEDS, dense=None):
                         ax.scatter([value], [r[f"{field}_mean"]], s=40, facecolors="none",
                                    edgecolors=method_style(method)["color"], linewidths=0.8,
                                    zorder=5, label="_nolegend_")
-            measured = (dense or {}).get(backbone, {}).get(field)
-            if measured is not None:
-                _annotate_rule(ax, float(measured))
             if x == "k":
                 ax.axvline(anchor, color="#999999", linewidth=0.65, linestyle=":", zorder=0)
                 _log2_k_axis(ax, [r["k"] for r in panel], label="Inference $K$")
@@ -323,12 +330,12 @@ def _inference_figure(rows, out_dir, name, *, x="k", seeds=SEEDS, dense=None):
                 ax.text(0.5, 0.5, "Not measured", ha="center", va="center", transform=ax.transAxes)
     _dedup_legend(fig, list(axes.flat), ncol=6)
     caption = (
-        "ImageNet accuracy. Each method/seed uses the same frozen SAE checkpoint throughout "
+        f"{page_note}ImageNet accuracy. Each method/seed uses the same frozen SAE checkpoint throughout "
         "each inference-K curve; rows separate backbones and training K. Linear probes are fitted "
         "separately on training codes at each inference K and evaluated on validation codes. "
         "The probe classifier is refitted; the SAE is not. Circles outline the training budget. "
         "Curves connect increasing inference K. Mean nonzeros, when used, count measured gallery "
-        "entries and can be smaller than K. Dense, when present, is our measured reference. "
+        "entries and can be smaller than K. "
         f"CSR-MTK denotes CSR multi-TopK. {seed_caption(seeds)}"
     )
     return save_figure(fig, out_dir, name, caption=caption)
@@ -431,7 +438,7 @@ def figure_backbone_summary(rows: Sequence[Mapping[str, Any]], out_dir: str | Pa
 
     The y-axis is shared only when every backbone's accuracies fall inside
     ``share_y_span`` percentage points. Forcing a shared axis across backbones
-    whose dense accuracies differ by tens of points would compress the
+    whose measured accuracies differ by tens of points would compress the
     interesting panels into a flat line, so the rule is applied to the data and
     the outcome is stated in the caption.
     """
@@ -461,9 +468,6 @@ def figure_backbone_summary(rows: Sequence[Mapping[str, Any]], out_dir: str | Pa
                 continue
             ks.extend(xs)
             _plot_method(ax, xs, mean_values, stds, counts, method=method, markersize=2.8)
-        measured = (dense or {}).get(backbone)
-        if measured and measured.get("top1") is not None:
-            _annotate_rule(ax, float(measured["top1"]))
         _log2_k_axis(ax, ks)
         ax.set_title(backbone_label(backbone), fontsize=8.4)
     for ax in axes[len(present):]:
@@ -477,11 +481,10 @@ def figure_backbone_summary(rows: Sequence[Mapping[str, Any]], out_dir: str | Pa
     caption = (
         "1-NN top-1 on ImageNet-1K against training K, for every backbone; inference K equals training K. "
         f"{seed_caption(seeds)} Per-series n is in "
-        "the accompanying table, since it can differ between panels. The black dashed rule in each "
-        "panel is our own dense (un-compressed) 1-NN accuracy for that backbone. "
+        "the accompanying table, since it can differ between panels. "
         + ("The y-axis is shared across panels."
            if shared else
-           "The y-axis is per-panel: the backbones' dense accuracies differ by more than "
+           "The y-axis is per-panel: the backbones' measured accuracies differ by more than "
            f"{share_y_span:.0f} points, and a shared axis would flatten the smaller panels.")
     )
     return save_figure(fig, out_dir, "backbone_summary", caption=caption)
@@ -536,7 +539,7 @@ def figure_e2_cost(rows, out_dir, backbone, *, seeds=SEEDS):
     anchors = sorted({r["anchor_k"] for r in subset})
     fields = [(field, label, scale) for field, label, scale in
               (("search_seconds", "Search time (s)", 1),
-               ("retrieval_ms", "Matmul (ms/batch)", 1),
+               ("retrieval_ms", "Top-1 search (ms/batch)", 1),
                ("index_bytes", "Index (MiB)", 1 / 2**20))
               if any(r.get(f"{field}_mean") is not None for r in subset)]
     if not anchors or not fields:
@@ -561,8 +564,9 @@ def figure_e2_cost(rows, out_dir, backbone, *, seeds=SEEDS):
     fig.suptitle(backbone_label(backbone))
     return save_figure(fig, out_dir, f"e2_cost_{backbone}", caption=(
         "Costs from the same fixed SAE checkpoint at each inference K. Search time covers "
-        "the full ImageNet validation query set, excluding encoding. Matmul time is the "
-        "sparse scoring benchmark per configured query batch (512 by default), not per-query "
+        "the full ImageNet validation query set, excluding encoding. Top-1 search times sparse "
+        "scoring, max/argmax and merging across gallery shards per configured query batch "
+        "(512 by default), not per-query "
         "latency or end-to-end retrieval time. Index memory is from that benchmark. Timing "
         f"settings and skipped measurements remain in eval_e2.json. {seed_caption(seeds)}"))
 

@@ -6,6 +6,7 @@ seeds: [1227]
 imagenet:
   enabled: true
   train_k: [8]
+  eval_k: [16, 32, 256]
   e1: true
   e2: false
   linear_probe: true
@@ -13,7 +14,7 @@ imagenet:
 downstream:
   datasets: [eurosat, flowers102, sop]
   train_k: [8]
-  eval_k: [2, 8, 32]
+  eval_k: [16, 32, 256]
   mode: frozen
 execution:
   max_steps: 2

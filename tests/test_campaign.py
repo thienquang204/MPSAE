@@ -18,8 +18,8 @@ from mpsae.config import Cell
 def test_default_campaign_is_source_training_plus_frozen_transfer():
     campaign = load_campaign("configs/thesis.yaml")
     plan = campaign.plan()
-    assert plan["source_cells"] == 10
-    assert plan["downstream_sparse_points"] == 120
+    assert plan["source_cells"] == 25
+    assert plan["downstream_sparse_points"] == 140
     assert plan["downstream_dense_points"] == 3
     assert campaign.downstream["mode"] == "frozen"
     assert campaign.execution["precomputed_only"] is True
@@ -36,25 +36,51 @@ def test_dataset_backbone_selection_changes_plan_without_dropping_other_targets(
     assert campaign.target_backbones("eurosat") == ("rn18", "vit_b16")
     assert {cell.backbone for cell in campaign.downstream_cells("sop")} == {"rn18"}
     assert campaign.plan()["downstream_dense_points"] == 3
-    assert campaign.plan()["downstream_sparse_points"] == 18
+    assert campaign.plan()["downstream_sparse_points"] == 10
 
 
 @pytest.mark.parametrize("config", ["configs/thesis.yaml", "configs/precomputed.yaml"])
-@pytest.mark.parametrize("backbone,expected,anchor", [
-    ("ff2048", (2, 4, 8, 16, 32, 64, 128, 256), 8),
-    ("vit_b16", (2, 4, 8, 16, 32, 64, 128, 256), 8),
+@pytest.mark.parametrize("backbone,expected,training", [
+    ("ff2048", (16, 32, 256), (8, 16, 32, 256)),
+    ("vit_b16", (3, 12, 48, 96), (8,)),
 ])
-def test_campaigns_restrict_training_e2_and_downstream_to_requested_budgets(config, backbone, expected, anchor):
+def test_campaigns_restrict_training_e2_and_downstream_to_requested_budgets(config, backbone, expected, training):
     from mpsae.config import BACKBONES
     campaign = load_campaign(config)
-    assert {cell.k for cell in campaign.source_cells() if cell.backbone == backbone} == {anchor}
+    assert {cell.k for cell in campaign.source_cells() if cell.backbone == backbone} == set(training)
     assert campaign.budgets("imagenet", "eval_k", backbone) == expected
     assert campaign.budgets("downstream", "eval_k", backbone) == expected
-    assert campaign.budgets("downstream", "train_k", backbone) == (anchor,)
+    assert campaign.budgets("downstream", "train_k", backbone) == training
     assert campaign.resolved()["resolved_budgets"][backbone]["imagenet_eval_k"] == expected
     # Campaign selection does not remove the wider reference grids from the registry.
     assert set(expected) <= set(range(1, BACKBONES[backbone].dim + 1))
     assert len(BACKBONES[backbone].training_budgets) > 1
+
+
+@pytest.mark.parametrize("backbone,expected", [
+    ("ff2048", (16, 32, 256)), ("rn18", (16, 32, 256)),
+    ("vit_b16", (3, 12, 48, 96)),
+])
+def test_default_inference_selection_matches_all_evaluation_families(backbone, expected):
+    from mpsae.config import inference_budgets
+    campaign = Campaign.from_mapping({"backbones": [backbone]})
+    assert inference_budgets(backbone) == expected
+    assert campaign.budgets("imagenet", "eval_k", backbone) == expected
+    assert campaign.budgets("downstream", "eval_k", backbone) == expected
+
+
+def test_new_source_models_are_evaluated_in_every_downstream_dataset():
+    campaign = load_campaign("configs/thesis.yaml")
+    from mpsae.config import METHODS
+    for method in METHODS:
+        expected = {("ff2048", method, k, 1227) for k in (8, 16, 32, 256)}
+        for dataset in ("eurosat", "sop"):
+            selected = {(c.backbone, c.method, c.k, c.seed)
+                        for c in campaign.downstream_cells(dataset) if c.backbone == "ff2048"
+                        and c.method == method}
+            assert selected == expected
+    assert sum(len(campaign.budgets("imagenet", "eval_k", c.backbone))
+               for c in campaign.source_cells()) == 80
 
 
 @pytest.mark.parametrize("targets", [[], {"flowers102": ["rn18"]},

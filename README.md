@@ -76,7 +76,7 @@ bundles: all ImageNet and EuroSAT backbones, plus SOP for `ff2048`, `rn18` and
 Flowers102 is excluded from these campaigns because no bundles are published;
 this does not establish a dataset defect. SOP remains enabled for the selected
 ResNet-50 through `downstream.backbones.sop`. Plans, downloads and
-reports use this same selection (120 sparse and 3 dense downstream evaluations).
+reports use this same selection (140 sparse and 3 dense downstream evaluations).
 Unexpected missing or incompatible bundles fail explicitly rather than being
 silently dropped. Building new bundles requires a separate config with
 `precomputed_only: false`, `--build-missing-embeddings`, and a writable private
@@ -134,46 +134,51 @@ returns, and all search is PyTorch-only.
 
 ## The experiments
 
-**E1 — matched budget.** Each SAE is trained and evaluated at its training K.
-The selected campaign uses K=8 for ResNet-50 and ViT-B/16.
+**E1 — matched budget.** ResNet-50 is trained separately at **K=8, 16, 32, 256**;
+ViT-B/16 remains trained at **K=8**. Existing compatible K=8 checkpoints are reused.
+Each newly selected ResNet training K has its own independently initialized fit.
 
-**E2 — fixed checkpoint, inference sweep.** Each of those checkpoints is frozen
-and evaluated at **K = 2, 4, 8, 16, 32, 64, 128, 256**. There are still only
-10 SAE fits: 2 backbones x 5 methods x seed 1227. This produces 80 ImageNet E2
-points (10 reused from E1) and 120 sparse + 3 dense downstream evaluations.
-HF backbone embeddings are reused. No SAE is retrained for a different inference K.
+**E2 — fixed checkpoint, inference sweep.** Every selected ResNet checkpoint is
+evaluated at **K=16, 32, 256**. The ViT checkpoint is evaluated at **K=3, 12, 48, 96**.
+These same inference grids apply to downstream retrieval for every method and
+selected training checkpoint. The campaign has **25 SAE fits**, **80 ImageNet E2
+points** (15 shared with E1), and **140 sparse + 3 dense** downstream evaluations.
+HF backbone embeddings are reused. SAE weights remain fixed within each inference
+sweep. The shared fallback inference grid also uses 16/32/256 for ResNet-18 when
+that backbone is explicitly selected; it is not added to the active campaign.
 ImageNet linear probes are fitted separately on training codes at each K; their
 validation accuracy and 1-NN accuracy are both reported. The existing
 `imagenet.linear_probe` and `imagenet.timing` flags now apply to E2 as well as E1.
 Missing probe/timing components are filled without recomputing completed accuracy.
 The extra inference and probe evaluations do take additional time.
 
-Reports use only measurements from the selected experiment. There are no
-imported paper curves or published dense numbers. `Dense` means our own measured
-full-feature baseline. Short legend names are CSR, CSRv2, CSR-MTK (CSR multi-TopK),
-MPSAE, and MPSAEv2. Seed counts, protocols and checkpoint IDs stay in captions/tables.
-One seed yields no between-seed uncertainty band.
+Figures show only the measured sparse methods: CSR, CSRv2, CSR-MTK (CSR multi-TopK),
+MPSAE and MPSAEv2. There are **no published, Dense, or Full-representation reference
+curves or markers**. Dense diagnostics remain available as numerical tables.
+Seed counts, protocols and checkpoint IDs stay in captions/tables. One seed yields
+no between-seed uncertainty band.
 
-The main ImageNet figure is `inference_summary.pdf` (also PNG); per-backbone
+The main ImageNet figures are `inference_summary*.pdf` (also PNG); long grids
+are split into parts with at most two backbone/training-K rows. Per-backbone
 `e2_generalisation_*` plots show linear probe and 1-NN against inference K.
 `e2_nnz_*` uses measured gallery nonzeros instead, so saturation of MPSAE can
 compress its horizontal extent there without hiding the larger inference K points
-on the main figure. `e2_cost_*` shows search time, sparse matmul time and index
+on the main figure. `e2_cost_*` shows search time, sparse top-1 search time and index
 memory where measured. Downstream `quality_*` shows R@1 and mAP@R versus inference
 K; `cost_*` shows retrieval cost and stored code size. All curves keep training K
 fixed, and all figures export vector PDF, 300-dpi PNG and a separate caption.
 
 After pulling this change, run `bash all_in_one.sh --skip-setup` to fill missing
-K evaluations with existing compatible checkpoints. `report` alone only redraws
+K evaluations and train the newly selected ResNet cells. Compatible existing checkpoints are reused. `report` alone only redraws
 measurements already present in that campaign's catalog; it cannot create new K
 results. Outputs are under `work/direct-v1/reports/thesis/<plan_id>/`.
 
 | backbone | d | recipe | preset | Training K budgets | E2 anchors | cells |
 |---|---|---|---|---|---|---|
-| `ff2048` | 2048 | MRL | Table 3 | 8 | 8 | 5 |
+| `ff2048` | 2048 | MRL | Table 3 | 8, 16, 32, 256 | 8, 16, 32, 256 | 20 |
 | `vit_b16` | 768 | CSRv2 | Table 3 | 8 | 8 | 5 |
 
-10 cells = the selected backbone/K pairs x 5 methods x seed 1227.
+25 cells = the selected backbone/K pairs x 5 methods x seed 1227.
 The previous 20-fit, 35-fit and original 80-fit setups are preserved, including exact YAML and resolved presets,
 in [`large_scale_abblation.md`](large_scale_abblation.md) for a later ablation.
 The wider reference grids remain registered for explicit custom campaigns.

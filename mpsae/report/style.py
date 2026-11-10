@@ -51,8 +51,6 @@ _BASE_PRIMARY = "#5B7FA6"     # muted steel blue (desaturated Okabe-Ito blue)
 _BASE_SECONDARY = "#3C6E71"   # dark teal; darker than the steel blue
 #: Neutral: the ablation is a control, not a competitor.
 _ABLATION = "#8A8A8A"
-#: Our own measured dense reference.
-_DENSE = "#4D4D4D"
 
 #: Per-method drawing instructions. ``zorder`` encodes the reading order we
 #: want: baselines behind, ours on top.
@@ -68,10 +66,6 @@ METHOD_STYLE: Mapping[str, Mapping[str, Any]] = {
     "mpsaev2": {"color": _OURS_SECONDARY, "marker": "D", "linestyle": "-",
                 "label": "MPSAEv2", "zorder": 3.1},
 }
-
-#: Measured dense reference on the same data.
-DENSE_STYLE: Mapping[str, Any] = {"color": _DENSE, "linestyle": (0, (6, 3)),
-                                  "linewidth": 0.9, "zorder": 1.0}
 
 LABELS: Mapping[str, str] = {name: str(entry["label"]) for name, entry in METHOD_STYLE.items()}
 

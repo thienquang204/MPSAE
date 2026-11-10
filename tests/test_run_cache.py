@@ -353,7 +353,7 @@ def test_e2_selection_reuses_old_points_without_reporting_unselected_budgets(run
     assert {point["k"] for point in result["cached_points"]} == {8, 256, 1024}
 
 
-def test_e2_without_override_keeps_registered_grid(runs, tmp_path, monkeypatch):
+def test_e2_without_override_uses_current_inference_grid(runs, tmp_path, monkeypatch):
     cell = Cell("rn18", "csr", 8, 1227)
     calls = []
     def evaluate(*args, k, **kwargs):
@@ -363,8 +363,8 @@ def test_e2_without_override_keeps_registered_grid(runs, tmp_path, monkeypatch):
     settings = runs.RunSettings(root=tmp_path / "runs", fit=SimpleNamespace(device="cpu"),
                                linear_probe=False, measure_timing=False)
     result = runs.run_e2(cell, _bundle(), settings, signature="fit", e1={"k": 8, "top1": 75.0})
-    assert calls == [k for k in BACKBONES["rn18"].k_list if k != 8]
-    assert [point["k"] for point in result["points"]] == list(BACKBONES["rn18"].k_list)
+    assert calls == [16, 32, 256]
+    assert [point["k"] for point in result["points"]] == [16, 32, 256]
 
 
 def test_e2_upgrades_legacy_accuracy_reuses_anchor_and_resumes_probe(runs, tmp_path, monkeypatch):

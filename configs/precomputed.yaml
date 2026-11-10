@@ -1,4 +1,4 @@
-# Two-setting main campaign. Previous 20-fit setup: ../large_scale_abblation.md.
+# Main campaign: ResNet-50 train K=8/16/32/256; ViT train K=8. Previous 20-fit setup: ../large_scale_abblation.md.
 # Selected published embeddings: ImageNet/EuroSAT for ff2048/vit_b16;
 # SOP for ff2048.
 # Same fitting/evaluation and target coverage as thesis.yaml.
@@ -10,11 +10,11 @@ imagenet:
   enabled: true
   prepare: false
   train_k:
-    ff2048: [8]
+    ff2048: [8, 16, 32, 256]
     vit_b16: [8]
   eval_k:                       # E2 inference budgets; E1 evaluates at train_k
-    ff2048: [2, 4, 8, 16, 32, 64, 128, 256]
-    vit_b16: [2, 4, 8, 16, 32, 64, 128, 256]
+    ff2048: [16, 32, 256]
+    vit_b16: [3, 12, 48, 96]
   e1: true
   e2: true
   linear_probe: true
@@ -31,11 +31,11 @@ downstream:
   backbones:
     sop: [ff2048]
   train_k:
-    ff2048: [8]
+    ff2048: [8, 16, 32, 256]
     vit_b16: [8]
   eval_k:
-    ff2048: [2, 4, 8, 16, 32, 64, 128, 256]
-    vit_b16: [2, 4, 8, 16, 32, 64, 128, 256]
+    ff2048: [16, 32, 256]
+    vit_b16: [3, 12, 48, 96]
   mode: frozen
   revisions: {}
 execution:

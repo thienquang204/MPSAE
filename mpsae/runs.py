@@ -24,7 +24,7 @@ import tempfile
 import time
 from typing import Any, Callable, Iterable, Iterator
 
-from .config import BACKBONES, Backbone, Cell, grid
+from .config import BACKBONES, Backbone, Cell, grid, inference_budgets
 from .features import Bundle, load_bundle
 from .io import atomic_json, canonical_hash, read_json
 from .logs import Progress, banner, format_duration, get_logger
@@ -54,7 +54,7 @@ class RunSettings:
     timing_build_entry_cap: int = 4 * 1024 * 1024
     timing_retry_skipped: bool = False
     run_e2: bool = True
-    e2_k_values: tuple[int, ...] | None = None  # None keeps the registered inference grid
+    e2_k_values: tuple[int, ...] | None = None  # None uses the shared backbone inference grid
     #: Two tiers on the published dense 1-NN. Within ``warn`` the embedding
     #: recipe is indistinguishable from the published one; beyond ``fail`` it
     #: demonstrably is not, and training would produce numbers that cannot be
@@ -436,7 +436,7 @@ def run_e2(cell: Cell, bundle: Bundle, settings: RunSettings, *, signature: str,
            e1: dict[str, Any]) -> dict[str, Any]:
     """Evaluate one anchor at the selected inference budgets, reusing cached points."""
     spec = BACKBONES[cell.backbone]
-    budgets = spec.k_list if settings.e2_k_values is None else settings.e2_k_values
+    budgets = inference_budgets(cell.backbone) if settings.e2_k_values is None else settings.e2_k_values
     if (not budgets or any(isinstance(k, bool) or not isinstance(k, int)
                            or not 1 <= k <= spec.dim for k in budgets)
             or len(set(budgets)) != len(budgets)):

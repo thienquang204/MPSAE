@@ -265,7 +265,7 @@ def _curve(ax, rows: Sequence[Mapping[str, Any]], method: str, metric: str, *,
 def _draw_quality(rows: Sequence[Mapping[str, Any]], dense: Sequence[Mapping[str, Any]],
                   out_dir: Path, name: str, title: str, *, x: str = "eval_k") -> list[Path]:
     import matplotlib.pyplot as plt
-    from ..report.style import DENSE_STYLE, PAGE_WIDTH, save_figure, seed_caption
+    from ..report.style import PAGE_WIDTH, save_figure, seed_caption
     from ..report.figures import _dedup_legend
 
     scopes = sorted({(row["dataset"], row["protocol"], row["comparison_id"]) for row in rows})
@@ -278,22 +278,11 @@ def _draw_quality(rows: Sequence[Mapping[str, Any]], dense: Sequence[Mapping[str
         for index, scope in enumerate(scopes):
             subset = [row for row in rows if tuple(row[key] for key in
                       ("dataset", "protocol", "comparison_id")) == scope]
-            dense_subset = [row for row in dense if tuple(row[key] for key in
-                            ("dataset", "protocol", "comparison_id")) == scope]
             for ax, metric, pretty in zip(axes[index], ("recall_at_1", "map_at_r"),
                                           ("R@1 (%)", "mAP@R (%)")):
                 for method in METHODS:
                     _curve(ax, [row for row in subset if row["method"] == method], method, metric, x=x,
                            xscale=1 / 1024 if x == "code_bytes_per_image" else 1)
-                if dense_subset:
-                    reference = dense_subset[0]
-                    value = reference.get(f"{metric}_mean")
-                    if value is not None:
-                        if x == "code_bytes_per_image" and reference.get(f"{x}_mean") is not None:
-                            ax.plot([reference[f"{x}_mean"] / 1024], [100 * value], color="#4D4D4D",
-                                    marker="x", linestyle="none", label="Dense")
-                        else:
-                            ax.axhline(100 * value, label="Dense", **DENSE_STYLE)
                 ax.set_ylabel(pretty)
                 ax.set_title(_scope_label(scope) + (f" ({index + 1})" if
                              sum(item[0] == scope[0] for item in scopes) > 1 else ""), fontsize=9)
@@ -315,7 +304,6 @@ def _draw_quality(rows: Sequence[Mapping[str, Any]], dense: Sequence[Mapping[str
             f"{seed_caption([seed for row in rows for seed in row['seeds_present']])} "
             "Per-point n is in the tables. R@1 is the share of queries with a relevant first "
             "neighbour; mAP@R ranks to each query's full relevant-image count. Accuracies are percentages. "
-            "Dense is measured on the same downstream data. "
             "Every inference budget uses the same SAE checkpoint at the training K in the title. "
             "CSR-MTK denotes CSR multi-TopK. Protocols/revisions in row order: "
             + "; ".join(f"{i + 1}: {d}, {p}, {c}" for i, (d, p, c) in enumerate(scopes))

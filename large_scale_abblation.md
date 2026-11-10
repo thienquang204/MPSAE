@@ -3354,3 +3354,123 @@ Source hashes at capture:
 - `mpsae/losses.py`: `b142b53862d9f793bd7f83ae8003142b87434de796052518535887bd8bffd27e`
 - `mpsae/ot.py`: `6ee6357f49d5c207e4c1829c67b9753b424d4d2f279376fce3c84053271137ea`
 - `mpsae/train.py`: `cf8c3ec505c107088c0b89299990a2d649e5549a534e825e0caa856649a73281`
+
+
+## Archived 2026-11-10: K=8 source models with the eight-budget inference sweep
+
+Before adding independent ResNet-50 fits at K=16/32/256, both active backbones
+were trained at K=8 and evaluated at 2/4/8/16/32/64/128/256. This selection had
+10 source fits, 80 ImageNet E2 points and 120 sparse + 3 dense downstream points.
+Training recipes were unchanged: MPSAEv2 15 epochs, other methods 10 epochs.
+The exact preceding YAML files follow; they are archival, not active defaults.
+
+### configs/thesis.yaml
+
+```yaml
+# Two-setting main campaign. Previous 20-fit setup: ../large_scale_abblation.md.
+# Published embeddings only. Training presets remain in mpsae/config.py.
+# Selected published bundles: ImageNet/EuroSAT for both; SOP for ResNet-50.
+name: thesis
+backbones: [ff2048, vit_b16]
+methods: [csr, csrv2, mpsae, mpsaev2, csr_multitopk]
+seeds: [1227]
+imagenet:
+  enabled: true
+  prepare: false
+  train_k:
+    ff2048: [8]
+    vit_b16: [8]
+  eval_k:                       # E2 inference budgets; E1 evaluates at train_k
+    ff2048: [2, 4, 8, 16, 32, 64, 128, 256]
+    vit_b16: [2, 4, 8, 16, 32, 64, 128, 256]
+  e1: true
+  e2: true
+  linear_probe: true
+  timing: true
+  timing_query_batch: 512
+  timing_warmup: 100
+  timing_rounds: 2000
+  timing_gallery_chunk: 32768
+  timing_build_entry_cap: 4194304
+  timing_retry_skipped: false
+downstream:
+  enabled: true
+  datasets: [eurosat, sop]
+  backbones:
+    sop: [ff2048]
+  train_k:                      # reuse one ImageNet checkpoint per method/backbone
+    ff2048: [8]
+    vit_b16: [8]
+  eval_k:
+    ff2048: [2, 4, 8, 16, 32, 64, 128, 256]
+    vit_b16: [2, 4, 8, 16, 32, 64, 128, 256]
+  mode: frozen
+  revisions: {}                  # main is resolved once to an immutable commit
+execution:
+  storage_mode: direct_v1        # isolated work/direct-v1; no FFCV image copy
+  precomputed_only: true        # missing/incompatible bundles fail without extracting images
+  cleanup_raw: false
+  train_missing: true
+  continue_on_error: true
+  retain_codes: false            # metrics persist; avoid accumulating TB of codes
+  max_steps: 0
+  train_log_every: 10
+  checkpoint_every: 100
+  feature_residency: auto
+```
+
+### configs/precomputed.yaml
+
+```yaml
+# Two-setting main campaign. Previous 20-fit setup: ../large_scale_abblation.md.
+# Selected published embeddings: ImageNet/EuroSAT for ff2048/vit_b16;
+# SOP for ff2048.
+# Same fitting/evaluation and target coverage as thesis.yaml.
+name: precomputed
+backbones: [ff2048, vit_b16]
+methods: [csr, csrv2, mpsae, mpsaev2, csr_multitopk]
+seeds: [1227]
+imagenet:
+  enabled: true
+  prepare: false
+  train_k:
+    ff2048: [8]
+    vit_b16: [8]
+  eval_k:                       # E2 inference budgets; E1 evaluates at train_k
+    ff2048: [2, 4, 8, 16, 32, 64, 128, 256]
+    vit_b16: [2, 4, 8, 16, 32, 64, 128, 256]
+  e1: true
+  e2: true
+  linear_probe: true
+  timing: true
+  timing_query_batch: 512
+  timing_warmup: 100
+  timing_rounds: 2000
+  timing_gallery_chunk: 32768
+  timing_build_entry_cap: 4194304
+  timing_retry_skipped: false
+downstream:
+  enabled: true
+  datasets: [eurosat, sop]
+  backbones:
+    sop: [ff2048]
+  train_k:
+    ff2048: [8]
+    vit_b16: [8]
+  eval_k:
+    ff2048: [2, 4, 8, 16, 32, 64, 128, 256]
+    vit_b16: [2, 4, 8, 16, 32, 64, 128, 256]
+  mode: frozen
+  revisions: {}
+execution:
+  storage_mode: direct_v1
+  precomputed_only: true
+  cleanup_raw: false
+  train_missing: true
+  continue_on_error: true
+  retain_codes: false
+  max_steps: 0
+  train_log_every: 10
+  checkpoint_every: 100
+  feature_residency: auto
+```

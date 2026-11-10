@@ -214,6 +214,20 @@ BRANCH2 = ("convnext_tiny", "vit_b16", "dinov2_vits14")
 #: Default order of work: the paper-comparable branch first.
 BACKBONE_ORDER = BRANCH1 + BRANCH2
 
+# Inference selection is independent of the valid training-budget registry.
+# Keep this shared by E2 and downstream defaults so legacy entry points do not
+# silently evaluate a different grid from the configured campaigns.
+INFERENCE_BUDGETS: Mapping[str, tuple[int, ...]] = {
+    "ff2048": (16, 32, 256),
+    "rn18": (16, 32, 256),
+    "vit_b16": (3, 12, 48, 96),
+}
+
+
+def inference_budgets(backbone: str) -> tuple[int, ...]:
+    spec = BACKBONES[backbone]
+    return INFERENCE_BUDGETS.get(backbone, spec.k_list)
+
 
 # ------------------------------------------------------------------- cells
 

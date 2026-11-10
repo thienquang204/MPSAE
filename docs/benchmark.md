@@ -96,42 +96,62 @@ existing presets, not a second set of benchmark defaults. The resolved campaign
 configuration records the settings actually requested.
 
 ```yaml
+# Main campaign: ResNet-50 train K=8/16/32/256; ViT train K=8. Previous 20-fit setup: ../large_scale_abblation.md.
+# Published embeddings only. Training presets remain in mpsae/config.py.
+# Selected published bundles: ImageNet/EuroSAT for both; SOP for ResNet-50.
 name: thesis
-backbones: [ff2048, rn18]
+backbones: [ff2048, vit_b16]
 methods: [csr, csrv2, mpsae, mpsaev2, csr_multitopk]
 seeds: [1227]
-
 imagenet:
   enabled: true
   prepare: false
-  train_k: {ff2048: [8, 64], rn18: [8, 64]}
-  eval_k: {ff2048: [8, 64], rn18: [8, 64]}
+  train_k:
+    ff2048: [8, 16, 32, 256]
+    vit_b16: [8]
+  eval_k:                       # E2 inference budgets; E1 evaluates at train_k
+    ff2048: [16, 32, 256]
+    vit_b16: [3, 12, 48, 96]
   e1: true
   e2: true
   linear_probe: true
   timing: true
-
+  timing_query_batch: 512
+  timing_warmup: 100
+  timing_rounds: 2000
+  timing_gallery_chunk: 32768
+  timing_build_entry_cap: 4194304
+  timing_retry_skipped: false
 downstream:
   enabled: true
   datasets: [eurosat, sop]
-  train_k: [8]
-  eval_k: {ff2048: [8, 64], rn18: [8, 64]}
+  backbones:
+    sop: [ff2048]
+  train_k:                      # evaluate every selected ImageNet checkpoint
+    ff2048: [8, 16, 32, 256]
+    vit_b16: [8]
+  eval_k:
+    ff2048: [16, 32, 256]
+    vit_b16: [3, 12, 48, 96]
   mode: frozen
-  revisions: {}
-
+  revisions: {}                  # main is resolved once to an immutable commit
 execution:
-  storage_mode: direct_v1
-  precomputed_only: true
+  storage_mode: direct_v1        # isolated work/direct-v1; no FFCV image copy
+  precomputed_only: true        # missing/incompatible bundles fail without extracting images
   cleanup_raw: false
   train_missing: true
   continue_on_error: true
-  retain_codes: false
+  retain_codes: false            # metrics persist; avoid accumulating TB of codes
   max_steps: 0
+  train_log_every: 10
+  checkpoint_every: 100
+  feature_residency: auto
 ```
 
 `imagenet.train_k: null` means the selected backbones' registered training
 grids. A list restricts the source fits. `imagenet.eval_k` selects E2 inference
-budgets; `null` retains the registered inference grid. Both fields also accept
+budgets; `null` uses the shared ResNet grid (16/32/256) or ViT grid
+(3/12/48/96), falling back to the registered grid for other backbones. Both fields also accept
 a mapping from every selected backbone to its budgets. E1 uses its training K.
 `downstream.train_k` selects which
 ImageNet checkpoints are evaluated; `eval_k` changes their inference budget
@@ -140,11 +160,16 @@ only when `train_missing` is enabled. Existing compatible completed fits are
 reused. `max_steps: 0` uses the full source training schedule; a positive cap is
 part of fit identity and does not turn a capped fit into a full-fit checkpoint.
 
-The shipped campaigns select ResNet-50 and ViT-B/16, trained at K=8.
-Both use inference K = **2, 4, 8, 16, 32, 64, 128, 256** for ImageNet E2 and
-downstream retrieval. With five methods and seed 1227 this is **10 source fits**,
-**80 E2 points** (including 10 E1 points), and **120 sparse + 3 dense** downstream
-evaluations. The selected HF embedding bundles and training recipes are unchanged.
+The shipped campaigns select ResNet-50 training K = **8, 16, 32, 256** and
+ViT-B/16 training K = **8**. All selected ResNet checkpoints use inference
+K = **16, 32, 256**, while ViT uses **3, 12, 48, 96**. These grids apply to
+ImageNet E2 and every downstream retrieval dataset/method. With five methods
+and seed 1227 this is **25 source fits**, **80 E2 points** (15 reused from E1),
+and **140 sparse + 3 dense** downstream evaluations. The new ResNet cells are
+independent source fits, not sequential fine-tuning. Existing K=8 fits and HF
+embedding bundles remain reusable. ResNet-18 shares the ResNet fallback
+inference grid when explicitly selected; the active backbones remain ResNet-50
+and ViT-B/16. The smoke config uses the same ResNet inference grid.
 E2 honors `imagenet.linear_probe` and `imagenet.timing` at every inference K.
 Linear classifiers are refitted per K using training codes, while SAE weights stay
 frozen. E1 metrics are copied at the anchor, including probe/timing provenance.
@@ -265,13 +290,14 @@ Training seeds are repetitions; dense references are measured once and are
 not copied three times to manufacture seed statistics.
 
 The downstream report consumes the campaign's explicit records. It never
-glob-loads unrelated old files or inserts published ImageNet curves.
+glob-loads unrelated old files. No published, Dense or Full-representation
+reference curve or storage marker is drawn in any plot.
 
 | Figure | Exact interpretation |
 |---|---|
 | `quality_<backbone>_<mode>_train-k<K>` | Rows are dataset/protocols; columns are R@1 and mAP@R; x is inference code budget. All points in a curve reuse the stated training-budget checkpoint. |
 | `nonzeros_...` | The same accuracies against measured mean gallery nonzeros. Zero-nonzero collapsed codes remain representable on the axis. |
-| `storage_...` | Accuracy against stored KiB per image (float32 values plus int32 indices). Dense features are a measured point when footprint is supplied; compact code storage is distinct from GPU CSR index bytes. |
+| `storage_...` | Accuracy against stored KiB per image (float32 values plus int32 indices). Only sparse methods are plotted; compact code storage is distinct from GPU CSR index bytes. |
 | `cost_...` | Search wall time per query (ms) and stored KiB/image against inference K. This is amortised cost, not single-query latency. |
 | `paired_...` | MPSAE−CSR, MPSAEv2−CSRv2 and multi-TopK−CSR differences formed within seed before averaging, in percentage points. |
 
@@ -286,7 +312,11 @@ precision and the evaluation/checkpoint IDs used by each row. The manifest lists
 expected/completed points, failures, incomplete records, tables, figures and
 skipped plots. Tables still write when matplotlib is unavailable.
 
-ImageNet `inference_summary` and `e2_generalisation_*` show per-K linear-probe and 1-NN accuracy from fixed SAE checkpoints. No figures or comparison tables import published paper results; Dense curves are measured in this experiment. Downstream retrieval
+ImageNet `inference_summary` and `e2_generalisation_*` show per-K linear-probe and 1-NN accuracy from fixed SAE checkpoints. All figures omit published references and Dense/Full-representation overlays. Measured dense diagnostics remain numerical table entries. Downstream retrieval
 does not train a classifier; target-dataset linear probing is a separate
 experiment. Search speedup should only be claimed from appropriately paired
 timings; quality plots do not imply sparse-serving speedup by themselves.
+
+Changing these selections creates a new plan ID. Use the newly generated
+`reports/<name>/<plan_id>/` directory (or its updated `latest.json` pointer).
+Historical PNG/PDF files are not rewritten merely by pulling source code.
