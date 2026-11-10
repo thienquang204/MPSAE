@@ -326,6 +326,7 @@ def test_e2_selection_reuses_old_points_without_reporting_unselected_budgets(run
 
     cell = Cell("ff2048", "csr", 8, 1227)
     settings = runs.RunSettings(root=tmp_path / "runs", e2_k_values=(8, 64, 256, 1024),
+                               linear_probe=False, measure_timing=False,
                                fit=SimpleNamespace(device="cpu"))
     path = runs.cell_dir(settings, cell) / "eval_e2.json"
     old = [{"k": k, "top1": 70.0 + k / 10000, "nnz_mean": float(k)} for k in (2, 8, 64)]
@@ -359,7 +360,46 @@ def test_e2_without_override_keeps_registered_grid(runs, tmp_path, monkeypatch):
         calls.append(k)
         return {"k": k, "top1": 75.0, "nnz_mean": float(k)}
     monkeypatch.setattr(runs, "evaluate_at", evaluate)
-    settings = runs.RunSettings(root=tmp_path / "runs", fit=SimpleNamespace(device="cpu"))
+    settings = runs.RunSettings(root=tmp_path / "runs", fit=SimpleNamespace(device="cpu"),
+                               linear_probe=False, measure_timing=False)
     result = runs.run_e2(cell, _bundle(), settings, signature="fit", e1={"k": 8, "top1": 75.0})
     assert calls == [k for k in BACKBONES["rn18"].k_list if k != 8]
     assert [point["k"] for point in result["points"]] == list(BACKBONES["rn18"].k_list)
+
+
+def test_e2_upgrades_legacy_accuracy_reuses_anchor_and_resumes_probe(runs, tmp_path, monkeypatch):
+    from mpsae.io import atomic_json, read_json
+
+    cell = Cell("ff2048", "csr", 8, 1227)
+    settings = runs.RunSettings(root=tmp_path / "runs", cache_dir=tmp_path / "cache",
+                               retain_codes=False, e2_k_values=(2, 8),
+                               fit=SimpleNamespace(device="cpu"))
+    path = runs.cell_dir(settings, cell) / "eval_e2.json"
+    old = {"k": 2, "top1": 75.0, "nnz_mean": 2.0}
+    atomic_json(path, {"signature": "fit", "points": [old]})
+    anchor = {"k": 8, "top1": 75.0, "probe_top1": 80.0, "probe_epochs": 10,
+              "nnz_mean": 7.0, "timing_config": settings.timing_identity(), "timing_status": "success"}
+    evaluator, captured = _fake_evaluator()
+    monkeypatch.setattr(runs, "_evaluate_module", lambda: evaluator)
+
+    def no_accuracy(*args, **kwargs):
+        pytest.fail("completed 1-NN must be reused")
+
+    def interrupt_timing(*args, **kwargs):
+        saved = read_json(path)["points"][0]
+        assert saved["probe_top1"] == 80.0
+        assert saved["signature"] == "fit"
+        raise KeyboardInterrupt("interrupted after probe")
+
+    evaluator.top1_accuracy = no_accuracy
+    evaluator.time_sparse_matmul = interrupt_timing
+    with pytest.raises(KeyboardInterrupt):
+        runs.run_e2(cell, _bundle(), settings, signature="fit", e1=anchor)
+    evaluator.linear_probe = no_accuracy
+    evaluator.time_sparse_matmul = lambda *a, **kw: {"milliseconds_per_batch": 2.0}
+    result = runs.run_e2(cell, _bundle(), settings, signature="fit", e1=anchor)
+    assert result["points"][1] == anchor
+    assert result["points"][0]["timing_status"] == "success"
+    assert result["points"][0]["retrieval_ms"] == 2.0
+    evaluator.encode_split = no_accuracy
+    assert runs.run_e2(cell, _bundle(), settings, signature="fit", e1=anchor) == result

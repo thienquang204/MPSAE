@@ -6,20 +6,9 @@ same numbers by construction. Each returns the paths it wrote, or an empty list
 when the data it needs is absent: a half-finished grid should still produce
 every figure it can, and ``build_all`` must not die because one panel is empty.
 
-Which figure answers which claim:
-
-* ``figure_e1_curves``   -- does our objective beat CSR/CSRv2 at matched K?
-* ``figure_e1_delta``    -- the same claim, paired per seed. This is the figure
-  the headline sentence of the paper points at.
-* ``figure_e2_generalisation`` -- CSRv2 §3 asserts that CSR's multi-TopK loss
-  "ensures CSR could generalize to different k at test time". Neither paper
-  measures it. This panel grid does.
-* ``figure_e2_nnz``      -- where a larger nominal K stops buying real sparsity,
-  because after the ReLU a code can hold far fewer than K nonzeros.
-* ``figure_training``    -- our diagnostic, not a paper figure.
-* ``figure_backbone_summary`` -- the headline overview across all five backbones.
-* ``figure_efficiency``  -- the accuracy/latency/footprint trade-off CSR argues
-  for, in the two units a practitioner actually pays in.
+E1 compares matched training/inference K. E2 holds the SAE checkpoint fixed
+and measures accuracy, realised sparsity and costs over inference K. Only
+experiment measurements enter these figures; training diagnostics are separate.
 
 Captions are written beside every figure (``<name>.caption.txt``) so the claim
 travels with the image.
@@ -27,16 +16,14 @@ travels with the image.
 from __future__ import annotations
 
 from pathlib import Path
-import re
 from typing import Any, Mapping, Sequence
 
 from ..config import BACKBONE_ORDER, BACKBONES, BASELINES, METHODS, OURS, SEEDS
 from ..logs import get_logger
-from . import reference
 from .aggregate import (aggregate_e1, aggregate_e2, load_dense_references, load_runs,
                         paired_difference, training_summary, validate_result_variant, write_tables)
-from .style import (BACKDROP_STYLE, BAND_ALPHA, COLUMN_WIDTH, DENSE_STYLE, PAGE_WIDTH,
-                    PUBLISHED_STYLE, apply_style, backbone_label, label_for,
+from .style import (BAND_ALPHA, COLUMN_WIDTH, DENSE_STYLE, PAGE_WIDTH,
+                    apply_style, backbone_label, label_for,
                     method_style, save_figure, seed_caption)
 
 
@@ -107,17 +94,7 @@ def _defined(xs: Sequence[Any], ys: Sequence[Any]) -> tuple[list[float], list[fl
     return out_x, out_y
 
 
-def _n_note(counts: Sequence[int]) -> str:
-    """``" (n=3)"`` or ``" (n=2-3)"``. A mean is never shown without its n."""
-    values = sorted({count for count in counts if count})
-    if not values:
-        return ""
-    if len(values) == 1:
-        return f" (n={values[0]})"
-    return f" (n={values[0]}–{values[-1]})"
-
-
-def _log2_k_axis(ax: Any, ks: Sequence[float], *, label: str = "Active dimension $K$",
+def _log2_k_axis(ax: Any, ks: Sequence[float], *, label: str = "Train $K$",
                  compact: bool = False) -> None:
     """Log2 x-axis ticked at exactly the trained K values, nothing between.
 
@@ -152,7 +129,7 @@ def _plot_method(ax: Any, xs, means, stds, counts, *, method: str,
               "linestyle": style["linestyle"], "zorder": style["zorder"]}
     kwargs.update(overrides)
     text = style["label"] if label is None else label
-    ax.plot(xs, means, label=f"{text}{_n_note(counts)}", **kwargs)
+    ax.plot(xs, means, label=text, **kwargs)
     if band and any(std is not None for std in stds):
         lower = [mean - (std or 0.0) for mean, std in zip(means, stds)]
         upper = [mean + (std or 0.0) for mean, std in zip(means, stds)]
@@ -161,71 +138,23 @@ def _plot_method(ax: Any, xs, means, stds, counts, *, method: str,
                         zorder=style["zorder"] - 0.5)
 
 
-def _overlay_published(ax: Any, backbone: str) -> list[str]:
-    """Draw the published reference curves. Returns their provenance strings."""
-    provenance: list[str] = []
-    for entry in reference.overlays(backbone):
-        style = dict(PUBLISHED_STYLE.get(str(entry["series"]), {}))
-        curve = entry["curve"]
-        if not isinstance(curve, Mapping) or not curve:
-            continue
-        ks = sorted(curve)
-        ax.plot(ks, [curve[k] for k in ks], color=style.get("color", "#9E9E9E"),
-                marker=style.get("marker", "x"), linestyle=style.get("linestyle", "--"),
-                linewidth=0.9, markersize=4.0, markeredgewidth=0.9,
-                zorder=style.get("zorder", 1.0), label=str(entry["label"]))
-        provenance.append(f"{entry['label']}: {entry['provenance']}")
-    return provenance
+def _annotate_rule(ax: Any, value: float) -> None:
+    """Our measured dense accuracy; details belong in the caption."""
+    ax.axhline(value, label="Dense", **DENSE_STYLE)
 
 
-def _annotate_rule(ax: Any, value: float, text: str, *, color: str | None = None,
-                   side: str = "right", below: bool = False) -> None:
-    """Horizontal upper-reference rule with its label pinned to one edge.
-
-    The published dense accuracy and our measured one are usually within a
-    fraction of a point of each other -- that closeness is the result, not a
-    problem -- so their labels would overprint if both sat in the same corner.
-    Callers place one left and one right.
-    """
-    kwargs = dict(DENSE_STYLE)
-    if color is not None:
-        kwargs["color"] = color
-    ax.axhline(value, **kwargs)
-    x = 1.0 if side == "right" else 0.0
-    offset = (-3, -3.5) if below else (-3, 3.0)
-    if side != "right":
-        offset = (3, offset[1])
-    ax.annotate(text, xy=(x, value), xycoords=("axes fraction", "data"),
-                xytext=offset, textcoords="offset points",
-                ha=side, va="top" if below else "bottom",
-                fontsize=6.8, color=kwargs["color"])
-
-
-#: Trailing " (n=3)" / " (n=2–3)" added by ``_n_note``.
-_N_SUFFIX = re.compile(r"\s*\(n=[0-9]+(?:–[0-9]+)?\)$")
-
-
-def _dedup_legend(fig: Any, axes: Sequence[Any], *, ncol: int, y: float = -0.01,
-                  strip_counts: bool = False) -> None:
-    """One shared legend below the panels, each label once, in first-seen order.
-
-    ``strip_counts`` drops the ``(n=...)`` suffix before de-duplicating. Across
-    panels the seed count can legitimately differ -- one backbone may have a
-    missing seed -- and without this the same method would appear twice in the
-    shared legend. The per-panel counts stay in the tables, which is where a
-    reader checks them.
-    """
+def _dedup_legend(fig: Any, axes: Sequence[Any], *, ncol: int, y: float = -0.01) -> None:
+    """Shared short labels; per-point seed counts remain in the tables."""
     handles: list[Any] = []
     labels: list[str] = []
     for ax in axes:
         for handle, label in zip(*ax.get_legend_handles_labels()):
-            if strip_counts:
-                label = _N_SUFFIX.sub("", label)
             if label not in labels:
                 handles.append(handle)
                 labels.append(label)
     if not handles:
         return
+    ncol = min(ncol, 3 if fig.get_figwidth() < 5 else 6, len(handles))
     try:
         # Constrained layout reserves room for an "outside" legend, so it
         # cannot land on top of the x tick labels the way a bbox offset can.
@@ -243,8 +172,7 @@ def figure_e1_curves(rows: Sequence[Mapping[str, Any]], out_dir: str | Path, bac
     """Accuracy vs K for every method on one backbone. ``rows`` from ``aggregate_e1``.
 
     The std band is the sample std over seeds, not a confidence interval, and
-    the caption says so. Published curves are overlaid only on ``ff2048``,
-    where they are measured on the same backbone, and only in grey dashes.
+    the caption says so. All plotted results come from the selected experiment.
     """
     log = get_logger("report")
     subset = _for_backbone(rows, backbone)
@@ -252,7 +180,7 @@ def figure_e1_curves(rows: Sequence[Mapping[str, Any]], out_dir: str | Path, bac
         log.info("skip figure_e1_curves[%s]: no aggregated E1 rows", backbone)
         return []
     plt = _pyplot()
-    fig, ax = plt.subplots(figsize=(COLUMN_WIDTH, 2.55))
+    fig, ax = plt.subplots(figsize=(COLUMN_WIDTH, 2.8), layout="constrained")
     ks: list[float] = []
     for method in _methods_present(subset):
         xs, means, stds, counts = _series(subset, method=method)
@@ -261,30 +189,16 @@ def figure_e1_curves(rows: Sequence[Mapping[str, Any]], out_dir: str | Path, bac
         ks.extend(xs)
         _plot_method(ax, xs, means, stds, counts, method=method)
 
-    provenance = _overlay_published(ax, backbone)
-    published_dense = reference.dense_reference(backbone)
-    if published_dense is not None:
-        _annotate_rule(ax, float(published_dense["top1"]),
-                       f"{published_dense['label']} {published_dense['top1']:.2f}", side="right")
-        provenance.append(f"{published_dense['label']}: {published_dense['provenance']}")
     if measured_dense and measured_dense.get("top1") is not None:
-        # Left edge, and below the rule: it normally sits within ~0.05 of the
-        # published value, so sharing the right corner would overprint it.
-        _annotate_rule(ax, float(measured_dense["top1"]),
-                       f"dense, ours {float(measured_dense['top1']):.2f}",
-                       color="#111111", side="left", below=True)
-
+        _annotate_rule(ax, float(measured_dense["top1"]))
     _log2_k_axis(ax, ks)
-    ax.set_ylabel("ImageNet-1K 1-NN top-1 (%)")
+    ax.set_ylabel("1-NN (%)")
     ax.set_title(backbone_label(backbone))
-    ax.legend(loc="lower right", ncol=1, fontsize=6.9)
+    _dedup_legend(fig, [ax], ncol=3)
     caption = (
-        "1-NN top-1 on ImageNet-1K as a function of the active dimension K, "
-        f"{backbone_label(backbone)}. "
-        f"{seed_caption(seeds)} "
-        "Grey dashed series are values transcribed from the published papers, not measured "
-        "by us"
-        + (" (" + "; ".join(provenance) + ")." if provenance else ".")
+        f"ImageNet 1-NN accuracy for {backbone_label(backbone)}. Each point uses a model "
+        "trained and evaluated at the same K. Dense, when present, is measured in this "
+        f"experiment. {seed_caption(seeds)}"
     )
     return save_figure(fig, out_dir, f"e1_curves_{backbone}", caption=caption)
 
@@ -316,7 +230,7 @@ def figure_e1_delta(records: Sequence[Mapping[str, Any]], out_dir: str | Path, b
         log.info("skip figure_e1_delta[%s vs %s]: no seed-paired cells", backbone, control)
         return []
 
-    fig, ax = plt.subplots(figsize=(COLUMN_WIDTH, 2.4))
+    fig, ax = plt.subplots(figsize=(COLUMN_WIDTH, 2.7), layout="constrained")
     ks: list[float] = []
     # A small horizontal offset per method keeps overlapping error bars legible
     # on a log2 axis; it is multiplicative so it looks uniform at every K.
@@ -339,14 +253,13 @@ def figure_e1_delta(records: Sequence[Mapping[str, Any]], out_dir: str | Path, b
                     color=style["color"], marker=style["marker"], linestyle=style["linestyle"],
                     linewidth=1.1, markersize=3.8, capsize=2.0, elinewidth=0.8,
                     zorder=style["zorder"],
-                    label=f"{style['label']} − {label_for(control)}"
-                          f"{_n_note([n for _, _, _, n in points])}")
+                    label=style["label"])
 
     ax.axhline(0.0, color="#444444", linewidth=0.7, linestyle="-", zorder=1.0)
     _log2_k_axis(ax, ks)
-    ax.set_ylabel(f"Δ top-1 vs {label_for(control)} (pp)")
-    ax.set_title(f"{backbone_label(backbone)} — paired over seeds")
-    ax.legend(loc="best", fontsize=6.9)
+    ax.set_ylabel("Δ 1-NN (pp)")
+    ax.set_title(f"{backbone_label(backbone)} · vs {label_for(control)}")
+    _dedup_legend(fig, [ax], ncol=3)
     caption = (
         f"Per-seed improvement in 1-NN top-1 over {label_for(control)} on "
         f"{backbone_label(backbone)}, "
@@ -361,133 +274,78 @@ def figure_e1_delta(records: Sequence[Mapping[str, Any]], out_dir: str | Path, b
 
 # ------------------------------------------------------- E2: one checkpoint, many K
 
-def figure_e2_generalisation(rows: Sequence[Mapping[str, Any]], out_dir: str | Path,
-                             backbone: str, *,
-                             e1_rows: Sequence[Mapping[str, Any]] | None = None,
-                             seeds: Sequence[int] = SEEDS) -> list[Path]:
-    """Small multiples, one panel per E2 anchor K. ``rows`` from ``aggregate_e2``.
-
-    ``e1_rows`` (from ``aggregate_e1``) is drawn faintly behind each panel as
-    the "trained at this K" reference, rather than a guaranteed upper bound.
-    """
-    log = get_logger("report")
-    subset = _for_backbone(rows, backbone)
-    if not subset:
-        log.info("skip figure_e2_generalisation[%s]: no aggregated E2 rows", backbone)
+def _inference_figure(rows, out_dir, name, *, x="k", seeds=SEEDS, dense=None):
+    """One row per backbone/training K. Every curve is one fixed-checkpoint sweep."""
+    groups = sorted({(row["backbone"], int(row["anchor_k"])) for row in rows})
+    metrics = [(field, label) for field, label in
+               (("probe_top1", "Linear probe (%)"), ("top1", "1-NN (%)"))
+               if any(row.get(f"{field}_mean") is not None for row in rows)]
+    if not groups or not metrics or not any(
+            row.get(x if x == "k" else f"{x}_mean") is not None for row in rows):
         return []
-    anchors = sorted({int(row["anchor_k"]) for row in subset})
-    methods = _methods_present(subset)
     plt = _pyplot()
-    ncol = min(3, len(anchors))
-    nrow = (len(anchors) + ncol - 1) // ncol
-    fig, grid_axes = plt.subplots(nrow, ncol, figsize=(PAGE_WIDTH, 1.95 * nrow + 0.5),
-                                 squeeze=False, sharey=True, layout="constrained")
-    axes = [grid_axes[row][col] for row in range(nrow) for col in range(ncol)]
-    e1_subset = _for_backbone(e1_rows or [], backbone)
-
-    for ax, anchor in zip(axes, anchors):
-        panel = [row for row in subset if int(row["anchor_k"]) == anchor]
-        ks: list[float] = []
-        for method in methods:
-            xs, means, stds, counts = _series(panel, method=method)
-            if not xs:
-                continue
-            ks.extend(xs)
-            _plot_method(ax, xs, means, stds, counts, method=method, markersize=2.8)
-            at_anchor = [(x, y) for x, y in zip(xs, means) if x == anchor]
-            if at_anchor:
-                ax.scatter(*zip(*at_anchor), s=30, facecolors="none",
-                           edgecolors=method_style(method)["color"], linewidths=0.8,
-                           zorder=5, label="_nolegend_")
-            if e1_subset:
-                bx, bmeans, _, _ = _series(e1_subset, method=method)
-                if bx:
-                    ax.plot(bx, bmeans, color=method_style(method)["color"],
-                            linestyle="-", marker="", label="_nolegend_", **BACKDROP_STYLE)
-        ax.axvline(anchor, color="#444444", linewidth=0.7, linestyle=(0, (2, 2)), zorder=0.9)
-        # Flip the label to the left of the rule once the anchor is past the
-        # midpoint of the budget range, otherwise it runs off the panel.
-        budgets = sorted({float(value) for value in ks}) or [float(anchor)]
-        past_middle = anchor >= budgets[len(budgets) // 2]
-        ax.annotate(f"trained at $K^\\ast$={anchor}", xy=(anchor, 1.0),
-                    xycoords=("data", "axes fraction"),
-                    xytext=(-3 if past_middle else 3, -8), textcoords="offset points",
-                    fontsize=6.6, color="#444444", ha="right" if past_middle else "left")
-        _log2_k_axis(ax, ks, label="Inference $K$")
-        ax.set_title(f"$K^\\ast$ = {anchor}", fontsize=8.4)
-    for ax in axes[len(anchors):]:
-        ax.set_visible(False)
-    for row in range(nrow):
-        grid_axes[row][0].set_ylabel("1-NN top-1 (%)")
-
-    _dedup_legend(fig, axes[:len(anchors)], ncol=min(5, len(methods)), y=-0.03)
-    fig.suptitle(f"One checkpoint, every inference K — {backbone_label(backbone)}")
+    width = PAGE_WIDTH if len(metrics) > 1 else COLUMN_WIDTH
+    fig, axes = plt.subplots(len(groups), len(metrics), squeeze=False,
+                             figsize=(width, 2.45 * len(groups) + 0.4), layout="constrained")
+    for i, (backbone, anchor) in enumerate(groups):
+        panel = [row for row in rows if row["backbone"] == backbone and row["anchor_k"] == anchor]
+        for ax, (field, label) in zip(axes[i], metrics):
+            for method in _methods_present(panel):
+                # Follow inference K, including on the measured-nnz axis where
+                # increasing K need not increase the realised number of nonzeros.
+                ordered = sorted((r for r in panel if r["method"] == method), key=lambda r: r["k"])
+                points = [(r, r.get(x if x == "k" else f"{x}_mean")) for r in ordered]
+                points = [(r, value) for r, value in points if value is not None
+                          and r.get(f"{field}_mean") is not None]
+                if not points:
+                    continue
+                _plot_method(ax, [value for r, value in points],
+                             [r[f"{field}_mean"] for r, value in points],
+                             [r.get(f"{field}_std") for r, value in points],
+                             [r.get(f"{field}_n", 0) for r, value in points], method=method)
+                for r, value in points:
+                    if r["k"] == anchor:
+                        ax.scatter([value], [r[f"{field}_mean"]], s=40, facecolors="none",
+                                   edgecolors=method_style(method)["color"], linewidths=0.8,
+                                   zorder=5, label="_nolegend_")
+            measured = (dense or {}).get(backbone, {}).get(field)
+            if measured is not None:
+                _annotate_rule(ax, float(measured))
+            if x == "k":
+                ax.axvline(anchor, color="#999999", linewidth=0.65, linestyle=":", zorder=0)
+                _log2_k_axis(ax, [r["k"] for r in panel], label="Inference $K$")
+            else:
+                ax.set_xscale("symlog", base=2, linthresh=1)
+                ax.set_xlabel("Mean nonzeros (gallery)")
+            ax.set_ylabel(label)
+            ax.set_title(f"{backbone_label(backbone)} · Train $K$={anchor}", fontsize=9)
+            if not any(r.get(f"{field}_mean") is not None for r in panel):
+                ax.text(0.5, 0.5, "Not measured", ha="center", va="center", transform=ax.transAxes)
+    _dedup_legend(fig, list(axes.flat), ncol=6)
     caption = (
-        "A single checkpoint trained at K* (dashed vertical) evaluated at every K in the grid, "
-        f"{backbone_label(backbone)}. CSRv2 §3 states that CSR's multi-TopK loss \"ensures CSR "
-        "could generalize to different k at test time\"; neither paper measures it, and this is "
-        "that measurement. The faint line behind each panel is the per-K E1 curve of the same "
-        "method — models trained at each K — and is a per-K reference, not a guaranteed "
-        f"upper bound. Hollow rings mark inference K equal to training K*. {seed_caption(seeds)}"
+        "ImageNet accuracy. Each method/seed uses the same frozen SAE checkpoint throughout "
+        "each inference-K curve; rows separate backbones and training K. Linear probes are fitted "
+        "separately on training codes at each inference K and evaluated on validation codes. "
+        "The probe classifier is refitted; the SAE is not. Circles outline the training budget. "
+        "Curves connect increasing inference K. Mean nonzeros, when used, count measured gallery "
+        "entries and can be smaller than K. Dense, when present, is our measured reference. "
+        f"CSR-MTK denotes CSR multi-TopK. {seed_caption(seeds)}"
     )
-    return save_figure(fig, out_dir, f"e2_generalisation_{backbone}", caption=caption)
+    return save_figure(fig, out_dir, name, caption=caption)
+
+
+def figure_e2_generalisation(rows: Sequence[Mapping[str, Any]], out_dir: str | Path,
+                             backbone: str, *, e1_rows=None, seeds=SEEDS,
+                             measured_dense=None) -> list[Path]:
+    return _inference_figure(_for_backbone(rows, backbone), out_dir,
+                             f"e2_generalisation_{backbone}", seeds=seeds,
+                             dense={backbone: measured_dense or {}})
 
 
 def figure_e2_nnz(rows: Sequence[Mapping[str, Any]], out_dir: str | Path, backbone: str, *,
-                  e1_rows: Sequence[Mapping[str, Any]] | None = None,
-                  seeds: Sequence[int] = SEEDS) -> list[Path]:
-    """Accuracy vs the *measured* mean nnz. ``rows`` from ``aggregate_e2``.
-
-    Nominal K is an upper bound on the number of nonzeros, not the count: the
-    Top-K gate is followed by a ReLU, so negative selected pre-activations are
-    zeroed and a code can be far sparser than its budget. Plotting against the
-    measured nnz shows where raising K stops buying anything real.
-    """
-    log = get_logger("report")
-    subset = _for_backbone(rows, backbone)
-    e1_subset = _for_backbone(e1_rows or [], backbone)
-    if not subset and not e1_subset:
-        log.info("skip figure_e2_nnz[%s]: no rows carrying nnz", backbone)
-        return []
-    plt = _pyplot()
-    fig, ax = plt.subplots(figsize=(COLUMN_WIDTH, 2.55))
-    drew = False
-    for method in _methods_present(list(e1_subset) + list(subset)):
-        xs, means, stds, counts = _series(e1_subset, method=method, x="nnz")
-        if xs:
-            drew = True
-            _plot_method(ax, xs, means, stds, counts, method=method,
-                         label=f"{label_for(method)}, trained at each $K$")
-        # Each anchor checkpoint sweeps its own nnz range; thin and unlabelled so
-        # the trained-at-each-K curves stay the subject of the panel.
-        for anchor in sorted({int(row["anchor_k"]) for row in subset
-                              if row["method"] == method}):
-            panel = [row for row in subset
-                     if row["method"] == method and int(row["anchor_k"]) == anchor]
-            ax_x, ax_y, _, _ = _series(panel, method=method, x="nnz")
-            if ax_x:
-                drew = True
-                ax.plot(ax_x, ax_y, color=method_style(method)["color"], marker="",
-                        linestyle="-", label="_nolegend_", **BACKDROP_STYLE)
-    if not drew:
-        log.info("skip figure_e2_nnz[%s]: nnz_mean missing from every row", backbone)
-        plt.close(fig)
-        return []
-
-    ax.set_xscale("log", base=2)
-    ax.set_xlabel("Measured mean nonzeros per code")
-    ax.set_ylabel("1-NN top-1 (%)")
-    ax.set_title(f"Accuracy vs realised sparsity — {backbone_label(backbone)}")
-    ax.legend(loc="lower right", fontsize=6.6)
-    caption = (
-        f"1-NN top-1 against the mean number of nonzeros actually present in the code, "
-        f"{backbone_label(backbone)}. The Top-K gate is followed by a ReLU, so a code can hold "
-        "fewer than K nonzeros and the nominal budget overstates the cost; the point at which a "
-        "curve flattens is the point at which raising K stops buying real sparsity. Bold curves "
-        "are models trained at each K (E1); faint curves are single E2 checkpoints swept across "
-        f"inference K. {seed_caption(seeds)}"
-    )
-    return save_figure(fig, out_dir, f"e2_nnz_{backbone}", caption=caption)
+                  e1_rows=None, seeds=SEEDS) -> list[Path]:
+    return _inference_figure(_for_backbone(rows, backbone), out_dir,
+                             f"e2_nnz_{backbone}", x="nnz", seeds=seeds)
 
 
 # ------------------------------------------------------------------ diagnostic
@@ -517,8 +375,6 @@ def figure_training(rows: Sequence[Mapping[str, Any]], out_dir: str | Path, back
     fig, grid_axes = plt.subplots(2, 2, figsize=(PAGE_WIDTH, 4.1), squeeze=False,
                                   layout="constrained")
     (ax_total, ax_parts), (ax_k, ax_dead) = grid_axes
-    # The contrastive and OT terms are mutually exclusive by method, so one
-    # "coupling" panel can show both without ever overlaying them.
     components = (("loss_mse_k", "-", "MSE$_K$"), ("loss_mse_4k", "--", "MSE$_{4K}$"),
                   ("loss_aux", ":", "AuxK"), ("loss_contrastive", "-.", "contrastive"),
                   ("loss_ot", (0, (3, 1, 1, 1)), "OT gap"))
@@ -543,8 +399,8 @@ def figure_training(rows: Sequence[Mapping[str, Any]], out_dir: str | Path, back
 
     for ax, title, ylabel, logscale in (
             (ax_total, "Total loss", "loss", True),
-            (ax_parts, "Loss components (line style)", "loss", True),
-            (ax_k, "Realised k-annealing", "training $k_t$", False),
+            (ax_parts, "Loss terms", "loss", True),
+            (ax_k, "Training budget", "Train $K$", False),
             (ax_dead, "Dead latents", "fraction of $h$", False)):
         ax.set_title(title, fontsize=8.6)
         ax.set_xlabel("step")
@@ -556,7 +412,7 @@ def figure_training(rows: Sequence[Mapping[str, Any]], out_dir: str | Path, back
         if handles:
             unique = dict(zip(labels, handles))
             ax.legend(unique.values(), unique.keys(), fontsize=6.4, loc="best", ncol=2)
-    fig.suptitle(f"Training diagnostics — {backbone_label(backbone)}, K={chosen}, all seeds")
+    fig.suptitle(f"{backbone_label(backbone)} · Train $K$={chosen}")
     caption = (
         f"Training diagnostics for {backbone_label(backbone)} at K={chosen}; one line per method "
         "per seed, no averaging, because seed disagreement is the signal here. Internal "
@@ -607,21 +463,19 @@ def figure_backbone_summary(rows: Sequence[Mapping[str, Any]], out_dir: str | Pa
             _plot_method(ax, xs, mean_values, stds, counts, method=method, markersize=2.8)
         measured = (dense or {}).get(backbone)
         if measured and measured.get("top1") is not None:
-            _annotate_rule(ax, float(measured["top1"]),
-                           f"dense {float(measured['top1']):.2f}", color="#111111")
+            _annotate_rule(ax, float(measured["top1"]))
         _log2_k_axis(ax, ks)
         ax.set_title(backbone_label(backbone), fontsize=8.4)
     for ax in axes[len(present):]:
         ax.set_visible(False)
     for row in range(nrow):
-        grid_axes[row][0].set_ylabel("1-NN top-1 (%)")
+        grid_axes[row][0].set_ylabel("1-NN (%)")
 
     # Seed counts can differ between backbones, so they are dropped here rather
     # than splitting one method into two legend entries; the tables carry n.
-    _dedup_legend(fig, axes[:len(present)], ncol=min(5, len(METHODS)), y=-0.02,
-                  strip_counts=True)
+    _dedup_legend(fig, axes[:len(present)], ncol=min(5, len(METHODS)), y=-0.02)
     caption = (
-        "1-NN top-1 on ImageNet-1K against the active dimension K, for every backbone. "
+        "1-NN top-1 on ImageNet-1K against training K, for every backbone; inference K equals training K. "
         f"{seed_caption(seeds)} Per-series n is in "
         "the accompanying table, since it can differ between panels. The black dashed rule in each "
         "panel is our own dense (un-compressed) 1-NN accuracy for that backbone. "
@@ -636,49 +490,82 @@ def figure_backbone_summary(rows: Sequence[Mapping[str, Any]], out_dir: str | Pa
 # ------------------------------------------------------------------ efficiency
 
 def figure_efficiency(rows: Sequence[Mapping[str, Any]], out_dir: str | Path,
-                      backbone: str) -> list[Path]:
-    """Accuracy vs retrieval time and vs index size. ``rows`` from ``aggregate_e1``.
-
-    This is the trade-off CSR argues for, in the two units a deployment pays in:
-    query latency and bytes on disk. K increases along each curve, so a curve
-    that bends left-and-up is strictly better at equal cost.
-    """
-    log = get_logger("report")
+                      backbone: str, *, seeds=SEEDS) -> list[Path]:
+    """Measured costs of inference sweeps; never connect distinct training K."""
     subset = _for_backbone(rows, backbone)
-    panels = [("search_seconds", "Retrieval wall-clock for 50K queries (s)"),
-              ("index_bytes", "Index size (bytes)")]
-    usable = [(field, label) for field, label in panels
-              if any(row.get(f"{field}_mean") is not None for row in subset)]
-    if not usable:
-        log.info("skip figure_efficiency[%s]: neither timing nor index size recorded", backbone)
+    if not subset:
         return []
-
+    anchors = sorted({row.get("anchor_k", row["k"]) for row in subset})
+    fields = [(field, label, scale) for field, label, scale in
+              (("search_seconds", "Search time (s)", 1),
+               ("index_bytes", "Index (MiB)", 2**20))
+              if any(row.get(f"{field}_mean") is not None for row in subset)]
+    if not fields:
+        return []
     plt = _pyplot()
-    fig, grid_axes = plt.subplots(1, len(usable), figsize=(COLUMN_WIDTH * len(usable), 2.5),
-                                 squeeze=False, sharey=True, layout="constrained")
-    axes = [grid_axes[0][index] for index in range(len(usable))]
-    for ax, (field, xlabel) in zip(axes, usable):
-        for method in _methods_present(subset):
-            xs, means, stds, counts = _series(subset, method=method, x=field)
-            if not xs:
-                continue
-            _plot_method(ax, xs, means, stds, counts, method=method, band=False,
-                         markersize=3.2)
-        ax.set_xscale("log")
-        ax.set_xlabel(xlabel)
-    axes[0].set_ylabel("1-NN top-1 (%)")
-    _dedup_legend(fig, axes, ncol=min(5, len(METHODS)), y=-0.05)
-    fig.suptitle(f"Fidelity vs cost — {backbone_label(backbone)}")
-    caption = (
-        f"1-NN top-1 against retrieval cost on {backbone_label(backbone)}; K increases along each "
-        "curve, so up-and-left is strictly better. Markers are means over seeds; the cost axes "
-        "show no band because wall-clock time is hardware- and load-dependent and its spread is "
-        "not a property of the method. Both axes are logarithmic."
-    )
-    return save_figure(fig, out_dir, f"efficiency_{backbone}", caption=caption)
+    fig, axes = plt.subplots(len(anchors), len(fields), squeeze=False,
+                             figsize=(COLUMN_WIDTH * len(fields), 2.45 * len(anchors) + 0.4),
+                             layout="constrained")
+    for i, anchor in enumerate(anchors):
+        panel = [r for r in subset if r.get("anchor_k", r["k"]) == anchor]
+        for ax, (field, label, scale) in zip(axes[i], fields):
+            for method in _methods_present(panel):
+                points = sorted((r for r in panel if r["method"] == method and
+                                 r.get(f"{field}_mean") is not None and r.get("top1_mean") is not None),
+                                key=lambda r: r["k"])
+                if points:
+                    _plot_method(ax, [r[f"{field}_mean"] / scale for r in points],
+                                 [r["top1_mean"] for r in points], [None] * len(points),
+                                 [], method=method, band=False)
+            ax.set_xscale("symlog", linthresh=0.001)
+            ax.set_xlabel(label)
+            ax.set_ylabel("1-NN (%)")
+            ax.set_title(f"{backbone_label(backbone)} · Train $K$={anchor}", fontsize=9)
+    _dedup_legend(fig, list(axes.flat), ncol=6)
+    return save_figure(fig, out_dir, f"efficiency_{backbone}", caption=(
+        "ImageNet 1-NN accuracy versus measured search time for the full validation set and "
+        "index memory. Curves connect increasing inference K from the same training checkpoint. "
+        "Search time excludes encoding. It is wall time, not isolated per-query GPU latency. "
+        f"Missing costs are omitted. {seed_caption(seeds)}"))
 
 
 # ----------------------------------------------------------------------- driver
+
+def figure_e2_cost(rows, out_dir, backbone, *, seeds=SEEDS):
+    subset = _for_backbone(rows, backbone)
+    anchors = sorted({r["anchor_k"] for r in subset})
+    fields = [(field, label, scale) for field, label, scale in
+              (("search_seconds", "Search time (s)", 1),
+               ("retrieval_ms", "Matmul (ms/batch)", 1),
+               ("index_bytes", "Index (MiB)", 1 / 2**20))
+              if any(r.get(f"{field}_mean") is not None for r in subset)]
+    if not anchors or not fields:
+        return []
+    plt = _pyplot()
+    fig, axes = plt.subplots(len(anchors), len(fields), squeeze=False,
+                             figsize=(PAGE_WIDTH if len(fields) > 1 else COLUMN_WIDTH,
+                                      2.45 * len(anchors) + 0.4), layout="constrained")
+    for i, anchor in enumerate(anchors):
+        panel = [r for r in subset if r["anchor_k"] == anchor]
+        for ax, (field, label, scale) in zip(axes[i], fields):
+            for method in _methods_present(panel):
+                xs, means, stds, counts = _series(panel, method=method, y=field)
+                if xs:
+                    _plot_method(ax, xs, [v * scale for v in means],
+                                 [v * scale if v is not None else None for v in stds],
+                                 counts, method=method)
+            _log2_k_axis(ax, [r["k"] for r in panel], label="Inference $K$")
+            ax.set_ylabel(label)
+            ax.set_title(f"Train $K$={anchor}", fontsize=9)
+    _dedup_legend(fig, list(axes.flat), ncol=6)
+    fig.suptitle(backbone_label(backbone))
+    return save_figure(fig, out_dir, f"e2_cost_{backbone}", caption=(
+        "Costs from the same fixed SAE checkpoint at each inference K. Search time covers "
+        "the full ImageNet validation query set, excluding encoding. Matmul time is the "
+        "sparse scoring benchmark per configured query batch (512 by default), not per-query "
+        "latency or end-to-end retrieval time. Index memory is from that benchmark. Timing "
+        f"settings and skipped measurements remain in eval_e2.json. {seed_caption(seeds)}"))
+
 
 def build_all(root: str | Path, out_dir: str | Path, *,
               backbones: Sequence[str] | None = None,
@@ -752,8 +639,7 @@ def build_all(root: str | Path, out_dir: str | Path, *,
         rows = [{"backbone": name, "dim": BACKBONES[name].dim if name in BACKBONES else None,
                  "top1_mean": payload.get("top1"), "top1_std": None, "top1_n": 1,
                  "probe_top1_mean": payload.get("probe_top1"), "probe_top1_std": None,
-                 "probe_top1_n": 1 if payload.get("probe_top1") is not None else 0,
-                 "published_top1": (reference.dense_reference(name) or {}).get("top1")}
+                 "probe_top1_n": 1 if payload.get("probe_top1") is not None else 0}
                 for name, payload in dense.items()]
         manifest["tables"]["dense_reference"] = {
             key: str(path) for key, path
@@ -775,6 +661,8 @@ def build_all(root: str | Path, out_dir: str | Path, *,
     present += sorted(measured_backbones - set(present))
 
     jobs: list[tuple[str, Any]] = [
+        ("inference_summary", lambda: _inference_figure(e2, figure_dir, "inference_summary",
+                                                       seeds=seeds, dense=dense)),
         ("backbone_summary", lambda: figure_backbone_summary(e1, figure_dir, dense=dense,
                                                              seeds=seeds)),
     ]
@@ -788,10 +676,11 @@ def build_all(root: str | Path, out_dir: str | Path, *,
             (f"e1_delta_{backbone}_vs_csrv2",
              lambda b=backbone: figure_e1_delta(records, figure_dir, b, control="csrv2", seeds=seeds)),
             (f"e2_generalisation_{backbone}",
-             lambda b=backbone: figure_e2_generalisation(e2, figure_dir, b, e1_rows=e1, seeds=seeds)),
+             lambda b=backbone: figure_e2_generalisation(e2, figure_dir, b, seeds=seeds, measured_dense=dense.get(b))),
             (f"e2_nnz_{backbone}",
-             lambda b=backbone: figure_e2_nnz(e2, figure_dir, b, e1_rows=e1, seeds=seeds)),
-            (f"efficiency_{backbone}", lambda b=backbone: figure_efficiency(e1, figure_dir, b)),
+             lambda b=backbone: figure_e2_nnz(e2, figure_dir, b, seeds=seeds)),
+            (f"e2_cost_{backbone}", lambda b=backbone: figure_e2_cost(e2, figure_dir, b, seeds=seeds)),
+            (f"efficiency_{backbone}", lambda b=backbone: figure_efficiency(e2 or e1, figure_dir, b, seeds=seeds)),
             (f"training_{backbone}", lambda b=backbone: figure_training(training, figure_dir, b)),
         ])
 

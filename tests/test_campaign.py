@@ -19,7 +19,7 @@ def test_default_campaign_is_source_training_plus_frozen_transfer():
     campaign = load_campaign("configs/thesis.yaml")
     plan = campaign.plan()
     assert plan["source_cells"] == 10
-    assert plan["downstream_sparse_points"] == 15
+    assert plan["downstream_sparse_points"] == 120
     assert plan["downstream_dense_points"] == 3
     assert campaign.downstream["mode"] == "frozen"
     assert campaign.execution["precomputed_only"] is True
@@ -41,19 +41,20 @@ def test_dataset_backbone_selection_changes_plan_without_dropping_other_targets(
 
 @pytest.mark.parametrize("config", ["configs/thesis.yaml", "configs/precomputed.yaml"])
 @pytest.mark.parametrize("backbone,expected,anchor", [
-    ("ff2048", (8,), 8),
-    ("vit_b16", (8,), 8),
+    ("ff2048", (2, 4, 8, 16, 32, 64, 128, 256), 8),
+    ("vit_b16", (2, 4, 8, 16, 32, 64, 128, 256), 8),
 ])
 def test_campaigns_restrict_training_e2_and_downstream_to_requested_budgets(config, backbone, expected, anchor):
     from mpsae.config import BACKBONES
     campaign = load_campaign(config)
-    assert {cell.k for cell in campaign.source_cells() if cell.backbone == backbone} == set(expected)
+    assert {cell.k for cell in campaign.source_cells() if cell.backbone == backbone} == {anchor}
     assert campaign.budgets("imagenet", "eval_k", backbone) == expected
     assert campaign.budgets("downstream", "eval_k", backbone) == expected
     assert campaign.budgets("downstream", "train_k", backbone) == (anchor,)
     assert campaign.resolved()["resolved_budgets"][backbone]["imagenet_eval_k"] == expected
     # Campaign selection does not remove the wider reference grids from the registry.
-    assert set(expected) < set(BACKBONES[backbone].k_list)
+    assert set(expected) <= set(range(1, BACKBONES[backbone].dim + 1))
+    assert len(BACKBONES[backbone].training_budgets) > 1
 
 
 @pytest.mark.parametrize("targets", [[], {"flowers102": ["rn18"]},

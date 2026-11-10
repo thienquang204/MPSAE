@@ -285,8 +285,12 @@ def _evaluate_at_cached(cell: Cell, bundle: Bundle, model, spec: Backbone, setti
                 "empty_gallery_codes": gallery["stats"]["empty_codes"],
                 "encode_seconds": gallery["stats"]["seconds"] + queries["stats"]["seconds"],
             }
-        point["timing_status"] = "pending" if want_timing and settings.measure_timing else "not_requested"
-        if want_timing and settings.measure_timing:
+        point["signature"] = signature
+        timing_needed = (want_timing and settings.measure_timing
+                         and not _cached_e1_complete(point, replace(settings, linear_probe=False)))
+        point.setdefault("timing_status", "not_requested")
+        if timing_needed:
+            point["timing_status"] = "pending"
             point["timing_config"] = settings.timing_identity()
             for stale in ("timing", "timing_error", "retrieval_ms", "index_bytes"):
                 point.pop(stale, None)
@@ -304,7 +308,7 @@ def _evaluate_at_cached(cell: Cell, bundle: Bundle, model, spec: Backbone, setti
                          probe_epochs=probe_settings["epochs"], probe_settings=probe_settings)
             if on_progress is not None:
                 on_progress(dict(point))
-        if want_timing and settings.measure_timing:
+        if timing_needed:
             # Retrieval cost is a secondary metric: it reports the trade-off CSR
             # argues for, but no accuracy depends on it. It refuses to run outside
             # CUDA, and a wall-clock measurement can fail for reasons that have
@@ -446,12 +450,11 @@ def run_e2(cell: Cell, bundle: Bundle, settings: RunSettings, *, signature: str,
     done = {point["k"]: point for point in ((previous or {}).get("cached_points", [])
                                           + (previous or {}).get("points", []))} \
         if previous and previous.get("signature") == signature and not settings.force else {}
-    # The anchor's own budget is exactly the E1 measurement; never recompute it.
+    # E1 has already refreshed requested metrics at the anchor. Copy all metric
+    # provenance too, so a legacy E2 point cannot hide a newly completed probe.
     if cell.k in budgets:
-        done.setdefault(cell.k, {key: e1[key] for key in
-                                 ("k", "top1", "queries", "empty_queries", "seconds",
-                                  "nnz_mean", "nnz_min", "empty_gallery_codes")
-                                 if key in e1})
+        done[cell.k] = {key: value for key, value in e1.items() if key not in
+                       ("experiment", "backbone", "method", "seed", "train_seconds", "gpu_hours")}
 
     def snapshot():
         record = {"experiment": "E2", "signature": signature, "backbone": cell.backbone,
@@ -463,14 +466,22 @@ def run_e2(cell: Cell, bundle: Bundle, settings: RunSettings, *, signature: str,
             record["cached_points"] = unused
         return record
 
-    missing = [k for k in budgets if k not in done]
+    missing = [k for k in budgets if not _cached_e1_complete(done.get(k), settings)]
     if missing:
         model = load_fitted(cell, out_dir, spec, device=settings.fit.device)
         progress = Progress(len(missing), stage=f"E2 {cell.slug}", what="budgets",
                             every_seconds=0.0)
         for k in missing:
+            def persist_point(point):
+                done[k] = point
+                atomic_json(path, snapshot())
+
+            # A legacy point inherits the enclosing E2 fit signature. Reuse its
+            # accuracy while filling missing probe/timing measurements.
+            cached = {**done[k], "signature": signature} if k in done else None
             done[k] = evaluate_at(cell, bundle, model, spec, settings, k=k,
-                                  signature=signature, want_probe=False, want_timing=False)
+                                  signature=signature, want_probe=True, want_timing=True,
+                                  previous=cached, on_progress=persist_point)
             progress.advance(1, extra=f"K={k} top1 {done[k]['top1']:.2f}% nnz {done[k]['nnz_mean']:.1f}")
             atomic_json(path, snapshot())
     record = snapshot()

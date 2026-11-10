@@ -55,6 +55,8 @@ _E2_METRICS = {
     "probe_top1": "probe_top1",
     "empty_queries": "empty_queries",
     "seconds": "search_seconds",
+    "index_bytes": "index_bytes",
+    "retrieval_ms": "retrieval_ms",
 }
 
 

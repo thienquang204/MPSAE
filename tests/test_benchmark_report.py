@@ -178,7 +178,7 @@ def test_figures_render_and_export_when_matplotlib_is_installed(tmp_path):
     pytest.importorskip("matplotlib")
     records = [record("dense"), record("csr", value=0.6), record("mpsae", value=0.7)]
     manifest = report.build_report(records, tmp_path, expected_points=3, expected_seeds=(1227,))
-    assert len(manifest["figures"]) == 4, manifest["skipped"]
+    assert len(manifest["figures"]) == 5, manifest["skipped"]
     assert manifest["skipped"] == []
     for paths in manifest["figures"].values():
         assert {path.rsplit(".", 1)[-1] for path in paths} == {"png", "pdf", "txt"}

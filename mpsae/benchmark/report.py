@@ -66,6 +66,9 @@ def _metric_values(record: Mapping[str, Any]) -> dict[str, float]:
         clean[name] = value
     if not any(name in clean for name in ACCURACY_METRICS):
         raise ValueError("benchmark record contains no supported retrieval accuracy metric")
+    if ("search_ms_per_query" not in clean and "search_seconds" in clean
+            and clean.get("query_count", 0) > 0):
+        clean["search_ms_per_query"] = 1000 * clean["search_seconds"] / clean["query_count"]
     return clean
 
 
@@ -78,6 +81,7 @@ def _normalise(records: Iterable[Mapping[str, Any]]) -> tuple[list[dict[str, Any
     """
     by_id: dict[str, dict[str, Any]] = {}
     conditions: dict[tuple, str] = {}
+    sweep_checkpoints: dict[tuple, str] = {}
     incomplete: list[str] = []
     for item in records:
         record = dict(item)
@@ -116,6 +120,12 @@ def _normalise(records: Iterable[Mapping[str, Any]]) -> tuple[list[dict[str, Any
         if previous_id is not None and previous_id != evaluation_id:
             raise ValueError("multiple evaluation/checkpoint IDs for one benchmark condition and seed: "
                              f"{previous_id}, {evaluation_id}")
+        if not dense and record.get("checkpoint_id"):
+            sweep = tuple(record.get(name) for name in _SCOPE if name != "eval_k") + (
+                record["method"], record["seed"])
+            previous_checkpoint = sweep_checkpoints.setdefault(sweep, record["checkpoint_id"])
+            if previous_checkpoint != record["checkpoint_id"]:
+                raise ValueError("inference-K sweep mixes different checkpoints for one training condition")
         if evaluation_id in by_id and canonical_hash(by_id[evaluation_id]) != canonical_hash(record):
             raise ValueError(f"conflicting records for evaluation_id {evaluation_id}")
         conditions[condition] = evaluation_id
@@ -222,11 +232,12 @@ def _write_table(rows: Sequence[Mapping[str, Any]], directory: Path, name: str) 
 
 def _scope_label(scope: tuple[str, str, str]) -> str:
     dataset, protocol, comparison = scope
-    return f"{dataset} — {protocol}" + (f" [{comparison[:8]}]" if comparison else "")
+    return {"eurosat": "EuroSAT", "sop": "SOP", "flowers102": "Flowers102"}.get(dataset, dataset)
 
 
 def _curve(ax, rows: Sequence[Mapping[str, Any]], method: str, metric: str, *,
-           x: str = "eval_k", delta: bool = False, label: str | None = None) -> bool:
+           x: str = "eval_k", delta: bool = False, label: str | None = None,
+           scale: float = 100, xscale: float = 1) -> bool:
     from ..report.style import BAND_ALPHA, method_style
 
     key = f"delta_{metric}" if delta else metric
@@ -238,13 +249,11 @@ def _curve(ax, rows: Sequence[Mapping[str, Any]], method: str, metric: str, *,
     if not points:
         return False
     style = method_style(method)
-    counts = sorted({int(point[3]) for point in points})
-    count_note = str(counts[0]) if len(counts) == 1 else f"{counts[0]}–{counts[-1]}"
-    xs = [float(point[0]) for point in points]
-    means = [100 * float(point[1]) for point in points]
-    stds = [100 * float(point[2]) if point[2] is not None else None for point in points]
+    xs = [float(point[0]) * xscale for point in points]
+    means = [scale * float(point[1]) for point in points]
+    stds = [scale * float(point[2]) if point[2] is not None else None for point in points]
     ax.plot(xs, means, color=style["color"], marker=style["marker"],
-            linestyle=style["linestyle"], label=f"{label or style['label']} (n={count_note})")
+            linestyle=style["linestyle"], label=label or style["label"])
     if any(std is not None for std in stds):
         ax.fill_between(xs, [value - (std or 0) for value, std in zip(means, stds)],
                         [value + (std or 0) for value, std in zip(means, stds)],
@@ -257,12 +266,13 @@ def _draw_quality(rows: Sequence[Mapping[str, Any]], dense: Sequence[Mapping[str
                   out_dir: Path, name: str, title: str, *, x: str = "eval_k") -> list[Path]:
     import matplotlib.pyplot as plt
     from ..report.style import DENSE_STYLE, PAGE_WIDTH, save_figure, seed_caption
+    from ..report.figures import _dedup_legend
 
     scopes = sorted({(row["dataset"], row["protocol"], row["comparison_id"]) for row in rows})
     if not scopes or not any(row.get(x if x == "eval_k" else f"{x}_mean") is not None
                              for row in rows):
         return []
-    fig, axes = plt.subplots(len(scopes), 2, figsize=(PAGE_WIDTH, 2.45 * len(scopes)),
+    fig, axes = plt.subplots(len(scopes), 2, figsize=(PAGE_WIDTH, 2.45 * len(scopes) + 0.5),
                              squeeze=False, layout="constrained")
     try:
         for index, scope in enumerate(scopes):
@@ -271,42 +281,44 @@ def _draw_quality(rows: Sequence[Mapping[str, Any]], dense: Sequence[Mapping[str
             dense_subset = [row for row in dense if tuple(row[key] for key in
                             ("dataset", "protocol", "comparison_id")) == scope]
             for ax, metric, pretty in zip(axes[index], ("recall_at_1", "map_at_r"),
-                                          ("Recall@1 (%)", "mAP@R (%)")):
+                                          ("R@1 (%)", "mAP@R (%)")):
                 for method in METHODS:
-                    _curve(ax, [row for row in subset if row["method"] == method], method, metric, x=x)
+                    _curve(ax, [row for row in subset if row["method"] == method], method, metric, x=x,
+                           xscale=1 / 1024 if x == "code_bytes_per_image" else 1)
                 if dense_subset:
                     reference = dense_subset[0]
                     value = reference.get(f"{metric}_mean")
                     if value is not None:
                         if x == "code_bytes_per_image" and reference.get(f"{x}_mean") is not None:
-                            ax.plot([reference[f"{x}_mean"]], [100 * value], color="#4D4D4D",
-                                    marker="x", linestyle="none", label="Dense backbone")
+                            ax.plot([reference[f"{x}_mean"] / 1024], [100 * value], color="#4D4D4D",
+                                    marker="x", linestyle="none", label="Dense")
                         else:
-                            ax.axhline(100 * value, label="Dense backbone", **DENSE_STYLE)
+                            ax.axhline(100 * value, label="Dense", **DENSE_STYLE)
                 ax.set_ylabel(pretty)
-                ax.set_title(_scope_label(scope), fontsize=8)
+                ax.set_title(_scope_label(scope) + (f" ({index + 1})" if
+                             sum(item[0] == scope[0] for item in scopes) > 1 else ""), fontsize=9)
                 if x == "eval_k":
                     budgets = sorted({int(row["eval_k"]) for row in subset})
                     ax.set_xscale("log", base=2)
                     ax.set_xticks(budgets, labels=[str(k) for k in budgets])
-                    ax.set_xlabel("Inference code budget K")
+                    ax.set_xlabel("Inference $K$")
                 elif x == "nnz_mean":
                     ax.set_xscale("symlog", base=2, linthresh=1)
-                    ax.set_xlabel("Measured mean gallery nonzeros")
+                    ax.set_xlabel("Mean nonzeros (gallery)")
                 else:
-                    ax.set_xscale("symlog", base=2, linthresh=1)
-                    ax.set_xlabel("Stored code bytes per image")
-                handles, labels = ax.get_legend_handles_labels()
-                if handles:
-                    ax.legend(handles, labels, fontsize=6, loc="best")
+                    ax.set_xscale("symlog", base=2, linthresh=1 / 1024)
+                    ax.set_xlabel("Code size (KiB/image)")
+        _dedup_legend(fig, list(axes.flat), ncol=3 if name.startswith("paired_") else 6)
         fig.suptitle(title)
         caption = (
             f"{title}. Rows keep datasets and retrieval protocols separate. "
             f"{seed_caption([seed for row in rows for seed in row['seeds_present']])} "
-            "n is shown in legends and tables. Recall@1 is the share of queries with a relevant first "
+            "Per-point n is in the tables. R@1 is the share of queries with a relevant first "
             "neighbour; mAP@R ranks to each query's full relevant-image count. Accuracies are percentages. "
-            "Dense references are measured on the same downstream data, not copied from ImageNet. "
-            "Every inference budget uses a checkpoint trained at the training budget in the title."
+            "Dense is measured on the same downstream data. "
+            "Every inference budget uses the same SAE checkpoint at the training K in the title. "
+            "CSR-MTK denotes CSR multi-TopK. Protocols/revisions in row order: "
+            + "; ".join(f"{i + 1}: {d}, {p}, {c}" for i, (d, p, c) in enumerate(scopes))
         )
         return save_figure(fig, out_dir, name, caption=caption)
     finally:
@@ -317,18 +329,19 @@ def _draw_paired(rows: Sequence[Mapping[str, Any]], out_dir: Path,
                  name: str, title: str) -> list[Path]:
     import matplotlib.pyplot as plt
     from ..report.style import PAGE_WIDTH, label_for, save_figure, seed_caption
+    from ..report.figures import _dedup_legend
 
     scopes = sorted({(row["dataset"], row["protocol"], row["comparison_id"]) for row in rows})
     if not scopes:
         return []
-    fig, axes = plt.subplots(len(scopes), 2, figsize=(PAGE_WIDTH, 2.45 * len(scopes)),
+    fig, axes = plt.subplots(len(scopes), 2, figsize=(PAGE_WIDTH, 2.45 * len(scopes) + 0.5),
                              squeeze=False, layout="constrained")
     try:
         for index, scope in enumerate(scopes):
             subset = [row for row in rows if tuple(row[key] for key in
                       ("dataset", "protocol", "comparison_id")) == scope]
             for ax, metric, pretty in zip(axes[index], ("recall_at_1", "map_at_r"),
-                                          ("Δ Recall@1 (pp)", "Δ mAP@R (pp)")):
+                                          ("Δ R@1 (pp)", "Δ mAP@R (pp)")):
                 for treatment, control in PAIRS:
                     _curve(ax, [row for row in subset if row["treatment"] == treatment
                                 and row["control"] == control], treatment, metric, delta=True,
@@ -337,22 +350,59 @@ def _draw_paired(rows: Sequence[Mapping[str, Any]], out_dir: Path,
                 budgets = sorted({int(row["eval_k"]) for row in subset})
                 ax.set_xscale("log", base=2)
                 ax.set_xticks(budgets, labels=[str(k) for k in budgets])
-                ax.set_xlabel("Inference code budget K")
+                ax.set_xlabel("Inference $K$")
                 ax.set_ylabel(pretty)
-                ax.set_title(_scope_label(scope), fontsize=8)
-                handles, labels = ax.get_legend_handles_labels()
-                if handles:
-                    ax.legend(handles, labels, fontsize=6, loc="best")
+                ax.set_title(_scope_label(scope) + (f" ({index + 1})" if
+                             sum(item[0] == scope[0] for item in scopes) > 1 else ""), fontsize=9)
+        _dedup_legend(fig, list(axes.flat), ncol=3 if name.startswith("paired_") else 6)
         fig.suptitle(title)
         return save_figure(fig, out_dir, name, caption=(
             f"{title}. Each difference is formed within the same dataset, protocol, backbone, "
             "training budget, inference budget and training seed before aggregation. Differences "
             "are in percentage points. "
             f"{seed_caption([seed for row in rows for seed in row['seeds_paired']])} Unmatched seeds are excluded "
-            "and listed explicitly in the paired table. No comparison against published ImageNet "
-            "numbers is included."))
+            "and listed explicitly in the paired table. Protocols/revisions in row order: "
+            + "; ".join(f"{i + 1}: {d}, {p}, {c}" for i, (d, p, c) in enumerate(scopes))))
     finally:
         plt.close(fig)
+
+
+def _draw_costs(rows, out_dir, name, title):
+    """Cost vs inference K for the same fixed-training-budget records."""
+    import matplotlib.pyplot as plt
+    from ..report.style import PAGE_WIDTH, COLUMN_WIDTH, save_figure, seed_caption
+    from ..report.figures import _dedup_legend, _log2_k_axis
+
+    scopes = sorted({(r["dataset"], r["protocol"], r["comparison_id"]) for r in rows})
+    fields = [(field, label, scale) for field, label, scale in
+              (("search_ms_per_query", "Search (ms/query)", 1),
+               ("code_bytes_per_image", "Code size (KiB/image)", 1 / 1024))
+              if any(r.get(f"{field}_mean") is not None for r in rows)]
+    if not scopes or not fields:
+        return []
+    fig, axes = plt.subplots(len(scopes), len(fields), squeeze=False,
+                             figsize=(PAGE_WIDTH if len(fields) > 1 else COLUMN_WIDTH,
+                                      2.45 * len(scopes) + 0.5), layout="constrained")
+    for i, scope in enumerate(scopes):
+        subset = [r for r in rows if tuple(r[key] for key in
+                  ("dataset", "protocol", "comparison_id")) == scope]
+        for ax, (field, label, scale) in zip(axes[i], fields):
+            for method in METHODS:
+                _curve(ax, [r for r in subset if r["method"] == method], method, field, scale=scale)
+            _log2_k_axis(ax, [r["eval_k"] for r in subset], label="Inference $K$")
+            ax.set_ylabel(label)
+            ax.set_title(_scope_label(scope) + (f" ({i + 1})" if
+                         sum(item[0] == scope[0] for item in scopes) > 1 else ""), fontsize=9)
+    _dedup_legend(fig, list(axes.flat), ncol=6)
+    fig.suptitle(title)
+    return save_figure(fig, out_dir, name, caption=(
+        "Measured retrieval cost at each inference K; the SAE checkpoint is fixed. Search "
+        "ms/query is total retrieval wall time divided by query count, excluding encoding; "
+        "it is an amortised cost, not single-query latency. Code size includes the stored "
+        "sparse representation per image. "
+        f"{seed_caption([seed for r in rows for seed in r['seeds_present']])} "
+        "Protocols/revisions in row order: " + "; ".join(
+            f"{i + 1}: {d}, {p}, {c}" for i, (d, p, c) in enumerate(scopes))))
 
 
 def _render_figures(rows: Sequence[Mapping[str, Any]], paired: Sequence[Mapping[str, Any]],
@@ -375,7 +425,7 @@ def _render_figures(rows: Sequence[Mapping[str, Any]], paired: Sequence[Mapping[
         differences = [row for row in paired if (row["backbone"], row["mode"], row["train_k"])
                        == (backbone, mode, train_k)]
         suffix = _SAFE_NAME.sub("_", f"{backbone}_{mode}_train-k{train_k}")
-        title = f"{backbone_label(backbone)} · {mode} · trained at K={train_k}"
+        title = f"{backbone_label(backbone)} · Train $K$={train_k}"
         jobs = [
             (f"quality_{suffix}", lambda: _draw_quality(subset, references, out_dir,
                                                        f"quality_{suffix}", title)),
@@ -387,6 +437,8 @@ def _render_figures(rows: Sequence[Mapping[str, Any]], paired: Sequence[Mapping[
             (f"paired_{suffix}", lambda: _draw_paired(differences, out_dir,
                                                      f"paired_{suffix}", title)),
         ]
+        jobs.append((f"cost_{suffix}", lambda: _draw_costs(
+            subset, out_dir, f"cost_{suffix}", title)))
         for name, draw in jobs:
             try:
                 paths = draw()

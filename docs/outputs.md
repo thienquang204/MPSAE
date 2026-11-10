@@ -132,12 +132,14 @@ budget in the grid.
 | `anchor_k` | the K the checkpoint was *trained* at |
 | `points` | one record per inference K, sorted by K |
 
-Each point has the same fields as the E1 point above, minus the probe and the
-timing (`want_probe=False, want_timing=False` for the sweep). The point at
-`k == anchor_k` is **not** recomputed: it is copied from `eval_e1.json`, keeping
-`k`, `top1`, `queries`, `empty_queries`, `seconds`, `nnz_mean`, `nnz_min` and
-`empty_gallery_codes`. So an anchor point carries fewer keys than its
-neighbours, by construction rather than by accident.
+Each point has the same evaluation fields as E1, including `probe_top1`,
+`probe_epochs`, `probe_settings`, `timing_status`, `timing_config`, and measured
+costs when requested/available. E2 honors the same probe and timing flags as E1.
+At `k == anchor_k`, completed E1 metrics are copied rather than recomputed.
+The enclosing `signature` identifies the frozen SAE for every point. Legacy
+accuracy-only points are upgraded when probe/timing are requested; progress is
+persisted after each component so interruption does not discard completed probes.
+`cached_points` retains historical unselected K values outside the plotted sweep.
 
 The file is rewritten after every budget, so an interrupted sweep resumes at the
 first missing K.

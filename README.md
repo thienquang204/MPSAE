@@ -76,7 +76,7 @@ bundles: all ImageNet and EuroSAT backbones, plus SOP for `ff2048`, `rn18` and
 Flowers102 is excluded from these campaigns because no bundles are published;
 this does not establish a dataset defect. SOP remains enabled for the selected
 ResNet-50 through `downstream.backbones.sop`. Plans, downloads and
-reports use this same selection (15 sparse and 3 dense downstream evaluations).
+reports use this same selection (120 sparse and 3 dense downstream evaluations).
 Unexpected missing or incompatible bundles fail explicitly rather than being
 silently dropped. Building new bundles requires a separate config with
 `precomputed_only: false`, `--build-missing-embeddings`, and a writable private
@@ -134,33 +134,39 @@ returns, and all search is PyTorch-only.
 
 ## The experiments
 
-**E1 — per-K (the main comparison).** One model trained at each budget,
-evaluated at that budget. This is what CSR Table 4 reports and the only fair
-way to place our methods beside theirs: a CSR model trained at K=8 has only
-ever been optimised for 8 active dimensions.
+**E1 — matched budget.** Each SAE is trained and evaluated at its training K.
+The selected campaign uses K=8 for ResNet-50 and ViT-B/16.
 
-**E2 — one checkpoint, many budgets.** Reuses the E1 checkpoints at the anchor
-budgets and evaluates them at every budget in the grid. No extra training.
-This measures a claim both papers make but neither tests — CSRv2 §3: *"Training
-with the multi-TopK loss L(k)+L(4k)/8 ensures that CSR could generalize to
-different k's at test time"* — while the CSR author writes in issue #17 that
-changing k at inference *"might lead to sub-optimal performance"*. Because
-post-ReLU a code can have far fewer than K nonzeros, every E2 point carries
-its **measured** nnz alongside the nominal budget.
+**E2 — fixed checkpoint, inference sweep.** Each of those checkpoints is frozen
+and evaluated at **K = 2, 4, 8, 16, 32, 64, 128, 256**. There are still only
+10 SAE fits: 2 backbones x 5 methods x seed 1227. This produces 80 ImageNet E2
+points (10 reused from E1) and 120 sparse + 3 dense downstream evaluations.
+HF backbone embeddings are reused. No SAE is retrained for a different inference K.
+ImageNet linear probes are fitted separately on training codes at each K; their
+validation accuracy and 1-NN accuracy are both reported. The existing
+`imagenet.linear_probe` and `imagenet.timing` flags now apply to E2 as well as E1.
+Missing probe/timing components are filled without recomputing completed accuracy.
+The extra inference and probe evaluations do take additional time.
 
-The campaign uses **seed 1227 only**. E2 automatically writes
-`e2_generalisation_<backbone>.png` and `.pdf` under the campaign's
-`reports/thesis/<plan_id>/imagenet/figures/` directory. Each panel fixes the
-training K; its x-axis sweeps the campaign's selected inference K values and its y-axis shows
-ImageNet 1-NN top-1 accuracy. The curves compare methods, the dashed vertical
-line marks training K, and hollow rings mark inference at the training K.
-Faint curves show separate models trained at each K for comparison. There are
-one selected training anchor at K=8 for each of ResNet-50 and ViT, reused
-from E1; E2 adds no training runs. Both E2 panels have a single point and
-add no cross-budget measurement.
-Single-seed curves carry no between-seed standard-deviation bands. The two shipped
-campaigns select the main-result budgets below for E1, E2 inference and downstream inference.
-Downstream reuses the K=8 checkpoints for both backbones.
+Reports use only measurements from the selected experiment. There are no
+imported paper curves or published dense numbers. `Dense` means our own measured
+full-feature baseline. Short legend names are CSR, CSRv2, CSR-MTK (CSR multi-TopK),
+MPSAE, and MPSAEv2. Seed counts, protocols and checkpoint IDs stay in captions/tables.
+One seed yields no between-seed uncertainty band.
+
+The main ImageNet figure is `inference_summary.pdf` (also PNG); per-backbone
+`e2_generalisation_*` plots show linear probe and 1-NN against inference K.
+`e2_nnz_*` uses measured gallery nonzeros instead, so saturation of MPSAE can
+compress its horizontal extent there without hiding the larger inference K points
+on the main figure. `e2_cost_*` shows search time, sparse matmul time and index
+memory where measured. Downstream `quality_*` shows R@1 and mAP@R versus inference
+K; `cost_*` shows retrieval cost and stored code size. All curves keep training K
+fixed, and all figures export vector PDF, 300-dpi PNG and a separate caption.
+
+After pulling this change, run `bash all_in_one.sh --skip-setup` to fill missing
+K evaluations with existing compatible checkpoints. `report` alone only redraws
+measurements already present in that campaign's catalog; it cannot create new K
+results. Outputs are under `work/direct-v1/reports/thesis/<plan_id>/`.
 
 | backbone | d | recipe | preset | Training K budgets | E2 anchors | cells |
 |---|---|---|---|---|---|---|
@@ -316,7 +322,7 @@ mpsae/
   data/          ImageNet acquisition, FFCV serialisation
   embed/         MRL and CSRv2 extraction recipes, archive writer
   evaluate/      encoding, exact 1-NN, probes, retrieval timing
-  report/        aggregation, published references, style, figures
+  report/        aggregation, style, figures (experiment measurements only)
 csrc/            CUDA inverted index (optional secondary metric)
 *.sh             all_in_one.sh, setup_server.sh, activate_server.sh, pipeline.sh
 capture_golden.py one-off OT fixture capture

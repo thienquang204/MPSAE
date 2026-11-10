@@ -165,7 +165,7 @@ def test_e2_plot_keeps_training_k_fixed_and_exports_single_seed_curves(tmp_path,
     assert {path.suffix for path in paths} == {".png", ".pdf", ".txt"}
     assert all(path.is_file() and path.stat().st_size > 0 for path in paths)
     for ax, anchor in zip(captured[0].axes, (8, 16)):
-        curves = [line for line in ax.lines if "(n=1)" in line.get_label()]
+        curves = [line for line in ax.lines if line.get_label() in ("CSR", "MPSAE")]
         assert len(curves) == 2
         assert list(curves[0].get_xdata()) == [2, 8, 16, 32]
         assert list(curves[0].get_ydata()) == pytest.approx([anchor + k / 10 for k in (2, 8, 16, 32)])

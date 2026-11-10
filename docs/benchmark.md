@@ -140,17 +140,21 @@ only when `train_missing` is enabled. Existing compatible completed fits are
 reused. `max_steps: 0` uses the full source training schedule; a positive cap is
 part of fit identity and does not turn a capped fit into a full-fit checkpoint.
 
-The shipped campaigns select ResNet-50 and ViT, both at K=8 in all three
-evaluation families. With five methods and seed 1227 this is 10 source fits,
-10 E2 anchor records / 10 points (reused E1 measurements), and 15 sparse +
-3 dense downstream evaluations. Both E2 records contain only their E1 point;
-this selection adds no cross-budget E2 measurements. The previous 20-fit, 35-fit and original 80-fit
-selections are archived in [`large_scale_abblation.md`](../large_scale_abblation.md),
-including both YAML files and resolved training presets. Dense baselines still use their
-full backbone representations. Earlier unselected E2 measurements are retained
-in `eval_e2.json` under `cached_points`; only selected `points` enter the report.
-Changing the selection creates a new campaign plan while compatible source
-checkpoints and per-point metrics remain reusable.
+The shipped campaigns select ResNet-50 and ViT-B/16, trained at K=8.
+Both use inference K = **2, 4, 8, 16, 32, 64, 128, 256** for ImageNet E2 and
+downstream retrieval. With five methods and seed 1227 this is **10 source fits**,
+**80 E2 points** (including 10 E1 points), and **120 sparse + 3 dense** downstream
+evaluations. The selected HF embedding bundles and training recipes are unchanged.
+E2 honors `imagenet.linear_probe` and `imagenet.timing` at every inference K.
+Linear classifiers are refitted per K using training codes, while SAE weights stay
+frozen. E1 metrics are copied at the anchor, including probe/timing provenance.
+Legacy accuracy-only E2 caches are upgraded; completed components survive a restart.
+
+The previous wider training selections are archived in
+[`large_scale_abblation.md`](../large_scale_abblation.md). Earlier unselected E2
+measurements remain in `eval_e2.json` under `cached_points`; only selected `points`
+enter reports. Changing the inference selection creates a new campaign plan,
+while compatible source checkpoints and per-point metrics remain reusable.
 
 The runner prepares inputs, then processes the selected work sequentially. Each
 evaluation is tied to its actual checkpoint and data/protocol identity. A
@@ -265,23 +269,24 @@ glob-loads unrelated old files or inserts published ImageNet curves.
 
 | Figure | Exact interpretation |
 |---|---|
-| `quality_<backbone>_<mode>_train-k<K>` | Rows are dataset/protocols; columns are Recall@1 and mAP@R; x is inference code budget. All points in a curve reuse the stated training-budget checkpoint. |
+| `quality_<backbone>_<mode>_train-k<K>` | Rows are dataset/protocols; columns are R@1 and mAP@R; x is inference code budget. All points in a curve reuse the stated training-budget checkpoint. |
 | `nonzeros_...` | The same accuracies against measured mean gallery nonzeros. Zero-nonzero collapsed codes remain representable on the axis. |
-| `storage_...` | Accuracy against measured stored bytes per image. Dense features are a measured point when footprint is supplied; compact code storage is distinct from GPU CSR index bytes. |
+| `storage_...` | Accuracy against stored KiB per image (float32 values plus int32 indices). Dense features are a measured point when footprint is supplied; compact code storage is distinct from GPU CSR index bytes. |
+| `cost_...` | Search wall time per query (ms) and stored KiB/image against inference K. This is amortised cost, not single-query latency. |
 | `paired_...` | MPSAE−CSR, MPSAEv2−CSRv2 and multi-TopK−CSR differences formed within seed before averaging, in percentage points. |
 
 Lines are seed means and bands sample standard deviations (`ddof=1`), not
-confidence intervals. Legends/tables report n; tables list missing and unpaired
+confidence intervals. Captions describe the selected seeds; tables report per-point n; tables list missing and unpaired
 seeds. Datasets, revisions/comparison IDs, protocols, training budgets and modes
 remain distinct. Two different checkpoint evaluations for the same condition
-and seed are rejected rather than averaged as extra repetitions.
+and seed are rejected rather than averaged as extra repetitions. A fixed-training-K sweep also rejects different checkpoint IDs across inference K for the same seed and protocol.
 
 Every figure exports PNG, PDF and a caption. CSV/JSON tables retain full
 precision and the evaluation/checkpoint IDs used by each row. The manifest lists
 expected/completed points, failures, incomplete records, tables, figures and
 skipped plots. Tables still write when matplotlib is unavailable.
 
-ImageNet linear-probe results keep their existing role. Downstream retrieval
+ImageNet `inference_summary` and `e2_generalisation_*` show per-K linear-probe and 1-NN accuracy from fixed SAE checkpoints. No figures or comparison tables import published paper results; Dense curves are measured in this experiment. Downstream retrieval
 does not train a classifier; target-dataset linear probing is a separate
 experiment. Search speedup should only be claimed from appropriately paired
 timings; quality plots do not imply sparse-serving speedup by themselves.

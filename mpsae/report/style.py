@@ -3,8 +3,7 @@
 Design decisions, because they are arguments and not taste:
 
 *Colour carries meaning.* Baselines are cool and desaturated; our two methods
-are a warm, saturated accent; the ablation is grey; published references are
-neutral grey dashes. A reader scanning the paper should see at a glance which
+are a warm, saturated accent; the ablation is grey. A reader scanning the paper should see at a glance which
 curve is the subject of the figure. The hues are from the Okabe-Ito
 colour-blind-safe set (vermillion, amber, blue, sky) adjusted in lightness, so
 no pair of series relies on a red/green distinction.
@@ -52,52 +51,36 @@ _BASE_PRIMARY = "#5B7FA6"     # muted steel blue (desaturated Okabe-Ito blue)
 _BASE_SECONDARY = "#3C6E71"   # dark teal; darker than the steel blue
 #: Neutral: the ablation is a control, not a competitor.
 _ABLATION = "#8A8A8A"
-#: Neutral, lighter still: numbers we did not measure.
-_PUBLISHED = "#9E9E9E"
-#: Our own dense upper reference.
+#: Our own measured dense reference.
 _DENSE = "#4D4D4D"
 
 #: Per-method drawing instructions. ``zorder`` encodes the reading order we
-#: want: published references behind, baselines next, ours on top.
+#: want: baselines behind, ours on top.
 METHOD_STYLE: Mapping[str, Mapping[str, Any]] = {
     "csr": {"color": _BASE_PRIMARY, "marker": "o", "linestyle": "--",
             "label": "CSR", "zorder": 2.0},
     "csrv2": {"color": _BASE_SECONDARY, "marker": "s", "linestyle": ":",
               "label": "CSRv2", "zorder": 2.1},
     "csr_multitopk": {"color": _ABLATION, "marker": "^", "linestyle": "-.",
-                      "label": "CSR + multi-TopK (ablation)", "zorder": 1.9},
+                      "label": "CSR-MTK", "zorder": 1.9},
     "mpsae": {"color": _OURS_PRIMARY, "marker": "o", "linestyle": "-",
-              "label": "MPSAE (ours)", "zorder": 3.0},
+              "label": "MPSAE", "zorder": 3.0},
     "mpsaev2": {"color": _OURS_SECONDARY, "marker": "D", "linestyle": "-",
                 "label": "MPSAEv2", "zorder": 3.1},
 }
 
-#: Published overlays: one neutral grey dashed language, markers only to tell
-#: the series apart, so no reader mistakes them for a measurement of ours.
-PUBLISHED_STYLE: Mapping[str, Mapping[str, Any]] = {
-    "csr": {"color": _PUBLISHED, "marker": "x", "linestyle": "--",
-            "label": "CSR (published)", "zorder": 1.2},
-    "mrl": {"color": _PUBLISHED, "marker": "+", "linestyle": "--",
-            "label": "MRL (published)", "zorder": 1.1},
-    "csrv2_linear": {"color": _PUBLISHED, "marker": "1", "linestyle": "--",
-                     "label": "CSRv2-linear (published)", "zorder": 1.3},
-}
-
-#: Style for a horizontal "upper reference" rule (dense, un-compressed).
+#: Measured dense reference on the same data.
 DENSE_STYLE: Mapping[str, Any] = {"color": _DENSE, "linestyle": (0, (6, 3)),
                                   "linewidth": 0.9, "zorder": 1.0}
-
-#: Style for the faint "trained at this K" backdrop in the E2 panels.
-BACKDROP_STYLE: Mapping[str, Any] = {"linewidth": 0.8, "alpha": 0.25, "zorder": 0.8}
 
 LABELS: Mapping[str, str] = {name: str(entry["label"]) for name, entry in METHOD_STYLE.items()}
 
 BACKBONE_LABELS: Mapping[str, str] = {
-    "ff2048": "FF2048 (ResNet-50, d=2048)",
-    "rn18": "ResNet-18 (d=512)",
-    "convnext_tiny": "ConvNeXt-T (d=768)",
-    "vit_b16": "ViT-B/16 (d=768)",
-    "dinov2_vits14": "DINOv2 ViT-S/14 (d=384)",
+    "ff2048": "ResNet-50",
+    "rn18": "ResNet-18",
+    "convnext_tiny": "ConvNeXt-T",
+    "vit_b16": "ViT-B/16",
+    "dinov2_vits14": "DINOv2-S/14",
 }
 
 #: Opacity of the mean ± std band. Low enough that overlapping bands from five
@@ -240,7 +223,7 @@ def seed_caption(seeds) -> str:
                 "deviation or uncertainty band is estimated.")
     return (f"Means over seeds {'/'.join(map(str, selected))}. Bands/error bars show "
             "sample standard deviations (ddof=1) only where at least two seeds are "
-            "available; they are not confidence intervals. n is reported in legends or tables.")
+            "available; they are not confidence intervals. Per-point n is reported in the accompanying tables.")
 
 
 def save_figure(fig: Any, out_dir: str | Path, name: str, *,
