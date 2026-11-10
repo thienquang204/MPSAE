@@ -18,8 +18,8 @@ from mpsae.config import Cell
 def test_default_campaign_is_source_training_plus_frozen_transfer():
     campaign = load_campaign("configs/thesis.yaml")
     plan = campaign.plan()
-    assert plan["source_cells"] == 175
-    assert plan["downstream_sparse_points"] == 240
+    assert plan["source_cells"] == 35
+    assert plan["downstream_sparse_points"] == 60
     assert plan["downstream_dense_points"] == 8
     assert campaign.downstream["mode"] == "frozen"
     assert campaign.execution["precomputed_only"] is True
@@ -39,16 +39,23 @@ def test_dataset_backbone_selection_changes_plan_without_dropping_other_targets(
 
 
 @pytest.mark.parametrize("config", ["configs/thesis.yaml", "configs/precomputed.yaml"])
-@pytest.mark.parametrize("backbone", ["convnext_tiny", "vit_b16", "dinov2_vits14"])
-def test_modern_backbones_train_only_requested_checkpoints_but_keep_inference_grid(config, backbone):
+@pytest.mark.parametrize("backbone,expected,anchor", [
+    ("ff2048", (8, 64), 8),
+    ("rn18", (8, 64), 8),
+    ("convnext_tiny", (12,), 12),
+    ("vit_b16", (12,), 12),
+    ("dinov2_vits14", (12,), 12),
+])
+def test_campaigns_restrict_training_e2_and_downstream_to_requested_budgets(config, backbone, expected, anchor):
     from mpsae.config import BACKBONES
     campaign = load_campaign(config)
-    expected = (12, 48, 96, 192, 384)
     assert {cell.k for cell in campaign.source_cells() if cell.backbone == backbone} == set(expected)
-    assert campaign.budgets("downstream", "train_k", backbone) == (12,)
-    assert BACKBONES[backbone].e2_anchors == expected
-    assert {3, 6, 24} <= set(BACKBONES[backbone].k_list)
-    assert (768 in BACKBONES[backbone].k_list) == (backbone != "dinov2_vits14")
+    assert campaign.budgets("imagenet", "eval_k", backbone) == expected
+    assert campaign.budgets("downstream", "eval_k", backbone) == expected
+    assert campaign.budgets("downstream", "train_k", backbone) == (anchor,)
+    assert campaign.resolved()["resolved_budgets"][backbone]["imagenet_eval_k"] == expected
+    # Campaign selection does not remove the wider reference grids from the registry.
+    assert set(expected) < set(BACKBONES[backbone].k_list)
 
 
 @pytest.mark.parametrize("targets", [[], {"flowers102": ["rn18"]},
@@ -75,6 +82,8 @@ def test_smoke_and_scientific_workspaces_never_overlap(tmp_path):
     {"imagenet": {"e1": False, "e2": True}},
     {"downstream": {"train_k": [3]}},
     {"downstream": {"eval_k": [9999]}},
+    {"imagenet": {"eval_k": [True]}}, {"imagenet": {"eval_k": [8, 8]}},
+    {"imagenet": {"eval_k": [1024]}},  # exceeds rn18's width
     {"imagenet": {"enabled": False}, "downstream": {"enabled": False}},
     {"downstream": {"typo": True}},
     {"execution": {"precomputed_only": True}},

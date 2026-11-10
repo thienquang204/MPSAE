@@ -11,7 +11,7 @@ landmark variant that no longer exists; keeping that reservation would have
 shrunk the gallery and made the dense 1-NN gate unable to reach the published
 71.19.
 
-Residency matters more than it looks. FF2048's train split is 10.5 GiB in
+Residency matters more than it looks. FF2048's train split is 9.77 GiB in
 float32, which fits comfortably in an 80 GiB accelerator, and keeping it
 resident turns every step into pure device work -- the difference between a
 run that takes a minute and one that is bound by random reads into a
@@ -184,7 +184,8 @@ class BatchSource:
         self.device = torch.device(device)
         self.with_labels = with_labels
         self.residency = choose_residency(self.rows, self.dim, self.device, requested=residency)
-        self._labels = torch.from_numpy(np.ascontiguousarray(labels, dtype=np.int64))
+        self._labels = (torch.from_numpy(np.ascontiguousarray(labels, dtype=np.int64))
+                        if with_labels else None)
         if self.residency == "cuda":
             holder = torch.empty((self.rows, self.dim), dtype=torch.float32, device=self.device)
             step = max(1, (256 << 20) // max(1, self.dim * 4))
@@ -192,9 +193,13 @@ class BatchSource:
                 chunk = np.ascontiguousarray(features[start:start + step], dtype=np.float32)
                 holder[start:start + len(chunk)] = torch.from_numpy(chunk).to(self.device)
             self._features = holder
-            self._labels = self._labels.to(self.device)
+            if self._labels is not None:
+                self._labels = self._labels.to(self.device)
         elif self.residency == "cpu":
-            self._features = torch.from_numpy(np.ascontiguousarray(features, dtype=np.float32))
+            # ascontiguousarray can alias a contiguous memmap; an explicit copy
+            # makes the advertised host-RAM residency real rather than demand IO.
+            self._features = torch.from_numpy(np.array(features, dtype=np.float32,
+                                                       order="C", copy=True))
         else:
             self._features = features
 
@@ -215,6 +220,10 @@ class BatchSource:
         import torch
 
         order = self.permutation(epoch)
+        # Preserve NumPy's exact epoch permutation and resume offsets. Upload
+        # its ~10 MiB indices once instead of a blocking copy every GPU batch.
+        device_order = (torch.from_numpy(order).to(self._features.device)
+                        if self.residency != "mmap" else None)
         for index in range(skip_batches, self.batches_per_epoch):
             ids = order[index * self.batch_size:(index + 1) * self.batch_size]
             if self.residency == "mmap":
@@ -224,16 +233,18 @@ class BatchSource:
                 # inside a batch is part of the objective.
                 inverse = np.argsort(np.argsort(ids))
                 batch = torch.from_numpy(rows[inverse]).to(self.device, non_blocking=True)
-                labels = self._labels[torch.from_numpy(ids)].to(self.device, non_blocking=True)
+                labels = (self._labels[torch.from_numpy(ids)].to(self.device, non_blocking=True)
+                          if self._labels is not None else None)
             else:
-                selector = torch.from_numpy(ids).to(self._features.device)
+                selector = device_order[index * self.batch_size:(index + 1) * self.batch_size]
                 batch = self._features[selector]
                 if batch.device != self.device:
                     batch = batch.to(self.device, non_blocking=True)
-                labels = self._labels[selector.to(self._labels.device)]
-                if labels.device != self.device:
+                labels = (self._labels[selector.to(self._labels.device)]
+                          if self._labels is not None else None)
+                if labels is not None and labels.device != self.device:
                     labels = labels.to(self.device, non_blocking=True)
-            yield (index, batch, labels if self.with_labels else None)
+            yield (index, batch, labels)
 
     def release(self) -> None:
         self._features = None

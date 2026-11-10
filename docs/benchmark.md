@@ -104,7 +104,8 @@ seeds: [1227]
 imagenet:
   enabled: true
   prepare: false
-  train_k: null
+  train_k: {ff2048: [8, 64], rn18: [8, 64]}
+  eval_k: {ff2048: [8, 64], rn18: [8, 64]}
   e1: true
   e2: true
   linear_probe: true
@@ -114,7 +115,7 @@ downstream:
   enabled: true
   datasets: [eurosat, sop]
   train_k: [8]
-  eval_k: [2, 4, 8, 16, 32, 64]
+  eval_k: {ff2048: [8, 64], rn18: [8, 64]}
   mode: frozen
   revisions: {}
 
@@ -129,12 +130,28 @@ execution:
 ```
 
 `imagenet.train_k: null` means the selected backbones' registered training
-grids. A list restricts the source fits. `downstream.train_k` selects which
+grids. A list restricts the source fits. `imagenet.eval_k` selects E2 inference
+budgets; `null` retains the registered inference grid. Both fields also accept
+a mapping from every selected backbone to its budgets. E1 uses its training K.
+`downstream.train_k` selects which
 ImageNet checkpoints are evaluated; `eval_k` changes their inference budget
 without changing any weights. Missing required source checkpoints are trained
 only when `train_missing` is enabled. Existing compatible completed fits are
 reused. `max_steps: 0` uses the full source training schedule; a positive cap is
 part of fit identity and does not turn a capped fit into a full-fit checkpoint.
+
+The shipped five-backbone campaigns select the main-result setup: `[8,64]`
+for both ResNets and `[12]` for ConvNeXt, ViT and DINO in all three evaluation
+families. With five methods and seed 1227 this is 35 source fits, 35 E2 anchor
+records (55 points including reused E1 measurements), and 60 sparse + 8 dense
+downstream evaluations. Modern-backbone E2 records contain only their E1 point;
+cross-budget E2 evaluation remains only for the ResNets. The previous 80-fit
+selection is archived in [`large_scale_abblation.md`](../large_scale_abblation.md),
+including both YAML files and resolved training presets. Dense baselines still use their
+full backbone representations. Earlier unselected E2 measurements are retained
+in `eval_e2.json` under `cached_points`; only selected `points` enter the report.
+Changing the selection creates a new campaign plan while compatible source
+checkpoints and per-point metrics remain reusable.
 
 The runner prepares inputs, then processes the selected work sequentially. Each
 evaluation is tied to its actual checkpoint and data/protocol identity. A

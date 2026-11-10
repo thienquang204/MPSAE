@@ -60,6 +60,46 @@ def entropy_term(x: torch.Tensor) -> torch.Tensor:
     return (x[positive] * (x[positive].log() - 1)).sum()
 
 
+def batched_angular_cost(z1: torch.Tensor, z2: torch.Tensor,
+                         z3: torch.Tensor) -> torch.Tensor:
+    """The same angular cost for independent ``[groups,n,hidden]`` views.
+
+    Batched matmuls avoid three small launches per group. Group membership,
+    normalization epsilon and the order of the three pairwise additions stay
+    identical to :func:`angular_cost`; no cross-group similarities are formed.
+    """
+    if z1.ndim != 3 or any(z.shape != z1.shape for z in (z2, z3)):
+        raise ValueError("batched views must share [groups,n,hidden] shape")
+    a, b, c = (F.normalize(z.float(), dim=2, eps=1e-8) for z in (z1, z2, z3))
+    return ((2 / 9) * ((1 - a @ b.transpose(1, 2))[:, :, :, None]
+                       + (1 - a @ c.transpose(1, 2))[:, :, None, :]
+                       + (1 - b @ c.transpose(1, 2))[:, None, :, :])).clamp(0.0, 1.0)
+
+
+def _group_entropy(x: torch.Tensor) -> torch.Tensor:
+    """Zero-safe entropy per first dimension without dynamic-size indexing."""
+    positive = x > 0
+    safe = torch.where(positive, x, torch.ones_like(x))
+    terms = torch.where(positive, x * (safe.log() - 1), torch.zeros_like(x))
+    return terms.flatten(1).sum(1)
+
+
+def _batched_gap_values(costs: torch.Tensor, plans: torch.Tensor, slacks: torch.Tensor,
+                        mass: float, eta: float) -> torch.Tensor:
+    """One differentiable gap per group, with detached solver outputs."""
+    n = costs.shape[1]
+    diagonal = torch.arange(n, device=costs.device)
+    linear = mass * costs[:, diagonal, diagonal, diagonal].mean(1)
+    linear = linear - (costs * plans.detach()).flatten(1).sum(1)
+    with torch.no_grad():
+        reference = _group_entropy(costs.new_full((1, n), mass / n))
+        reference = reference + 3 * _group_entropy(costs.new_full((1, n), (1 - mass) / n))
+        # Preserve the three slack reductions and their addition order.
+        slack_entropy = sum(_group_entropy(slacks[:, axis]) for axis in range(3))
+        entropy = reference - _group_entropy(plans) - slack_entropy
+    return linear + eta * entropy
+
+
 def _validate(cost: torch.Tensor, mass: float, eta: float, max_iters: int, tol: float,
               *, batched: bool = False) -> None:
     """Reject invalid problems before an exponential kernel is formed.
@@ -223,12 +263,96 @@ def batched_greenkhorn(costs: torch.Tensor, mass: float, eta: float, max_iters: 
     return plans, slacks, [dict(zip(fields, row)) for row in packed]
 
 
+def _batched_matching_gap_from_costs(costs: torch.Tensor, *, mass: float, eta: float,
+                                     max_iters: int, tol: float,
+                                     require_feasible: bool, max_refine_iters: int,
+                                     collect_metrics: bool = True
+                                     ) -> tuple[torch.Tensor, list[dict[str, float]]]:
+    """Solve and validate many independent groups with packed host checks.
+
+    The single-cost API remains the numerical reference. This path preserves
+    the same bounded refinement policy while avoiding per-group scalar reads
+    and the unused envelope-delta clone in the production training loop.
+    """
+    if (isinstance(max_refine_iters, bool) or not isinstance(max_refine_iters, int)
+            or max_refine_iters < max_iters):
+        raise ValueError("max_refine_iters must be an integer >= max_iters")
+    plans, slacks, records = batched_greenkhorn(costs.detach(), mass, eta, max_iters, tol)
+    for record in records:
+        record.update(refinement_iterations=0, objective_refinement=0)
+
+    def residual(record):
+        values = [record[key] for key in ("mass_error", "cap_violation")]
+        return max(values) if all(math.isfinite(v) and v >= 0 for v in values) else float("inf")
+
+    def refine(positions, reason):
+        if not positions:
+            return
+        better_plans, better_slacks, better = batched_greenkhorn(
+            costs.detach()[positions], mass, eta, max_refine_iters,
+            min(1e-10, tol * tol * 0.01), stable_kl=True)
+        for slot, position in enumerate(positions):
+            first_pass = records[position]["iterations"]
+            records[position] = better[slot]
+            records[position]["refinement_iterations"] = better[slot]["iterations"]
+            records[position]["iterations"] += first_pass
+            records[position]["objective_refinement"] = int(reason == "negative_gap")
+        # The solver is detached; replacing plans must not sever the cost graph.
+        plans[positions] = better_plans
+        slacks[positions] = better_slacks
+
+    if require_feasible:
+        refine([i for i, record in enumerate(records) if residual(record) > tol], "infeasible")
+        if any(residual(record) > tol for record in records):
+            raise RuntimeError(f"partial OT infeasible after bounded refinement: {records}")
+
+    losses = _batched_gap_values(costs, plans, slacks, mass, eta)
+    gap_tolerance = max(tol, 1e-6)
+
+    def checked_flags(values):
+        # One transfer validates every group; these checks are mandatory even
+        # when optional metrics are disabled on non-logging steps.
+        flags = torch.stack((torch.isfinite(values), values.detach().lt(-gap_tolerance)), 1)
+        flags = flags.detach().cpu().tolist()
+        if not all(row[0] for row in flags):
+            raise FloatingPointError("nonfinite OT gap")
+        return [row[1] for row in flags]
+
+    negative = checked_flags(losses)
+    if require_feasible:
+        positions = [i for i, flag in enumerate(negative)
+                     if flag and not records[i]["refinement_iterations"]]
+        if positions:
+            refine(positions, "negative_gap")
+            if any(residual(record) > tol for record in records):
+                raise RuntimeError(f"partial OT infeasible after bounded refinement: {records}")
+            losses = _batched_gap_values(costs, plans, slacks, mass, eta)
+            negative = checked_flags(losses)
+        if any(negative):
+            raise RuntimeError("materially negative OT gap after bounded refinement")
+
+    if not collect_metrics:
+        return losses, []
+    n = costs.shape[1]
+    diagonal = torch.arange(n, device=costs.device)
+    detached = costs.detach().flatten(1)
+    packed = torch.stack((plans[:, diagonal, diagonal, diagonal].sum(1),
+                          detached.mean(1), detached.min(1).values, detached.max(1).values,
+                          detached.std(1, unbiased=False) / eta), 1).cpu().tolist()
+    names = ("diagonal_plan_mass", "cost_mean", "cost_min", "cost_max", "cost_std_over_eta")
+    for record, flag, values in zip(records, negative, packed):
+        record["negative_gap"] = flag
+        record.update(zip(names, values))
+    return losses, records
+
+
 def matching_gap_from_cost(cost: torch.Tensor, *, mass: float = 0.9, eta: float = 0.2,
                            max_iters: int = 100, tol: float = 1e-4,
                            require_feasible: bool = True, max_refine_iters: int = 2000,
                            solved=None, solver_dtype: torch.dtype = torch.float32,
-                           stable_kl: bool = False
-                           ) -> tuple[torch.Tensor, dict[str, float], torch.Tensor]:
+                           stable_kl: bool = False, collect_metrics: bool = True,
+                           return_delta: bool = True
+                           ) -> tuple[torch.Tensor, dict[str, float], torch.Tensor | None]:
     """Differentiable gap for one group, plus the envelope gradient ``s*J - P*``.
 
     Two guards, both of which refine the solve rather than hide the symptom:
@@ -279,31 +403,87 @@ def matching_gap_from_cost(cost: torch.Tensor, *, mass: float = 0.9, eta: float 
 
     loss = gap_value(plan, slacks)
     gap_tolerance = max(tol, 1e-6)
-    if require_feasible and float(loss.detach()) < -gap_tolerance and not stats["refinement_iterations"]:
+    loss_value = float(loss.detach())
+    if require_feasible and loss_value < -gap_tolerance and not stats["refinement_iterations"]:
         plan, slacks, stats = refine(stats, "negative_gap")
         if residual(stats) > tol:
             raise RuntimeError(f"partial OT infeasible after bounded refinement: {stats}")
         loss = gap_value(plan, slacks)
-    stats["negative_gap"] = float(loss.detach()) < -gap_tolerance
-    stats["diagonal_plan_mass"] = float(plan[diagonal, diagonal, diagonal].sum())
+        loss_value = float(loss.detach())
+    stats["negative_gap"] = loss_value < -gap_tolerance
+    if collect_metrics:
+        stats["diagonal_plan_mass"] = float(plan[diagonal, diagonal, diagonal].sum())
     if require_feasible and stats["negative_gap"]:
         raise RuntimeError(f"materially negative OT gap: {float(loss.detach())}")
 
-    delta = -plan.detach().clone()
-    delta[diagonal, diagonal, diagonal] += mass / len(cost)
+    delta = None
+    if return_delta:
+        delta = -plan.detach().clone()
+        delta[diagonal, diagonal, diagonal] += mass / len(cost)
     return loss, stats, delta
+
+
+def _aggregate_records(records: list[dict[str, float]]) -> dict[str, float]:
+    stats = {key: sum(float(record[key]) for record in records) / len(records)
+             for key in records[0]}
+    stats["cost_min"] = min(record["cost_min"] for record in records)
+    stats["cost_max"] = max(record["cost_max"] for record in records)
+    stats["mass_error_max"] = max(record["mass_error"] for record in records)
+    stats["cap_violation_max"] = max(record["cap_violation"] for record in records)
+    stats["groups"] = len(records)
+    return stats
+
+
+def _matching_gap_batched(z1: torch.Tensor, z2: torch.Tensor, z3: torch.Tensor, *,
+                          mass: float = 0.9, eta: float = 0.2, max_iters: int = 100,
+                          tol: float = 1e-4, microbatch: int = DEFAULT_MICROBATCH,
+                          require_feasible: bool = True, max_refine_iters: int = 2000,
+                          collect_metrics: bool = True
+                          ) -> tuple[torch.Tensor, dict[str, float]]:
+    """Tensorized CUDA training path; callable on CPU for parity tests.
+
+    Full groups are processed together and a smaller tail uses the reference
+    single-group path. A singleton tail is skipped, and all included groups
+    retain equal weight regardless of their size.
+    """
+    groups = len(z1) // microbatch
+    if groups < 1:
+        raise ValueError("batched matching needs at least one full group")
+    end = groups * microbatch
+    costs = batched_angular_cost(*(z[:end].reshape(groups, microbatch, z.shape[1])
+                                  for z in (z1, z2, z3)))
+    losses, records = _batched_matching_gap_from_costs(
+        costs, mass=mass, eta=eta, max_iters=max_iters, tol=tol,
+        require_feasible=require_feasible, max_refine_iters=max_refine_iters,
+        collect_metrics=collect_metrics)
+    if len(z1) - end >= 2:
+        tail_cost = angular_cost(z1[end:], z2[end:], z3[end:])
+        tail_loss, tail_stats, _ = matching_gap_from_cost(
+            tail_cost, mass=mass, eta=eta, max_iters=max_iters, tol=tol,
+            require_feasible=require_feasible, max_refine_iters=max_refine_iters,
+            collect_metrics=collect_metrics, return_delta=False)
+        losses = torch.cat((losses, tail_loss[None]))
+        if collect_metrics:
+            flat = tail_cost.detach().flatten()
+            packed = torch.stack((flat.mean(), flat.min(), flat.max(),
+                                  flat.std(unbiased=False) / eta)).cpu().tolist()
+            tail_stats.update(zip(("cost_mean", "cost_min", "cost_max", "cost_std_over_eta"), packed))
+            records.append(tail_stats)
+    return losses.mean(), _aggregate_records(records) if collect_metrics else {}
 
 
 def matching_gap(z1: torch.Tensor, z2: torch.Tensor, z3: torch.Tensor, *,
                  mass: float = 0.9, eta: float = 0.2, max_iters: int = 100,
                  tol: float = 1e-4, microbatch: int = DEFAULT_MICROBATCH,
                  require_feasible: bool = True, max_refine_iters: int = 2000,
+                 collect_metrics: bool = True,
                  ) -> tuple[torch.Tensor, dict[str, float]]:
     """Mean matching gap of a batch, solved in independent groups.
 
     A trailing group of fewer than two rows has no meaningful matching and is
     dropped; the remaining groups are averaged. Equal-sized groups on CUDA go
-    through the batched solver.
+    through vectorized cost, solve and gap calculation. ``collect_metrics``
+    controls optional telemetry, never the finite/feasibility/gap guards.
     """
     if microbatch < 2:
         raise ValueError("an OT group needs at least two examples")
@@ -312,6 +492,12 @@ def matching_gap(z1: torch.Tensor, z2: torch.Tensor, z3: torch.Tensor, *,
             raise ValueError(f"{name} must align with z1 as [batch, hidden]")
         if not bool(torch.isfinite(z).all()):
             raise ValueError(f"nonfinite code in OT view {name}")
+
+    if z1.is_cuda and len(z1) // microbatch > 1:
+        return _matching_gap_batched(
+            z1, z2, z3, mass=mass, eta=eta, max_iters=max_iters, tol=tol,
+            microbatch=microbatch, require_feasible=require_feasible,
+            max_refine_iters=max_refine_iters, collect_metrics=collect_metrics)
 
     costs = []
     for start in range(0, len(z1), microbatch):
@@ -322,47 +508,20 @@ def matching_gap(z1: torch.Tensor, z2: torch.Tensor, z3: torch.Tensor, *,
     if not costs:
         raise ValueError(f"batch of {len(z1)} is too small for OT groups of {microbatch}")
 
-    solved: dict[int, tuple] = {}
-    for side in sorted({len(cost) for cost in costs}):
-        positions = [index for index, cost in enumerate(costs) if len(cost) == side]
-        if not (z1.is_cuda and len(positions) > 1):
-            continue
-        stacked = torch.stack([costs[index].detach() for index in positions])
-        plans, slacks, records = batched_greenkhorn(stacked, mass, eta, max_iters, tol)
-        failing = [slot for slot, record in enumerate(records)
-                   if require_feasible
-                   and max(record["mass_error"], record["cap_violation"]) > tol]
-        if failing:
-            better_plans, better_slacks, better = batched_greenkhorn(
-                stacked[failing], mass, eta, max_refine_iters,
-                min(1e-10, tol * tol * 0.01), stable_kl=True)
-            for slot, index in enumerate(failing):
-                first_pass = records[index]["iterations"]
-                plans[index], slacks[index] = better_plans[slot], better_slacks[slot]
-                records[index] = better[slot]
-                records[index]["refinement_iterations"] = better[slot]["iterations"]
-                records[index]["iterations"] += first_pass
-        for slot, position in enumerate(positions):
-            solved[position] = (plans[slot], list(slacks[slot].unbind(0)), records[slot])
-
+    # CPU and a single full CUDA group retain the scalar reference path.
     losses, records = [], []
-    for position, cost in enumerate(costs):
+    for cost in costs:
         loss, record, _ = matching_gap_from_cost(
             cost, mass=mass, eta=eta, max_iters=max_iters, tol=tol,
             require_feasible=require_feasible, max_refine_iters=max_refine_iters,
-            solved=solved.get(position))
-        detached = cost.detach()
-        record.update(cost_mean=float(detached.mean()), cost_min=float(detached.min()),
-                      cost_max=float(detached.max()),
-                      cost_std_over_eta=float(detached.std(unbiased=False)) / eta)
+            collect_metrics=collect_metrics, return_delta=False)
+        if collect_metrics:
+            detached = cost.detach()
+            record.update(cost_mean=float(detached.mean()), cost_min=float(detached.min()),
+                          cost_max=float(detached.max()),
+                          cost_std_over_eta=float(detached.std(unbiased=False)) / eta)
         losses.append(loss)
         records.append(record)
 
-    stats = {key: sum(float(record[key]) for record in records) / len(records)
-             for key in records[0]}
-    stats["cost_min"] = min(record["cost_min"] for record in records)
-    stats["cost_max"] = max(record["cost_max"] for record in records)
-    stats["mass_error_max"] = max(record["mass_error"] for record in records)
-    stats["cap_violation_max"] = max(record["cap_violation"] for record in records)
-    stats["groups"] = len(records)
+    stats = _aggregate_records(records) if collect_metrics else {}
     return torch.stack(losses).mean(), stats

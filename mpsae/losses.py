@@ -8,6 +8,8 @@ stable ones agree, and so a reviewer can diff against the paper's code.
 """
 from __future__ import annotations
 
+import math
+
 import torch
 from torch.nn import functional as F
 
@@ -122,7 +124,42 @@ def label_based_cl(z1: torch.Tensor, z2: torch.Tensor, labels: torch.Tensor,
     return _masked_log_ratio(logits, positive, ~same)
 
 
+def duplicate_view_cl(z: torch.Tensor, labels: torch.Tensor | None = None,
+                      temperature: float = CL_TEMPERATURE) -> torch.Tensor:
+    """The existing contrastive objective when both views are the same tensor.
+
+    Every other sample occurs twice, while the anchor's own duplicate occurs
+    once (only the self-comparison is excluded). Folding that multiplicity
+    into off-diagonal logits uses B x B storage instead of 2B x 2B. Passing
+    labels selects the CSRv2 positive set; otherwise only the duplicate is
+    positive. This matches the stable losses above, including their zero-code
+    behaviour, without a scalar host check for the guaranteed-positive rows.
+    """
+    if z.ndim != 2 or not len(z):
+        raise ValueError("contrastive codes must be a nonempty [batch, hidden] matrix")
+    if temperature <= 0:
+        raise ValueError("temperature must be positive")
+    if labels is not None and (labels.ndim != 1 or len(labels) != len(z)):
+        raise ValueError("labels must be one integer per row of z")
+    normalized = F.normalize(z.float(), dim=-1)
+    similarity = normalized @ normalized.t() / temperature
+    # Never replace the diagonal by 1/temperature: zero and near-zero rows
+    # need its actual value and gradient through normalization.
+    diagonal = similarity.diagonal()
+    logits = similarity + math.log(2.0)
+    logits.diagonal().copy_(diagonal)
+    denominator = torch.logsumexp(logits, dim=1)
+    if labels is None:
+        numerator = diagonal
+    else:
+        same = labels[:, None].eq(labels[None, :])
+        numerator = torch.logsumexp(
+            logits.masked_fill(~same, torch.finfo(logits.dtype).min), dim=1)
+    return (denominator - numerator).mean()
+
+
 # ------------------------------- literal transcriptions, used only by tests
+
 
 def inbatch_cl_released(z1: torch.Tensor, z2: torch.Tensor,
                         temperature: float = CL_TEMPERATURE) -> torch.Tensor:

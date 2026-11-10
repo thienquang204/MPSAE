@@ -242,6 +242,8 @@ def test_cached_e1_refreshes_probe_epochs_and_attempts_timing_once(runs, tmp_pat
         calls.append((settings.linear_probe, settings.probe_epochs, settings.measure_timing))
         point = {"top1": 75.0, "nnz_mean": 2.0,
                  "timing_status": "skipped" if settings.measure_timing else "not_requested"}
+        if settings.measure_timing:
+            point["timing_config"] = settings.timing_identity()
         if settings.linear_probe:
             point.update(probe_top1=80.0, probe_top5=100.0, probe_epochs=settings.probe_epochs,
                          probe_settings={"epochs": settings.probe_epochs})
@@ -267,12 +269,97 @@ def test_cached_e1_refreshes_probe_epochs_and_attempts_timing_once(runs, tmp_pat
     assert len(calls) == 4  # CPU skip is recorded and is reusable.
 
 
-def test_legacy_probe_without_epochs_refreshes_but_legacy_timing_is_accepted(runs):
+def test_legacy_probe_and_timing_refresh_when_provenance_is_missing(runs):
     settings = runs.RunSettings(fit=SimpleNamespace(device="cpu"), measure_timing=False)
     assert not runs._cached_e1_complete({"top1": 75, "probe_top1": 80}, settings)
     point = {"top1": 75, "probe_top1": 80, "probe_settings": {"epochs": 10}}
     assert runs._cached_e1_complete(point, settings)
     settings = replace(settings, measure_timing=True)
     assert not runs._cached_e1_complete(point, settings)
-    assert runs._cached_e1_complete({**point, "timing_status": "skipped"}, settings)
-    assert runs._cached_e1_complete({**point, "timing": {"milliseconds_per_batch": 1}}, settings)
+    assert not runs._cached_e1_complete({**point, "timing_status": "skipped"}, settings)
+    assert not runs._cached_e1_complete({**point, "timing": {"milliseconds_per_batch": 1}}, settings)
+    point.update(timing_config=settings.timing_identity(), timing_status="skipped")
+    assert runs._cached_e1_complete(point, settings)
+    assert not runs._cached_e1_complete(point, replace(settings, timing_retry_skipped=True))
+    point["timing_status"] = "success"
+    assert runs._cached_e1_complete(point, settings)
+    assert not runs._cached_e1_complete(point, replace(settings, timing_rounds=50))
+
+
+def test_interrupted_timing_preserves_accuracy_and_probe_and_only_retries_timing(runs, tmp_path, monkeypatch):
+    from mpsae.io import read_json
+
+    evaluator, captured = _fake_evaluator()
+    monkeypatch.setattr(runs, "_evaluate_module", lambda: evaluator)
+    cell = Cell("ff2048", "csr", 8, 1227)
+    settings = runs.RunSettings(root=tmp_path / "runs", cache_dir=tmp_path / "cache",
+                               retain_codes=False, run_e2=False,
+                               fit=SimpleNamespace(device="cpu"))
+    artifact = runs.cell_dir(settings, cell) / "eval_e1.json"
+
+    def interrupt(*args, **kwargs):
+        saved = read_json(artifact)
+        assert saved["top1"] == 75.0
+        assert saved["probe_top1"] == 80.0
+        assert saved["timing_status"] == "attempted"
+        assert saved["timing_config"] == settings.timing_identity()
+        raise KeyboardInterrupt("timing interrupted")
+
+    evaluator.time_sparse_matmul = interrupt
+    with pytest.raises(KeyboardInterrupt, match="timing interrupted"):
+        runs.run_cell(cell, _bundle(), settings, code_version="2.0.0")
+    assert all(array._mmap.closed for array in captured["maps"])
+
+    def no_recompute(*args, **kwargs):
+        pytest.fail("durable accuracy/probe must be reused")
+
+    evaluator.top1_accuracy = evaluator.linear_probe = no_recompute
+    evaluator.time_sparse_matmul = lambda *a, **kw: {"milliseconds_per_batch": 3.0}
+    result = runs.run_cell(cell, _bundle(), settings, code_version="2.0.0")
+    assert result["e1"]["top1"] == 75.0
+    assert result["e1"]["timing_status"] == "success"
+    assert result["e1"]["retrieval_ms"] == 3.0
+
+
+def test_e2_selection_reuses_old_points_without_reporting_unselected_budgets(runs, tmp_path, monkeypatch):
+    from mpsae.io import atomic_json, read_json
+
+    cell = Cell("ff2048", "csr", 8, 1227)
+    settings = runs.RunSettings(root=tmp_path / "runs", e2_k_values=(8, 64, 256, 1024),
+                               fit=SimpleNamespace(device="cpu"))
+    path = runs.cell_dir(settings, cell) / "eval_e2.json"
+    old = [{"k": k, "top1": 70.0 + k / 10000, "nnz_mean": float(k)} for k in (2, 8, 64)]
+    atomic_json(path, {"signature": "fit", "points": old})
+    calls = []
+
+    def evaluate(*args, k, **kwargs):
+        calls.append(k)
+        return {"k": k, "top1": 75.0, "nnz_mean": float(k)}
+
+    monkeypatch.setattr(runs, "evaluate_at", evaluate)
+    result = runs.run_e2(cell, _bundle(), settings, signature="fit", e1=old[1])
+    assert calls == [256, 1024]
+    assert [point["k"] for point in result["points"]] == [8, 64, 256, 1024]
+    assert result["points"][:2] == old[1:]
+    assert read_json(path)["cached_points"] == old[:1]
+
+    # A later selection can reuse archived points, without any recomputation.
+    calls.clear()
+    result = runs.run_e2(cell, _bundle(), replace(settings, e2_k_values=(2, 64)),
+                         signature="fit", e1=old[1])
+    assert calls == []
+    assert [point["k"] for point in result["points"]] == [2, 64]
+    assert {point["k"] for point in result["cached_points"]} == {8, 256, 1024}
+
+
+def test_e2_without_override_keeps_registered_grid(runs, tmp_path, monkeypatch):
+    cell = Cell("rn18", "csr", 8, 1227)
+    calls = []
+    def evaluate(*args, k, **kwargs):
+        calls.append(k)
+        return {"k": k, "top1": 75.0, "nnz_mean": float(k)}
+    monkeypatch.setattr(runs, "evaluate_at", evaluate)
+    settings = runs.RunSettings(root=tmp_path / "runs", fit=SimpleNamespace(device="cpu"))
+    result = runs.run_e2(cell, _bundle(), settings, signature="fit", e1={"k": 8, "top1": 75.0})
+    assert calls == [k for k in BACKBONES["rn18"].k_list if k != 8]
+    assert [point["k"] for point in result["points"]] == list(BACKBONES["rn18"].k_list)

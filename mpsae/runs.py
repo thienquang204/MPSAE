@@ -15,20 +15,21 @@ nominal budget once ReLU has acted, every E2 point carries its realised nnz.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from contextlib import contextmanager
 import math
 from pathlib import Path
 import shutil
 import tempfile
 import time
-from typing import Any, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 
 from .config import BACKBONES, Backbone, Cell, grid
 from .features import Bundle, load_bundle
 from .io import atomic_json, canonical_hash, read_json
 from .logs import Progress, banner, format_duration, get_logger
 from .train import FitSettings, fit, load_fitted
+from .timing_config import timing_config, runtime_fingerprint
 
 
 @dataclass
@@ -46,7 +47,14 @@ class RunSettings:
     linear_probe: bool = True
     probe_epochs: int = 10
     measure_timing: bool = True
+    timing_query_batch: int = 512
+    timing_warmup: int = 100
+    timing_rounds: int = 2000
+    timing_gallery_chunk: int = 32768
+    timing_build_entry_cap: int = 4 * 1024 * 1024
+    timing_retry_skipped: bool = False
     run_e2: bool = True
+    e2_k_values: tuple[int, ...] | None = None  # None keeps the registered inference grid
     #: Two tiers on the published dense 1-NN. Within ``warn`` the embedding
     #: recipe is indistinguishable from the published one; beyond ``fail`` it
     #: demonstrably is not, and training would produce numbers that cannot be
@@ -58,6 +66,12 @@ class RunSettings:
     #: Legacy callers retain code caches. Campaigns can discard them after
     #: each evaluation point to avoid multi-TiB E2 cache accumulation.
     retain_codes: bool = True
+
+    def timing_identity(self) -> dict[str, Any]:
+        return {**timing_config(query_batch=self.timing_query_batch, warmup=self.timing_warmup,
+                                rounds=self.timing_rounds, gallery_chunk=self.timing_gallery_chunk,
+                                build_entry_cap=self.timing_build_entry_cap),
+                "runtime": runtime_fingerprint(self.fit.device)}
 
 
 def cell_dir(settings: RunSettings, cell: Cell) -> Path:
@@ -219,7 +233,9 @@ def _close_failed_cache_maps(error: BaseException, cache: Path) -> None:
 
 
 def evaluate_at(cell: Cell, bundle: Bundle, model, spec: Backbone, settings: RunSettings,
-                *, k: int, signature: str, want_probe: bool, want_timing: bool
+                *, k: int, signature: str, want_probe: bool, want_timing: bool,
+                previous: dict[str, Any] | None = None,
+                on_progress: Callable[[dict[str, Any]], None] | None = None
                 ) -> dict[str, Any]:
     """Encode gallery and queries at budget ``k``, then score exact 1-NN."""
     identity = {"fit": signature, "data": bundle.identity, "k": k,
@@ -227,12 +243,14 @@ def evaluate_at(cell: Cell, bundle: Bundle, model, spec: Backbone, settings: Run
     with _code_cache(settings, identity) as cache:
         return _evaluate_at_cached(cell, bundle, model, spec, settings, k=k,
                                    signature=signature, want_probe=want_probe,
-                                   want_timing=want_timing, cache=cache)
+                                   want_timing=want_timing, cache=cache,
+                                   previous=previous, on_progress=on_progress)
 
 
 def _evaluate_at_cached(cell: Cell, bundle: Bundle, model, spec: Backbone, settings: RunSettings,
                         *, k: int, signature: str, want_probe: bool, want_timing: bool,
-                        cache: Path) -> dict[str, Any]:
+                        cache: Path, previous: dict[str, Any] | None = None,
+                        on_progress: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
     evaluate = _evaluate_module()
     gallery = queries = None
     try:
@@ -246,25 +264,36 @@ def _evaluate_at_cached(cell: Cell, bundle: Bundle, model, spec: Backbone, setti
             batch_size=settings.encode_batch_size, cache_dir=cache,
             identity=_encode_identity(cell, bundle, "validation", k, signature),
             progress_stage=f"encode {cell.slug} K={k} queries")
-        scored = evaluate.top1_accuracy(
-            gallery, bundle.train.labels, queries, bundle.validation.labels,
-            dim=spec.preset.hidden_dim, device=settings.fit.device,
-            gallery_chunk=settings.gallery_chunk, query_block=settings.query_block)
-        point: dict[str, Any] = {
-            "k": k,
-            "top1": scored["top1"],
-            "queries": scored["queries"],
-            "empty_queries": scored["empty_queries"],
-            "seconds": scored["seconds"],
-            "backend": scored.get("backend"),
-            "mean_neighbour_score": scored.get("mean_neighbour_score"),
-            "nnz_mean": gallery["stats"]["nnz_mean"],
-            "nnz_min": gallery["stats"]["nnz_min"],
-            "empty_gallery_codes": gallery["stats"]["empty_codes"],
-            "encode_seconds": gallery["stats"]["seconds"] + queries["stats"]["seconds"],
-            "timing_status": "not_requested",
-        }
-        if want_probe and settings.linear_probe:
+        accuracy_settings = replace(settings, linear_probe=False, measure_timing=False)
+        reusable = (previous and previous.get("signature") == signature
+                    and previous.get("k") == k and "nnz_mean" in previous
+                    and _cached_e1_complete(previous, accuracy_settings))
+        if reusable:
+            point = dict(previous)
+        else:
+            scored = evaluate.top1_accuracy(
+                gallery, bundle.train.labels, queries, bundle.validation.labels,
+                dim=spec.preset.hidden_dim, device=settings.fit.device,
+                gallery_chunk=settings.gallery_chunk, query_block=settings.query_block)
+            point = {
+                "k": k, "top1": scored["top1"], "queries": scored["queries"],
+                "empty_queries": scored["empty_queries"], "seconds": scored["seconds"],
+                "backend": scored.get("backend"),
+                "mean_neighbour_score": scored.get("mean_neighbour_score"),
+                "nnz_mean": gallery["stats"]["nnz_mean"],
+                "nnz_min": gallery["stats"]["nnz_min"],
+                "empty_gallery_codes": gallery["stats"]["empty_codes"],
+                "encode_seconds": gallery["stats"]["seconds"] + queries["stats"]["seconds"],
+            }
+        point["timing_status"] = "pending" if want_timing and settings.measure_timing else "not_requested"
+        if want_timing and settings.measure_timing:
+            point["timing_config"] = settings.timing_identity()
+            for stale in ("timing", "timing_error", "retrieval_ms", "index_bytes"):
+                point.pop(stale, None)
+        if on_progress is not None:
+            on_progress(dict(point))
+        probe_ready = _cached_e1_complete(point, replace(settings, measure_timing=False))
+        if want_probe and settings.linear_probe and not probe_ready:
             probe = evaluate.linear_probe(
                 gallery, bundle.train.labels, queries, bundle.validation.labels,
                 hidden_dim=spec.preset.hidden_dim, device=settings.fit.device,
@@ -273,15 +302,22 @@ def _evaluate_at_cached(cell: Cell, bundle: Bundle, model, spec: Backbone, setti
             probe_settings["epochs"] = int(probe.get("epochs", settings.probe_epochs))
             point.update(probe_top1=probe["top1"], probe_top5=probe.get("top5"),
                          probe_epochs=probe_settings["epochs"], probe_settings=probe_settings)
+            if on_progress is not None:
+                on_progress(dict(point))
         if want_timing and settings.measure_timing:
             # Retrieval cost is a secondary metric: it reports the trade-off CSR
             # argues for, but no accuracy depends on it. It refuses to run outside
             # CUDA, and a wall-clock measurement can fail for reasons that have
             # nothing to do with the fit, so it must never take the run down.
             point["timing_status"] = "attempted"
+            if on_progress is not None:
+                on_progress(dict(point))
             try:
                 timing = evaluate.time_sparse_matmul(
-                    gallery, queries, dim=spec.preset.hidden_dim, device=settings.fit.device)
+                    gallery, queries, dim=spec.preset.hidden_dim, device=settings.fit.device,
+                    query_batch=settings.timing_query_batch, warmup=settings.timing_warmup,
+                    rounds=settings.timing_rounds, gallery_chunk=settings.timing_gallery_chunk,
+                    build_entry_cap=settings.timing_build_entry_cap)
             except Exception as error:
                 point.update(timing_status="skipped", timing_error=f"{type(error).__name__}: {error}")
                 get_logger(cell.slug).warning("retrieval timing skipped (%s: %s)",
@@ -289,6 +325,8 @@ def _evaluate_at_cached(cell: Cell, bundle: Bundle, model, spec: Backbone, setti
             else:
                 point.update(retrieval_ms=_milliseconds(timing),
                              index_bytes=_index_bytes(timing), timing=timing, timing_status="success")
+            if on_progress is not None:
+                on_progress(dict(point))
         return point
     except BaseException as error:
         if not settings.retain_codes:
@@ -344,12 +382,13 @@ def _cached_e1_complete(record: dict[str, Any] | None, settings: RunSettings) ->
         if not (isinstance(epochs, int) and not isinstance(epochs, bool) and epochs == settings.probe_epochs):
             return False
     if settings.measure_timing:
-        if record.get("timing_status") in ("success", "skipped"):
-            return True
-        # Successful legacy measurements predate timing_status. A missing
-        # timing result/status is tried once and records CPU/toolchain skips.
-        if not isinstance(record.get("timing"), dict) or not record["timing"]:
+        if record.get("timing_config") != settings.timing_identity():
             return False
+        if record.get("timing_status") == "success":
+            return True
+        if record.get("timing_status") == "skipped":
+            return not settings.timing_retry_skipped
+        return False
     return True
 
 
@@ -366,12 +405,17 @@ def run_cell(cell: Cell, bundle: Bundle, settings: RunSettings, *, code_version:
     e1 = read_json(e1_path)
     if not (_cached_e1_complete(e1, settings) and e1.get("signature") == signature and not settings.force):
         model = load_fitted(cell, out_dir, spec, device=settings.fit.device)
+        metadata = {"experiment": "E1", "signature": signature, "backbone": cell.backbone,
+                    "method": cell.method, "k": cell.k, "seed": cell.seed,
+                    "train_seconds": summary["train_seconds"], "gpu_hours": summary["gpu_hours"]}
+
+        def persist_point(point):
+            atomic_json(e1_path, {**point, **metadata})
+
         point = evaluate_at(cell, bundle, model, spec, settings, k=cell.k,
-                            signature=signature, want_probe=True, want_timing=True)
-        e1 = {"experiment": "E1", "signature": signature, "backbone": cell.backbone,
-              "method": cell.method, "k": cell.k, "seed": cell.seed,
-              "train_seconds": summary["train_seconds"], "gpu_hours": summary["gpu_hours"],
-              **point}
+                            signature=signature, want_probe=True, want_timing=True,
+                            previous=e1 if not settings.force else None, on_progress=persist_point)
+        e1 = {**point, **metadata}
         atomic_json(e1_path, e1)
         log.info("E1 K=%d: top1 %.2f%% | nnz %.1f | probe %s", cell.k, e1["top1"],
                  e1["nnz_mean"], f"{e1['probe_top1']:.2f}%" if e1.get("probe_top1") else "-")
@@ -386,20 +430,40 @@ def run_cell(cell: Cell, bundle: Bundle, settings: RunSettings, *, code_version:
 
 def run_e2(cell: Cell, bundle: Bundle, settings: RunSettings, *, signature: str,
            e1: dict[str, Any]) -> dict[str, Any]:
-    """Evaluate one anchor checkpoint at every budget in the backbone's grid."""
+    """Evaluate one anchor at the selected inference budgets, reusing cached points."""
     spec = BACKBONES[cell.backbone]
+    budgets = spec.k_list if settings.e2_k_values is None else settings.e2_k_values
+    if (not budgets or any(isinstance(k, bool) or not isinstance(k, int)
+                           or not 1 <= k <= spec.dim for k in budgets)
+            or len(set(budgets)) != len(budgets)):
+        raise ValueError("E2 budgets must be distinct positive integers within the backbone width")
     out_dir = cell_dir(settings, cell)
     path = out_dir / "eval_e2.json"
     log = get_logger(f"E2 {cell.slug}")
     previous = read_json(path)
-    done = {point["k"]: point for point in (previous or {}).get("points", [])} \
+    # Keep unselected historical measurements available for a later wider run,
+    # but expose only the requested points to reports and plots.
+    done = {point["k"]: point for point in ((previous or {}).get("cached_points", [])
+                                          + (previous or {}).get("points", []))} \
         if previous and previous.get("signature") == signature and not settings.force else {}
     # The anchor's own budget is exactly the E1 measurement; never recompute it.
-    done.setdefault(cell.k, {key: e1[key] for key in
-                             ("k", "top1", "queries", "empty_queries", "seconds",
-                              "nnz_mean", "nnz_min", "empty_gallery_codes")
-                             if key in e1})
-    missing = [k for k in spec.k_list if k not in done]
+    if cell.k in budgets:
+        done.setdefault(cell.k, {key: e1[key] for key in
+                                 ("k", "top1", "queries", "empty_queries", "seconds",
+                                  "nnz_mean", "nnz_min", "empty_gallery_codes")
+                                 if key in e1})
+
+    def snapshot():
+        record = {"experiment": "E2", "signature": signature, "backbone": cell.backbone,
+                  "method": cell.method, "anchor_k": cell.k, "seed": cell.seed,
+                  "eval_k": list(budgets),
+                  "points": [done[k] for k in sorted(budgets) if k in done]}
+        unused = [done[k] for k in sorted(done) if k not in budgets]
+        if unused:
+            record["cached_points"] = unused
+        return record
+
+    missing = [k for k in budgets if k not in done]
     if missing:
         model = load_fitted(cell, out_dir, spec, device=settings.fit.device)
         progress = Progress(len(missing), stage=f"E2 {cell.slug}", what="budgets",
@@ -408,15 +472,10 @@ def run_e2(cell: Cell, bundle: Bundle, settings: RunSettings, *, signature: str,
             done[k] = evaluate_at(cell, bundle, model, spec, settings, k=k,
                                   signature=signature, want_probe=False, want_timing=False)
             progress.advance(1, extra=f"K={k} top1 {done[k]['top1']:.2f}% nnz {done[k]['nnz_mean']:.1f}")
-            atomic_json(path, {"experiment": "E2", "signature": signature,
-                               "backbone": cell.backbone, "method": cell.method,
-                               "anchor_k": cell.k, "seed": cell.seed,
-                               "points": [done[key] for key in sorted(done)]})
-    record = {"experiment": "E2", "signature": signature, "backbone": cell.backbone,
-              "method": cell.method, "anchor_k": cell.k, "seed": cell.seed,
-              "points": [done[key] for key in sorted(done)]}
+            atomic_json(path, snapshot())
+    record = snapshot()
     atomic_json(path, record)
-    log.info("anchor K=%d evaluated at %s", cell.k, ", ".join(str(k) for k in sorted(done)))
+    log.info("anchor K=%d evaluated at %s", cell.k, ", ".join(str(k) for k in sorted(budgets)))
     return record
 
 

@@ -76,13 +76,24 @@ class SparseAutoencoder(nn.Module):
         deterministic tie rule is imposed, because imposing one would change
         the baselines.
         """
+        dense, indices, _ = self.gate_with_selection(pre, k)
+        return dense, indices
+
+    def gate_with_selection(self, pre: torch.Tensor, k: int
+                            ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Gate once and retain its indices/values for activity bookkeeping.
+
+        Each requested K still runs its own TopK: taking prefixes of a wider
+        selection could change ties. Reusing this exact selection avoids a
+        second TopK solely to update the dead-latent counter.
+        """
         if isinstance(k, bool) or not isinstance(k, int) or k < 1:
             raise ValueError(f"K must be a positive integer, got {k!r}")
         if k > pre.shape[-1]:
             raise ValueError(f"K={k} exceeds hidden_dim={pre.shape[-1]}")
         selected = torch.topk(pre, k=k, dim=-1)
         dense = torch.zeros_like(pre).scatter_(-1, selected.indices, selected.values)
-        return F.relu(dense), selected.indices
+        return F.relu(dense), selected.indices, selected.values
 
     @torch.no_grad()
     def count_activity(self, pre: torch.Tensor, k: int) -> None:
@@ -96,9 +107,14 @@ class SparseAutoencoder(nn.Module):
         behaviour and callers must reproduce the same number of calls.
         """
         selected = torch.topk(pre.detach(), k=k, dim=-1)
+        self.count_selected_activity(selected.indices, selected.values)
+
+    @torch.no_grad()
+    def count_selected_activity(self, indices: torch.Tensor, values: torch.Tensor) -> None:
+        """Apply one released counter update from an already computed gate."""
         hit = torch.zeros_like(self.stats_last_nonzero)
-        hit.scatter_add_(0, selected.indices.reshape(-1),
-                         selected.values.gt(ACTIVE_EPSILON).to(hit.dtype).reshape(-1))
+        hit.scatter_add_(0, indices.reshape(-1),
+                         values.gt(ACTIVE_EPSILON).to(hit.dtype).reshape(-1))
         self.stats_last_nonzero *= 1 - hit.clamp(max=1)
         self.stats_last_nonzero += 1
 
@@ -156,14 +172,24 @@ class SparseAutoencoder(nn.Module):
     # --------------------------------------------------------- diagnostics
 
     @torch.no_grad()
-    def sparsity_report(self, z: torch.Tensor, k: int) -> dict[str, float]:
+    def sparsity_tensors(self, z: torch.Tensor, k: int) -> dict[str, torch.Tensor]:
+        """Device-side diagnostics, allowing one packed transfer with losses."""
         nnz = z.gt(0).sum(1)
-        return {"nnz_mean": float(nnz.float().mean()),
-                "nnz_min": int(nnz.min()),
-                "below_k_fraction": float(nnz.lt(k).float().mean()),
-                "empty_fraction": float(nnz.eq(0).float().mean()),
-                "dead_fraction": float(self.dead_mask().float().mean()),
-                "active_units": int(z.gt(0).any(0).sum())}
+        return {"nnz_mean": nnz.float().mean(),
+                "nnz_min": nnz.min(),
+                "below_k_fraction": nnz.lt(k).float().mean(),
+                "empty_fraction": nnz.eq(0).float().mean(),
+                "dead_fraction": self.dead_mask().float().mean(),
+                "active_units": z.gt(0).any(0).sum()}
+
+    @torch.no_grad()
+    def sparsity_report(self, z: torch.Tensor, k: int) -> dict[str, float]:
+        tensors = self.sparsity_tensors(z, k)
+        values = torch.stack([value.float() for value in tensors.values()]).cpu().tolist()
+        result = dict(zip(tensors, values))
+        for name in ("nnz_min", "active_units"):
+            result[name] = int(result[name])
+        return result
 
 
 def build_sae(input_dim: int, hidden_dim: int, *, seed: int,

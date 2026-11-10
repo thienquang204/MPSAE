@@ -114,7 +114,7 @@ def describe(method: str, k: int, preset: TrainPreset) -> dict[str, Any]:
 def compute_step(method: str, sae: SparseAutoencoder, x: torch.Tensor, *,
                  k: int, preset: TrainPreset, step: int, total_steps: int,
                  labels: torch.Tensor | None = None,
-                 update_activity: bool = True) -> StepOutput:
+                 update_activity: bool = True, collect_metrics: bool = True) -> StepOutput:
     """Evaluate one method's objective on one batch.
 
     Pre-activations are computed once and shared by every view. That is
@@ -122,7 +122,8 @@ def compute_step(method: str, sae: SparseAutoencoder, x: torch.Tensor, *,
     passes are deterministic and the encoder is linear, so gradients simply
     accumulate through one node instead of three -- but it costs a third of
     the encoder work. The *gate* count is not collapsed, because it drives the
-    dead-latent counter.
+    dead-latent counter. ``collect_metrics=False`` omits optional diagnostics
+    and host transfers; numerical guards still run before an update is allowed.
     """
     _check(method)
     if x.ndim != 2 or not len(x):
@@ -144,23 +145,27 @@ def compute_step(method: str, sae: SparseAutoencoder, x: torch.Tensor, *,
     middle = min(2 * budget, hidden)
 
     pre = sae.pre_activations(x)
-    z_main, _ = sae.gate(pre, budget)
+    z_main, main_indices, main_values = sae.gate_with_selection(pre, budget)
     # Gate 1 of 3. The dead mask must be read after this update, as released.
     if update_activity:
-        sae.count_activity(pre, budget)
+        sae.count_selected_activity(main_indices, main_values)
     z_aux = sae.auxiliary_latents(pre, preset.k_aux)
     reconstruction = sae.decode(z_main)
 
-    z_wide, _ = sae.gate(pre, wide)
+    z_wide, wide_indices, wide_values = sae.gate_with_selection(pre, wide)
     if update_activity:
-        sae.count_activity(pre, wide)             # gate 2 of 3
+        sae.count_selected_activity(wide_indices, wide_values)  # gate 2 of 3
 
     needs_middle = method in OT_METHODS or method in MULTITOPK
-    z_middle = sae.gate(pre, middle)[0] if needs_middle else None
+    if needs_middle:
+        z_middle, third_indices, third_values = sae.gate_with_selection(pre, middle)
+    else:
+        z_middle = None
+        third_indices, third_values = main_indices, main_values
     if update_activity:
         # Gate 3 of 3: the released duplicate K view for the contrastive
         # methods, the 2K view for ours.
-        sae.count_activity(pre, middle if needs_middle else budget)
+        sae.count_selected_activity(third_indices, third_values)
 
     main_term = losses.mse(reconstruction, x)
     wide_term = losses.mse(sae.decode(z_wide), x)
@@ -172,40 +177,46 @@ def compute_step(method: str, sae: SparseAutoencoder, x: torch.Tensor, *,
         "mse_4k": preset.nested_coef * wide_term,
         "aux": preset.aux_coef * aux_term,
     }
-    metrics: dict[str, float] = {
-        "training_k": budget, "view_2k": middle, "view_4k": wide,
-        "loss_mse_k": float(main_term.detach()),
-        "loss_mse_4k": float(wide_term.detach()),
-        "loss_aux": float(aux_term.detach()),
-    }
+    metric_tensors = {"loss_mse_k": main_term, "loss_mse_4k": wide_term,
+                      "loss_aux": aux_term} if collect_metrics else {}
+    metrics: dict[str, float] = {}
 
     if method in MULTITOPK:
         middle_term = losses.mse(sae.decode(z_middle), x)
         components["mse_2k"] = preset.nested_coef * middle_term
-        metrics["loss_mse_2k"] = float(middle_term.detach())
+        if collect_metrics:
+            metric_tensors["loss_mse_2k"] = middle_term
 
     if method in CL_METHODS:
-        # The release feeds two identical deterministic passes; passing the
-        # same tensor twice is exactly that, without a redundant gate.
-        if method == "csrv2":
-            regulariser = losses.label_based_cl(z_main, z_main, labels, preset.cl_temperature)
-        else:
-            regulariser = losses.inbatch_cl(z_main, z_main, preset.cl_temperature)
+        # Fold the multiplicities of the identical views into B x B logits.
+        regulariser = losses.duplicate_view_cl(
+            z_main, labels if method == "csrv2" else None, preset.cl_temperature)
         components["contrastive"] = preset.cl_coef * regulariser
-        metrics["loss_contrastive"] = float(regulariser.detach())
+        if collect_metrics:
+            metric_tensors["loss_contrastive"] = regulariser
     else:
         gap, gap_stats = ot.matching_gap(
             z_main, z_middle, z_wide, mass=preset.ot_mass, eta=preset.ot_eta,
             max_iters=preset.ot_max_iters, tol=preset.ot_tol,
-            microbatch=preset.ot_microbatch, max_refine_iters=preset.ot_max_refine_iters)
+            microbatch=preset.ot_microbatch, max_refine_iters=preset.ot_max_refine_iters,
+            collect_metrics=collect_metrics)
         components["ot"] = preset.ot_weight * gap
-        metrics["loss_ot"] = float(gap.detach())
-        metrics.update({f"ot_{name}": value for name, value in gap_stats.items()})
+        if collect_metrics:
+            metric_tensors["loss_ot"] = gap
+            metrics.update({f"ot_{name}": value for name, value in gap_stats.items()})
 
     total = sum(components.values())
     if not bool(torch.isfinite(total)):
         detail = {name: float(value.detach()) for name, value in components.items()}
         raise FloatingPointError(f"nonfinite {method} objective: {detail}")
-    metrics["loss_total"] = float(total.detach())
-    metrics.update(sae.sparsity_report(z_main, budget))
+    if collect_metrics:
+        metric_tensors["loss_total"] = total
+        metric_tensors.update(sae.sparsity_tensors(z_main, budget))
+        # One transfer for all losses and sparsity values, not one per metric.
+        values = torch.stack([value.detach().float() for value in metric_tensors.values()]
+                             ).cpu().tolist()
+        metrics.update(zip(metric_tensors, values))
+        for name in ("nnz_min", "active_units"):
+            metrics[name] = int(metrics[name])
+        metrics.update(training_k=budget, view_2k=middle, view_4k=wide)
     return StepOutput(loss=total, components=components, metrics=metrics, training_k=budget)

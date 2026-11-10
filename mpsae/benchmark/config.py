@@ -13,16 +13,21 @@ from typing import Any
 
 from ..config import BACKBONES, METHODS, SEEDS, Cell, grid, training_preset
 from ..io import canonical_hash
+from ..timing_config import timing_config
 
 DATASET_NAMES = ("eurosat", "flowers102", "sop")
-IMAGENET_DEFAULTS = {"enabled": True, "prepare": True, "train_k": None,
-                     "e1": True, "e2": True, "linear_probe": True, "timing": True}
+IMAGENET_DEFAULTS = {"enabled": True, "prepare": True, "train_k": None, "eval_k": None,
+                     "e1": True, "e2": True, "linear_probe": True, "timing": True,
+                     "timing_query_batch": 512, "timing_warmup": 100, "timing_rounds": 2000,
+                     "timing_gallery_chunk": 32768, "timing_build_entry_cap": 4194304,
+                     "timing_retry_skipped": False}
 DOWNSTREAM_DEFAULTS = {"enabled": True, "datasets": ["eurosat", "sop"],
                       "train_k": None, "eval_k": None, "mode": "frozen", "revisions": {},
                       "backbones": {}}
 EXECUTION_DEFAULTS = {"train_missing": True, "continue_on_error": True,
                      "retain_codes": False, "max_steps": 0,
-                     "storage_mode": "legacy", "cleanup_raw": False, "precomputed_only": False}
+                     "storage_mode": "legacy", "cleanup_raw": False, "precomputed_only": False,
+                     "train_log_every": 10, "checkpoint_every": 100, "feature_residency": "auto"}
 
 
 def _section(value, defaults, name):
@@ -109,8 +114,17 @@ class Campaign:
         maximum = result.execution["max_steps"]
         if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < 0:
             raise ValueError("execution.max_steps must be a nonnegative integer")
+        timing_config(**{name: result.imagenet["timing_" + name] for name in
+                         ("query_batch", "warmup", "rounds", "gallery_chunk", "build_entry_cap")})
+        for name in ("train_log_every", "checkpoint_every"):
+            value = result.execution[name]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"execution.{name} must be a positive integer")
+        if result.execution["feature_residency"] not in ("auto", "cuda", "cpu", "mmap"):
+            raise ValueError("execution.feature_residency must be auto, cuda, cpu or mmap")
         for backbone in result.backbones:
             result.budgets("imagenet", "train_k", backbone)
+            result.budgets("imagenet", "eval_k", backbone)
             result.budgets("downstream", "train_k", backbone)
             result.budgets("downstream", "eval_k", backbone)
         return result
@@ -124,7 +138,7 @@ class Campaign:
             value = value[backbone]
         if value is None:
             if section == "imagenet":
-                return spec.training_budgets
+                return spec.k_list if key == "eval_k" else spec.training_budgets
             if key == "eval_k":
                 return spec.k_list[:6]
             return (8,) if 8 in spec.k_list else (spec.e2_anchors[0],)
@@ -178,6 +192,7 @@ class Campaign:
             for name in self.backbones}
         payload["resolved_budgets"] = {name: {
             "imagenet_train_k": self.budgets("imagenet", "train_k", name),
+            "imagenet_eval_k": self.budgets("imagenet", "eval_k", name),
             "downstream_train_k": self.budgets("downstream", "train_k", name),
             "downstream_eval_k": self.budgets("downstream", "eval_k", name)}
             for name in self.backbones}

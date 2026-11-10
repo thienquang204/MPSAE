@@ -11,6 +11,7 @@ three commands that run everything. These pages are the detail behind it.
 | [`pipeline.md`](pipeline.md) | you are running, resuming or debugging the pipeline |
 | [`outputs.md`](outputs.md) | you are reading a result file, a table or a figure |
 | [`server.md`](server.md) | you are setting up a GPU box, or a CUDA/driver combination is misbehaving |
+| [`performance.md`](performance.md) | you need the optimized trainer, bounded retrieval timing or GPU profiling commands |
 | [`notes/mpsaev2_legacy_A.md`](notes/mpsaev2_legacy_A.md) | you want the MPSAEv2 variant we specified but did not implement |
 
 ## The two rules everything follows

@@ -26,8 +26,10 @@ from .features import Bundle, BatchSource
 from .io import atomic_json, canonical_hash, exclusive_lock, read_json, read_jsonl, truncate_jsonl
 from .logs import MetricWriter, Progress, format_duration, get_logger
 from .model import build_sae, parameter_bytes
+from .timing_config import runtime_fingerprint
 
 CHECKPOINT_FORMAT = "mpsae-fit-v2"
+RUNTIME_IMPLEMENTATION = "packed-metrics-reused-topk-batched-ot-v1"
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
@@ -310,6 +312,18 @@ def _fit(cell: Cell, bundle: Bundle, out_dir: str | Path, settings: FitSettings,
         last_metrics = {key: value for key, value in prior_records[keep - 1].items()
                         if key not in {"wall", "step", "epoch", "batch", "lr", "rows", "elapsed"}}
 
+    # Runtime provenance stays outside the scientific fit identity. Completed
+    # fits are reused above; continuing an old checkpoint records the exact
+    # step where the equivalent implementation changed.
+    runtime_history = list((saved or {}).get("runtime_history", []))
+    runtime = {"implementation": RUNTIME_IMPLEMENTATION, "torch": str(torch.__version__),
+               "cuda": torch.version.cuda, "device": str(device),
+               "hardware": runtime_fingerprint(device),
+               "residency": source.residency, "log_every": settings.log_every,
+               "checkpoint_every": settings.checkpoint_every}
+    if not runtime_history or runtime_history[-1].get("runtime") != runtime:
+        runtime_history.append({"from_step": next_step, "runtime": runtime})
+
     def save(position: int) -> None:
         if device.type == "cuda":
             torch.cuda.synchronize(device)
@@ -317,6 +331,7 @@ def _fit(cell: Cell, bundle: Bundle, out_dir: str | Path, settings: FitSettings,
                    "model": model.state_dict(), "optimizer": optimizer.state_dict(),
                    "rng": _rng_state(device), "next_step": position,
                    "last_metrics": last_metrics,
+                   "runtime_history": runtime_history,
                    "train_seconds": elapsed + time.perf_counter() - started}
         temporary = checkpoint_path.with_suffix(".partial")
         torch.save(payload, temporary)
@@ -328,14 +343,20 @@ def _fit(cell: Cell, bundle: Bundle, out_dir: str | Path, settings: FitSettings,
             for index, batch, labels in source.epoch(epoch, skip_batches=within):
                 if step >= total:
                     break
+                optimizer.zero_grad(set_to_none=True)
+                upcoming = step + 1
+                collect_metrics = (upcoming % settings.log_every == 0
+                                   or upcoming % settings.checkpoint_every == 0
+                                   or upcoming == total)
                 output = methods.compute_step(
                     cell.method, model, batch, k=cell.k, preset=preset,
-                    step=step, total_steps=total, labels=labels)
-                optimizer.zero_grad(set_to_none=True)
+                    step=step, total_steps=total, labels=labels,
+                    collect_metrics=collect_metrics)
                 output.loss.backward()
                 optimizer.step()
                 step += 1
-                last_metrics = output.metrics
+                if collect_metrics:
+                    last_metrics = output.metrics
                 if step % settings.log_every == 0 or step == total:
                     # ``elapsed`` is cumulative on purpose: logging is strided,
                     # so a per-record duration could not be summed into a total.
@@ -365,6 +386,7 @@ def _fit(cell: Cell, bundle: Bundle, out_dir: str | Path, settings: FitSettings,
         "peak_memory_bytes": int(torch.cuda.max_memory_allocated(device))
         if device.type == "cuda" else None,
         "residency": source.residency,
+        "runtime_history": runtime_history,
         "final_metrics": last_metrics,
         "parameters": sum(p.numel() for p in model.parameters()),
     }

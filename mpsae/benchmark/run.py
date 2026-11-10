@@ -461,12 +461,22 @@ def run_campaign(campaign: Campaign, workspace: str | Path, *, device="cuda:0",
                 for cell in (c for c in campaign.source_cells() if c.backbone == name):
                     out = root / "runs" / cell.slug
                     maximum = campaign.execution["max_steps"] or (2 if smoke else 0)
-                    fits = FitSettings(device=device, max_steps=maximum)
+                    fits = FitSettings(device=device, max_steps=maximum,
+                                       log_every=campaign.execution["train_log_every"],
+                                       checkpoint_every=campaign.execution["checkpoint_every"],
+                                       residency=campaign.execution["feature_residency"])
                     settings = RunSettings(root=root / "runs", embeddings_dir=root / "embeddings",
                                            cache_dir=root / "cache", fit=fits,
                                            linear_probe=campaign.imagenet["linear_probe"],
                                            run_e2=campaign.imagenet["e2"],
+                                           e2_k_values=campaign.budgets("imagenet", "eval_k", name),
                                            measure_timing=campaign.imagenet["timing"],
+                                           timing_query_batch=campaign.imagenet["timing_query_batch"],
+                                           timing_warmup=campaign.imagenet["timing_warmup"],
+                                           timing_rounds=campaign.imagenet["timing_rounds"],
+                                           timing_gallery_chunk=campaign.imagenet["timing_gallery_chunk"],
+                                           timing_build_entry_cap=campaign.imagenet["timing_build_entry_cap"],
+                                           timing_retry_skipped=campaign.imagenet["timing_retry_skipped"],
                                            retain_codes=campaign.execution["retain_codes"])
                     wants_imagenet = campaign.imagenet["enabled"] and cell.k in campaign.budgets(
                         "imagenet", "train_k", name)
@@ -516,7 +526,8 @@ def run_campaign(campaign: Campaign, workspace: str | Path, *, device="cuda:0",
                     catalog["checkpoints"][cell.slug] = checkpoint
                     if wants_imagenet:
                         e1 = read_json(out / "eval_e1.json") if campaign.imagenet["e1"] else None
-                        e2 = read_json(out / "eval_e2.json") if campaign.imagenet["e2"] else None
+                        e2 = (read_json(out / "eval_e2.json")
+                              if campaign.imagenet["e2"] and cell.k in spec.e2_anchors else None)
                         catalog["imagenet"].append({"backbone": name, "method": cell.method,
                             "k": cell.k, "seed": cell.seed, "path": str(out),
                             "config": read_json(out / "config.json"), "e1": e1, "e2": e2,

@@ -439,7 +439,7 @@ def test_real_cpu_smoke_campaign_when_torch_is_available(tmp_path, monkeypatch):
     monkeypatch.setitem(BACKBONES, "rn18", tiny)
     campaign = Campaign.from_mapping({
         "name": "real_cpu_smoke", "backbones": ["rn18"], "methods": ["csr"],
-        "seeds": [1227], "imagenet": {"train_k": [8], "e2": False,
+        "seeds": [1227], "imagenet": {"train_k": [8], "eval_k": [4, 8], "e2": True,
                                        "linear_probe": False, "timing": False},
         "downstream": {"datasets": ["eurosat"], "train_k": [8], "eval_k": [2, 8]},
         "execution": {"max_steps": 2, "retain_codes": False},
@@ -448,7 +448,10 @@ def test_real_cpu_smoke_campaign_when_torch_is_available(tmp_path, monkeypatch):
                                  embed_batch_size=16, smoke=True)
     status = run.campaign_status(campaign, tmp_path, smoke=True)
     assert manifest["complete"] and status["state"]["complete"]
-    assert manifest["completed"] == {"source_cells": 1, "imagenet_e1": 1, "imagenet_e2": 0}
+    assert manifest["completed"] == {"source_cells": 1, "imagenet_e1": 1, "imagenet_e2": 1}
+    e2 = read_json(tmp_path / "smoke-real_cpu_smoke" / "runs" / "rn18" / "csr"
+                   / "k8" / "seed1227" / "eval_e2.json")
+    assert [point["k"] for point in e2["points"]] == [4, 8]
     assert len(status["catalog"]["evaluations"]) == 3
     assert all(not point["scientific"] for point in status["catalog"]["evaluations"])
     assert Path(status["workspace"]) != tmp_path

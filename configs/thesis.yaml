@@ -1,3 +1,4 @@
+# Main-result experiment. Previous grid: ../large_scale_abblation.md.
 # Published embeddings only. Training presets remain in mpsae/config.py.
 # HF coverage checked 2026-11-09: Flowers102 has no bundles; SOP has three.
 name: thesis
@@ -7,18 +8,45 @@ seeds: [1227]
 imagenet:
   enabled: true
   prepare: false
-  train_k: null                  # registered training grid; modern backbones: 12,48,96,192,384
+  train_k:
+    ff2048: [8, 64]
+    rn18: [8, 64]
+    convnext_tiny: [12]
+    vit_b16: [12]
+    dinov2_vits14: [12]
+  eval_k:                       # E2 inference budgets; E1 evaluates at train_k
+    ff2048: [8, 64]
+    rn18: [8, 64]
+    convnext_tiny: [12]
+    vit_b16: [12]
+    dinov2_vits14: [12]
   e1: true
   e2: true
   linear_probe: true
   timing: true
+  timing_query_batch: 512
+  timing_warmup: 100
+  timing_rounds: 2000
+  timing_gallery_chunk: 32768
+  timing_build_entry_cap: 4194304
+  timing_retry_skipped: false
 downstream:
   enabled: true
   datasets: [eurosat, sop]
   backbones:
     sop: [ff2048, rn18, convnext_tiny]
-  train_k: null                  # 8 for ResNets, first registered anchor for modern backbones
-  eval_k: null                   # first six registered budgets for each backbone
+  train_k:                      # reuse one ImageNet checkpoint per method/backbone
+    ff2048: [8]
+    rn18: [8]
+    convnext_tiny: [12]
+    vit_b16: [12]
+    dinov2_vits14: [12]
+  eval_k:
+    ff2048: [8, 64]
+    rn18: [8, 64]
+    convnext_tiny: [12]
+    vit_b16: [12]
+    dinov2_vits14: [12]
   mode: frozen
   revisions: {}                  # main is resolved once to an immutable commit
 execution:
@@ -29,3 +57,6 @@ execution:
   continue_on_error: true
   retain_codes: false            # metrics persist; avoid accumulating TB of codes
   max_steps: 0
+  train_log_every: 10
+  checkpoint_every: 100
+  feature_residency: auto
