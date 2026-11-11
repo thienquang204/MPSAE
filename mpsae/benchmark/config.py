@@ -16,7 +16,7 @@ from ..config import (BACKBONES, INFERENCE_BUDGETS, METHODS, METHOD_VARIANTS, SE
                       Cell, grid, inference_budgets, training_preset,
                       validate_experiment_methods, cell_objective_overrides)
 from ..io import canonical_hash
-from ..timing_config import timing_config
+from ..timing_config import DEFAULT_ROUNDS, DEFAULT_WARMUP, timing_config
 
 DATASET_NAMES = ("eurosat", "flowers102", "sop")
 DEFAULT_TASKS = {"eurosat": "knn_classification", "flowers102": "knn_classification",
@@ -24,7 +24,9 @@ DEFAULT_TASKS = {"eurosat": "knn_classification", "flowers102": "knn_classificat
 KNN_DEFAULTS = {"n_neighbors": [1, 20], "temperature": 0.07}
 IMAGENET_DEFAULTS = {"enabled": True, "prepare": True, "train_k": None, "eval_k": None,
                      "e1": True, "e2": True, "linear_probe": True, "timing": True,
-                     "timing_query_batch": 512, "timing_warmup": 100, "timing_rounds": 2000,
+                     "probe_k": None,
+                     "timing_query_batch": 512, "timing_warmup": DEFAULT_WARMUP,
+                     "timing_rounds": DEFAULT_ROUNDS,
                      "timing_gallery_chunk": 32768, "timing_build_entry_cap": 4194304,
                      "timing_retry_skipped": False}
 DOWNSTREAM_DEFAULTS = {"enabled": True, "datasets": ["eurosat", "sop"],
@@ -154,7 +156,36 @@ class Campaign:
             result.budgets("imagenet", "eval_k", backbone)
             result.budgets("downstream", "train_k", backbone)
             result.budgets("downstream", "eval_k", backbone)
+            result.probe_budgets(backbone)
         return result
+
+    def probe_budgets(self, backbone: str) -> tuple[int, ...] | None:
+        """None preserves all-K probing; a mapping opts only named K values in.
+
+        An omitted backbone or empty list in an explicit mapping disables its
+        probes. Selection refers to inference K, independently of train K.
+        The existing linear_probe switch remains the global master switch.
+        """
+        selection = self.imagenet.get("probe_k")
+        if selection is None:
+            return None
+        if not isinstance(selection, dict) or set(selection) - set(self.backbones):
+            raise ValueError("imagenet.probe_k must map selected backbones to K lists")
+        values = selection.get(backbone, [])
+        if isinstance(values, (list, tuple)) and not values:
+            return ()
+        values = _integers(values, f"imagenet.probe_k.{backbone}")
+        evaluated = set(self.budgets("imagenet", "eval_k", backbone)) if self.imagenet["e2"] else set()
+        if self.imagenet["e1"]:
+            evaluated.update(self.budgets("imagenet", "train_k", backbone))
+        if not set(values) <= evaluated:
+            raise ValueError(f"imagenet.probe_k.{backbone} must be a subset of evaluated K values")
+        return values
+
+    def wants_probe(self, backbone: str, k: int) -> bool:
+        selected = self.probe_budgets(backbone)
+        return bool(self.imagenet["enabled"] and self.imagenet["linear_probe"]
+                    and (selected is None or k in selected))
 
     def task_for(self, dataset: str) -> str:
         task = self.downstream.get("tasks", {}).get(dataset, DEFAULT_TASKS[dataset])
@@ -219,6 +250,9 @@ class Campaign:
         from dataclasses import asdict
 
         payload = asdict(self)
+        # The optional selector must not invalidate old plans when unused.
+        if payload["imagenet"].get("probe_k") is None:
+            payload["imagenet"].pop("probe_k", None)
         payload["downstream"]["tasks"] = {
             name: self.task_for(name) for name in self.downstream["datasets"]}
         payload["downstream"]["knn"] = knn_settings(self.downstream.get("knn"))
@@ -257,6 +291,20 @@ class Campaign:
         plan = {"name": self.name, "mode": "frozen", "plan_id": canonical_hash(self.resolved()),
                 "source_cells": len(self.source_cells()), "downstream_sparse_points": sparse,
                 "downstream_dense_points": dense, "config": self.resolved()}
+        e1 = set()
+        e2 = set()
+        if self.imagenet["enabled"]:
+            for cell in self.source_cells():
+                if cell.k not in self.budgets("imagenet", "train_k", cell.backbone):
+                    continue
+                if self.imagenet["e1"]:
+                    e1.add((cell, cell.k))
+                if self.imagenet["e2"] and cell.k in BACKBONES[cell.backbone].e2_anchors:
+                    e2.update((cell, k) for k in self.budgets("imagenet", "eval_k", cell.backbone))
+        plan.update(imagenet_e1_points=len(e1), imagenet_e2_points=len(e2),
+                    imagenet_shared_points=len(e1 & e2),
+                    imagenet_unique_points=len(e1 | e2),
+                    imagenet_probe_points=sum(self.wants_probe(c.backbone, k) for c, k in e1 | e2))
         if self.execution.get("storage_mode") == "direct_v1":
             rows = 1_281_167 + 50_000
             feature_bytes = ({n: rows * (BACKBONES[n].dim * 4 + 8) for n in self.backbones}

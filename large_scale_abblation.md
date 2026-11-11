@@ -4138,3 +4138,225 @@ execution:
   checkpoint_every: 100
   feature_residency: auto
 ```
+
+
+## 2026-11-11: before four-backbone ImageNet and selective probes
+
+Historical settings below included SOP. The new main campaign disables all downstream work and repeated timing, and selects linear probes by backbone and inference K. Training recipes, compatible checkpoints and feature archives are retained.
+
+### Previous configs/thesis.yaml
+
+```yaml
+# Main campaign: CSR, CSRv2, MPSAE. Previous settings: ../large_scale_abblation.md.
+# Published embeddings only. Training presets remain in mpsae/config.py.
+# Selected bundles: ImageNet for both; SOP retrieval for ResNet-50.
+# EuroSAT kNN and COCO/CLIP are deferred. Retrieval-only: configs/retrieval.yaml.
+name: thesis
+backbones: [ff2048, vit_b16]
+methods: [csr, csrv2, mpsae]
+seeds: [1227]
+imagenet:
+  enabled: true
+  prepare: false
+  train_k:
+    ff2048: [8, 16, 32, 256]
+    vit_b16: [12, 48]
+  eval_k:                       # E2 inference budgets; E1 evaluates at train_k
+    ff2048: [2, 16, 32, 256]
+    vit_b16: [12, 48]
+  e1: true
+  e2: true
+  linear_probe: true
+  timing: true
+  timing_query_batch: 512
+  timing_warmup: 100
+  timing_rounds: 2000
+  timing_gallery_chunk: 32768
+  timing_build_entry_cap: 4194304
+  timing_retry_skipped: false
+downstream:
+  enabled: true
+  datasets: [sop]
+  tasks:
+    sop: retrieval
+  backbones:
+    sop: [ff2048]
+  train_k:                      # evaluate every selected ImageNet checkpoint
+    ff2048: [8, 16, 32, 256]
+    vit_b16: [12, 48]
+  eval_k:
+    ff2048: [2, 16, 32, 256]
+    vit_b16: [12, 48]
+  mode: frozen
+  revisions: {}                  # main is resolved once to an immutable commit
+execution:
+  storage_mode: direct_v1        # isolated work/direct-v1; no FFCV image copy
+  precomputed_only: true        # missing/incompatible bundles fail without extracting images
+  cleanup_raw: false
+  train_missing: true
+  continue_on_error: true
+  retain_codes: false            # metrics persist; avoid accumulating TB of codes
+  max_steps: 0
+  train_log_every: 10
+  checkpoint_every: 100
+  feature_residency: auto
+```
+
+### Previous configs/precomputed.yaml
+
+```yaml
+# Main campaign: CSR, CSRv2, MPSAE. Previous settings: ../large_scale_abblation.md.
+# Selected published embeddings: ImageNet for ff2048/vit_b16; SOP for ff2048.
+# EuroSAT kNN and COCO/CLIP are deferred. Retrieval-only: configs/retrieval.yaml.
+# Same fitting/evaluation and target coverage as thesis.yaml.
+name: precomputed
+backbones: [ff2048, vit_b16]
+methods: [csr, csrv2, mpsae]
+seeds: [1227]
+imagenet:
+  enabled: true
+  prepare: false
+  train_k:
+    ff2048: [8, 16, 32, 256]
+    vit_b16: [12, 48]
+  eval_k:                       # E2 inference budgets; E1 evaluates at train_k
+    ff2048: [2, 16, 32, 256]
+    vit_b16: [12, 48]
+  e1: true
+  e2: true
+  linear_probe: true
+  timing: true
+  timing_query_batch: 512
+  timing_warmup: 100
+  timing_rounds: 2000
+  timing_gallery_chunk: 32768
+  timing_build_entry_cap: 4194304
+  timing_retry_skipped: false
+downstream:
+  enabled: true
+  datasets: [sop]
+  tasks:
+    sop: retrieval
+  backbones:
+    sop: [ff2048]
+  train_k:
+    ff2048: [8, 16, 32, 256]
+    vit_b16: [12, 48]
+  eval_k:
+    ff2048: [2, 16, 32, 256]
+    vit_b16: [12, 48]
+  mode: frozen
+  revisions: {}
+execution:
+  storage_mode: direct_v1
+  precomputed_only: true
+  cleanup_raw: false
+  train_missing: true
+  continue_on_error: true
+  retain_codes: false
+  max_steps: 0
+  train_log_every: 10
+  checkpoint_every: 100
+  feature_residency: auto
+```
+
+
+## 2026-11-11: before adding DINOv2 and short timing defaults
+
+Previous main campaign: 3 methods, 4 backbones, 39 SAE fits, 219 E2 points, 84 linear probes. Downstream and timing were disabled. Omitted timing settings resolved to 100 warmup and 2000 measured rounds. The new 5/5 settings affect retrieval timing only, not the training schedule or OT solver.
+
+### Previous configs/thesis.yaml
+
+```yaml
+# Main ImageNet campaign. Previous settings: ../large_scale_abblation.md.
+# Precomputed embeddings; source training recipes remain in mpsae/config.py.
+# No downstream evaluation or repeated retrieval timing in this campaign.
+name: thesis
+backbones: [ff2048, vit_b16, convnext_tiny, rn18]
+methods: [csr, csrv2, mpsae]
+seeds: [1227]
+imagenet:
+  enabled: true
+  prepare: false
+  train_k:
+    ff2048: [8, 16, 32, 256]
+    vit_b16: [12, 48, 192]
+    convnext_tiny: [12, 48, 192]
+    rn18: [8, 32, 128]
+  eval_k:                       # fixed checkpoint, inference sweep; E1 also measures train_k
+    ff2048: [2, 16, 32, 256]
+    vit_b16: [3, 12, 48, 96, 192, 384]
+    convnext_tiny: [3, 12, 48, 96, 192, 384]
+    rn18: [2, 8, 16, 32, 64, 128, 256]
+  e1: true
+  e2: true
+  linear_probe: true
+  probe_k:                      # inference K, applied equally to E1 and E2
+    ff2048: [2, 16, 32, 256]
+    vit_b16: [3, 48, 96, 384]
+    convnext_tiny: []            # 1-NN only
+    rn18: []                     # 1-NN only
+  timing: false
+downstream:
+  enabled: false                # no SOP, EuroSAT, Flowers102 or COCO tasks/downloads
+  datasets: [sop]                # inactive placeholder for optional future campaigns
+execution:
+  storage_mode: direct_v1
+  precomputed_only: true
+  cleanup_raw: false
+  train_missing: true
+  continue_on_error: true
+  retain_codes: false
+  max_steps: 0
+  train_log_every: 10
+  checkpoint_every: 100
+  feature_residency: auto
+```
+
+### Previous configs/precomputed.yaml
+
+```yaml
+# Main ImageNet campaign. Previous settings: ../large_scale_abblation.md.
+# Precomputed embeddings; source training recipes remain in mpsae/config.py.
+# No downstream evaluation or repeated retrieval timing in this campaign.
+name: precomputed
+backbones: [ff2048, vit_b16, convnext_tiny, rn18]
+methods: [csr, csrv2, mpsae]
+seeds: [1227]
+imagenet:
+  enabled: true
+  prepare: false
+  train_k:
+    ff2048: [8, 16, 32, 256]
+    vit_b16: [12, 48, 192]
+    convnext_tiny: [12, 48, 192]
+    rn18: [8, 32, 128]
+  eval_k:                       # fixed checkpoint, inference sweep; E1 also measures train_k
+    ff2048: [2, 16, 32, 256]
+    vit_b16: [3, 12, 48, 96, 192, 384]
+    convnext_tiny: [3, 12, 48, 96, 192, 384]
+    rn18: [2, 8, 16, 32, 64, 128, 256]
+  e1: true
+  e2: true
+  linear_probe: true
+  probe_k:                      # inference K, applied equally to E1 and E2
+    ff2048: [2, 16, 32, 256]
+    vit_b16: [3, 48, 96, 384]
+    convnext_tiny: []            # 1-NN only
+    rn18: []                     # 1-NN only
+  timing: false
+downstream:
+  enabled: false                # no SOP, EuroSAT, Flowers102 or COCO tasks/downloads
+  datasets: [sop]                # inactive placeholder for optional future campaigns
+execution:
+  storage_mode: direct_v1
+  precomputed_only: true
+  cleanup_raw: false
+  train_missing: true
+  continue_on_error: true
+  retain_codes: false
+  max_steps: 0
+  train_log_every: 10
+  checkpoint_every: 100
+  feature_residency: auto
+```

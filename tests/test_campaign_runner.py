@@ -223,6 +223,53 @@ def heavy_boundaries(monkeypatch):
     return captured
 
 
+def test_imagenet_only_routes_probe_selection_and_skips_all_targets(tmp_path, monkeypatch, heavy_boundaries):
+    from mpsae import features
+    from mpsae.report import figures
+
+    campaign = Campaign.from_mapping({"name": "selected_probes", "backbones": ["rn18", "vit_b16"],
+        "methods": ["csr"], "seeds": [1227], "imagenet": {
+            "train_k": {"rn18": [8], "vit_b16": [12]},
+            "eval_k": {"rn18": [2, 8], "vit_b16": [3, 12]},
+            "probe_k": {"rn18": [], "vit_b16": [3]}, "timing": False},
+        "downstream": {"enabled": False}})
+    for cell in campaign.source_cells():
+        _write_source(tmp_path, cell)
+        for split in ("train", "val"):
+            path = tmp_path / "embeddings" / cell.backbone / f"1K_{split}_{cell.backbone}.npz"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"fixture")
+    monkeypatch.setattr(features, "load_bundle", lambda *args: object())
+    monkeypatch.setattr(sys.modules["mpsae.runs"], "dense_reference", lambda spec, *args:
+                        {"top1": spec.reference_dense_top1 or 70})
+    routed = {}
+
+    def cached_source(cell, bundle, settings, **kwargs):
+        routed[cell.backbone] = settings.probe_k_values
+        assert settings.linear_probe and not settings.measure_timing
+        directory = settings.root / cell.slug
+        # Emulate a richer historical cache; catalog/report must filter it.
+        point = {"k": cell.k, "top1": 70, "probe_top1": 80}
+        atomic_json(directory / "eval_e1.json", point)
+        atomic_json(directory / "eval_e2.json", {"points": [
+            {**point, "k": k} for k in settings.e2_k_values]})
+
+    monkeypatch.setattr(sys.modules["mpsae.runs"], "run_cell", cached_source)
+    monkeypatch.setattr(figures, "build_all", lambda *args, **kwargs: {"skipped": []})
+    manifest = run.run_campaign(campaign, tmp_path, device="cpu", workers=0)
+    assert manifest["complete"] and manifest["downstream"] is None
+    assert routed == {"rn18": (), "vit_b16": (3,)}
+    assert heavy_boundaries.dataset_loads == heavy_boundaries.feature_calls == []
+    assert heavy_boundaries.rank_calls == heavy_boundaries.report_calls == []
+    catalog = run.campaign_status(campaign, tmp_path)["catalog"]
+    assert catalog["evaluations"] == []
+    for record in catalog["imagenet"]:
+        assert "probe_top1" not in record["e1"]
+        for p in record["e2"]["points"]:
+            assert ("probe_top1" in p) is (record["backbone"] == "vit_b16" and p["k"] == 3)
+        assert "probe_top1" in read_json(Path(record["path"]) / "eval_e1.json")
+
+
 def test_missing_ffcv_fails_before_downloading_any_dataset(tmp_path, monkeypatch, heavy_boundaries):
     from mpsae.report import figures
 

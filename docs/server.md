@@ -47,7 +47,9 @@ CUDA OOM; SAE training batch sizes remain the scientific presets.
 
 ## Dataset lifecycle
 
-The default `configs/thesis.yaml` selects ResNet-50 and ViT at K=8 with
+The default `configs/thesis.yaml` selects ImageNet for ResNet-50, ViT-B/16,
+ConvNeXt-Tiny, ResNet-18 and DINOv2-S/14 with selective probes (see README for the K grids),
+no downstream work and no repeated retrieval timing. It uses
 `storage_mode: direct_v1`, `precomputed_only: true`, and `cleanup_raw: false`.
 It downloads/reuses selected published embeddings, then trains and evaluates
 the sparse models. It does not extract backbones or remove raw images.

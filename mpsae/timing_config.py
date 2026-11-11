@@ -8,6 +8,9 @@ from __future__ import annotations
 PAPER_QUERY_BATCH = 512
 PAPER_WARMUP = 100
 PAPER_ROUNDS = 2000
+# Short campaign defaults; published-protocol constants remain explicit opt-ins.
+DEFAULT_WARMUP = 5
+DEFAULT_ROUNDS = 5
 DEFAULT_GALLERY_CHUNK = 32768
 DEFAULT_BUILD_ENTRY_CAP = 4 * 1024 * 1024
 TIMING_VERSION = "resident-sharded-csr-v1"
@@ -17,7 +20,7 @@ TIMING_SCOPE = ("warm_resident_batch_search_repeated;"
 
 
 def timing_config(*, query_batch: int = PAPER_QUERY_BATCH,
-                  warmup: int = PAPER_WARMUP, rounds: int = PAPER_ROUNDS,
+                  warmup: int = DEFAULT_WARMUP, rounds: int = DEFAULT_ROUNDS,
                   gallery_chunk: int = DEFAULT_GALLERY_CHUNK,
                   build_entry_cap: int = DEFAULT_BUILD_ENTRY_CAP) -> dict:
     values = dict(query_batch=query_batch, warmup=warmup, rounds=rounds,

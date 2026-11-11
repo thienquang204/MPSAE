@@ -208,9 +208,9 @@ backbone weights must match the source checkpoint.
 On 2026-11-11, commit `f67f3f36ea13e61bf70287a14a3f7df636131dda` contained all five
 ImageNet and EuroSAT bundles, and SOP for `ff2048`, `rn18`, `convnext_tiny`.
 Flowers102 and SOP for `vit_b16`, `dinov2_vits14` were absent. The supplied
-`thesis.yaml` and `precomputed.yaml` select three bundles: ImageNet for `ff2048`
-and `vit_b16`, plus SOP for ResNet-50. EuroSAT kNN is deferred from the main
-campaign; its existing bundles remain reusable in explicit custom campaigns.
+`thesis.yaml` and `precomputed.yaml` select five ImageNet bundles for
+`ff2048`, `vit_b16`, `convnext_tiny`, `rn18` and `dinov2_vits14`. All downstream tasks, including
+SOP, are deferred; their existing bundles remain reusable in explicit future campaigns.
 COCO image-text retrieval and CLIP are future work. Flowers102 is excluded because it
 has no published embeddings; absence alone does not prove the dataset is faulty.
 Run `status` to check current coverage. Per-dataset coverage is explicit:
@@ -300,8 +300,8 @@ have shrunk the gallery and made the dense gate unable to reach 71.19.
 
 ## Downstream benchmarks
 
-The main campaign implements frozen product retrieval for SOP. DINO weighted
-kNN on EuroSAT RGB and Flowers102 remains optional; see
+The main campaign disables all downstream evaluation. Frozen SOP product
+retrieval and DINO weighted kNN on EuroSAT RGB/Flowers102 remain optional; see
 [benchmark.md](benchmark.md) for their protocols. `data_usage.md` also
 lists planned datasets: DTD, VOC 2012, SPair-71k, DeepFashion In-Shop and
 ROxford/RParis. Two notes for those additions:

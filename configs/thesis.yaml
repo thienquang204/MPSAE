@@ -1,9 +1,8 @@
-# Main campaign: CSR, CSRv2, MPSAE. Previous settings: ../large_scale_abblation.md.
-# Published embeddings only. Training presets remain in mpsae/config.py.
-# Selected bundles: ImageNet for both; SOP retrieval for ResNet-50.
-# EuroSAT kNN and COCO/CLIP are deferred. Retrieval-only: configs/retrieval.yaml.
+# Main ImageNet campaign. Previous settings: ../large_scale_abblation.md.
+# Precomputed embeddings; source training recipes remain in mpsae/config.py.
+# No downstream evaluation or repeated retrieval timing in this campaign.
 name: thesis
-backbones: [ff2048, vit_b16]
+backbones: [ff2048, vit_b16, convnext_tiny, rn18, dinov2_vits14]
 methods: [csr, csrv2, mpsae]
 seeds: [1227]
 imagenet:
@@ -11,42 +10,38 @@ imagenet:
   prepare: false
   train_k:
     ff2048: [8, 16, 32, 256]
-    vit_b16: [12, 48]
-  eval_k:                       # E2 inference budgets; E1 evaluates at train_k
+    vit_b16: [12, 48, 192]
+    convnext_tiny: [12, 48, 192]
+    rn18: [8, 32, 128]
+    dinov2_vits14: [12, 48, 192]
+  eval_k:                       # fixed checkpoint, inference sweep; E1 also measures train_k
     ff2048: [2, 16, 32, 256]
-    vit_b16: [12, 48]
+    vit_b16: [3, 12, 48, 96, 192, 384]
+    convnext_tiny: [3, 12, 48, 96, 192, 384]
+    rn18: [2, 8, 16, 32, 64, 128, 256]
+    dinov2_vits14: [3, 12, 48, 96, 192, 384]
   e1: true
   e2: true
   linear_probe: true
-  timing: true
-  timing_query_batch: 512
-  timing_warmup: 100
-  timing_rounds: 2000
-  timing_gallery_chunk: 32768
-  timing_build_entry_cap: 4194304
-  timing_retry_skipped: false
-downstream:
-  enabled: true
-  datasets: [sop]
-  tasks:
-    sop: retrieval
-  backbones:
-    sop: [ff2048]
-  train_k:                      # evaluate every selected ImageNet checkpoint
-    ff2048: [8, 16, 32, 256]
-    vit_b16: [12, 48]
-  eval_k:
+  probe_k:                      # inference K, applied equally to E1 and E2
     ff2048: [2, 16, 32, 256]
-    vit_b16: [12, 48]
-  mode: frozen
-  revisions: {}                  # main is resolved once to an immutable commit
+    vit_b16: [3, 48, 96, 384]
+    convnext_tiny: []            # 1-NN only
+    rn18: []                     # 1-NN only
+    dinov2_vits14: []            # 1-NN only
+  timing: false
+  timing_warmup: 5              # short timing protocol, if enabled
+  timing_rounds: 5
+downstream:
+  enabled: false                # no SOP, EuroSAT, Flowers102 or COCO tasks/downloads
+  datasets: [sop]                # inactive placeholder for optional future campaigns
 execution:
-  storage_mode: direct_v1        # isolated work/direct-v1; no FFCV image copy
-  precomputed_only: true        # missing/incompatible bundles fail without extracting images
+  storage_mode: direct_v1
+  precomputed_only: true
   cleanup_raw: false
   train_missing: true
   continue_on_error: true
-  retain_codes: false            # metrics persist; avoid accumulating TB of codes
+  retain_codes: false
   max_steps: 0
   train_log_every: 10
   checkpoint_every: 100

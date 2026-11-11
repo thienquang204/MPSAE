@@ -2,6 +2,7 @@
 # Run from the same workspace as thesis.yaml so compatible checkpoints/cache are reused.
 # Preserve source config/summary/checkpoint and backbone-provenance sidecars.
 # MPSAE train K=256 requires the current OT weight 0.5 checkpoint.
+# Historical opt-in only; excluded from the current main campaign.
 name: retrieval
 backbones: [ff2048]
 methods: [csr, csrv2, mpsae]

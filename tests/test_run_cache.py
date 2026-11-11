@@ -321,6 +321,40 @@ def test_interrupted_timing_preserves_accuracy_and_probe_and_only_retries_timing
     assert result["e1"]["retrieval_ms"] == 3.0
 
 
+def test_short_timing_refreshes_old_protocol_without_recomputing_accuracy(runs, tmp_path, monkeypatch):
+    from mpsae.io import atomic_json
+
+    cell = Cell("ff2048", "csr", 8, 1227)
+    settings = runs.RunSettings(root=tmp_path / "runs", cache_dir=tmp_path / "cache",
+                               retain_codes=False, run_e2=False)
+    old = {"k": 8, "signature": "fit", "top1": 75, "nnz_mean": 8,
+           "probe_top1": 80, "probe_epochs": 10,
+           "timing_config": replace(settings, timing_warmup=100, timing_rounds=2000).timing_identity(),
+           "timing_status": "success", "retrieval_ms": 100}
+    atomic_json(runs.cell_dir(settings, cell) / "eval_e1.json", old)
+    assert not runs._cached_e1_complete(old, settings)
+    evaluator, _ = _fake_evaluator()
+
+    def no_accuracy(*args, **kwargs):
+        pytest.fail("a timing protocol change must preserve accuracy and probe results")
+
+    calls = []
+    def measure(*args, warmup, rounds, **kwargs):
+        calls.append((warmup, rounds))
+        return {"milliseconds_per_batch": 3.0}
+
+    evaluator.top1_accuracy = evaluator.linear_probe = no_accuracy
+    evaluator.time_sparse_matmul = measure
+    monkeypatch.setattr(runs, "_evaluate_module", lambda: evaluator)
+    result = runs.run_cell(cell, _bundle(), settings, code_version="test")["e1"]
+    assert calls == [(5, 5)]
+    assert (result["top1"], result["probe_top1"]) == (75, 80)
+    assert result["retrieval_ms"] == 3.0
+    assert result["timing_config"] == settings.timing_identity()
+    runs.run_cell(cell, _bundle(), settings, code_version="test")
+    assert calls == [(5, 5)]
+
+
 def test_e2_selection_reuses_old_points_without_reporting_unselected_budgets(runs, tmp_path, monkeypatch):
     from mpsae.io import atomic_json, read_json
 
@@ -363,8 +397,80 @@ def test_e2_without_override_uses_current_inference_grid(runs, tmp_path, monkeyp
     settings = runs.RunSettings(root=tmp_path / "runs", fit=SimpleNamespace(device="cpu"),
                                linear_probe=False, measure_timing=False)
     result = runs.run_e2(cell, _bundle(), settings, signature="fit", e1={"k": 8, "top1": 75.0})
-    assert calls == [16, 32, 256]
-    assert [point["k"] for point in result["points"]] == [16, 32, 256]
+    assert calls == [2, 16, 32, 64, 128, 256]
+    assert [point["k"] for point in result["points"]] == [2, 8, 16, 32, 64, 128, 256]
+
+
+@pytest.mark.parametrize("backbone", ["ff2048", "vit_b16", "convnext_tiny", "rn18", "dinov2_vits14"])
+def test_selective_probes_apply_to_e1_e2_and_resume(runs, tmp_path, monkeypatch, backbone):
+    from mpsae.benchmark.config import load_campaign
+
+    campaign = load_campaign("configs/thesis.yaml")
+    cell = Cell(backbone, "csr", campaign.budgets("imagenet", "train_k", backbone)[0], 1227)
+    settings = runs.RunSettings(root=tmp_path / "runs", cache_dir=tmp_path / "cache",
+        retain_codes=False, measure_timing=False, probe_k_values=campaign.probe_budgets(backbone),
+        e2_k_values=campaign.budgets("imagenet", "eval_k", backbone))
+    evaluator, captured = _fake_evaluator()
+    probe_calls, accuracy_calls = [], []
+    original_probe, original_accuracy = evaluator.linear_probe, evaluator.top1_accuracy
+
+    def probe(gallery, *args, **kwargs):
+        probe_calls.append(gallery["values"].shape[1])
+        return original_probe(gallery, *args, **kwargs)
+
+    def accuracy(gallery, *args, **kwargs):
+        accuracy_calls.append(gallery["values"].shape[1])
+        return original_accuracy(gallery, *args, **kwargs)
+
+    def no_timing(*args, **kwargs):
+        pytest.fail("the current campaign must not run retrieval timing")
+
+    evaluator.linear_probe, evaluator.top1_accuracy, evaluator.time_sparse_matmul = probe, accuracy, no_timing
+    monkeypatch.setattr(runs, "_evaluate_module", lambda: evaluator)
+    result = runs.run_cell(cell, _bundle(), settings, code_version="test")
+    budgets = set(settings.e2_k_values) | {cell.k}
+    assert sorted(accuracy_calls) == sorted(budgets)
+    assert sorted(probe_calls) == sorted(campaign.probe_budgets(backbone))
+    assert ("probe_top1" in result["e1"]) is campaign.wants_probe(backbone, cell.k)
+    for point in result["e2"]["points"]:
+        assert ("probe_top1" in point) is campaign.wants_probe(backbone, point["k"])
+    assert runs.pending([cell], settings) == []
+    counts = (len(probe_calls), len(accuracy_calls), len(captured["directories"]))
+    runs.run_cell(cell, _bundle(), settings, code_version="test")
+    assert (len(probe_calls), len(accuracy_calls), len(captured["directories"])) == counts
+
+
+def test_widening_probe_selection_fills_only_missing_probes(runs, tmp_path, monkeypatch):
+    from mpsae.io import read_json
+
+    cell = Cell("vit_b16", "csr", 12, 1227)
+    settings = runs.RunSettings(root=tmp_path / "runs", cache_dir=tmp_path / "cache",
+        retain_codes=False, measure_timing=False, probe_k_values=(), e2_k_values=(3, 12, 48))
+    evaluator, _ = _fake_evaluator()
+    monkeypatch.setattr(runs, "_evaluate_module", lambda: evaluator)
+    runs.run_cell(cell, _bundle(), settings, code_version="test")
+
+    def no_accuracy(*args, **kwargs):
+        pytest.fail("adding a probe must not rerun completed 1-NN")
+
+    evaluator.top1_accuracy = no_accuracy
+    calls = []
+    original_probe = evaluator.linear_probe
+
+    def probe(gallery, *args, **kwargs):
+        calls.append(gallery["values"].shape[1])
+        return original_probe(gallery, *args, **kwargs)
+
+    evaluator.linear_probe = probe
+    selected = replace(settings, probe_k_values=(3, 48))
+    result = runs.run_cell(cell, _bundle(), selected, code_version="test")
+    assert calls == [3, 48]
+    assert "probe_top1" not in result["e1"]  # train K=12 is still 1-NN only
+    # Reducing the selection preserves richer disk caches without new work.
+    runs.run_cell(cell, _bundle(), settings, code_version="test")
+    saved = read_json(runs.cell_dir(settings, cell) / "eval_e2.json")
+    assert {p["k"] for p in saved["points"] if "probe_top1" in p} == {3, 48}
+    assert calls == [3, 48]
 
 
 def test_e2_upgrades_legacy_accuracy_reuses_anchor_and_resumes_probe(runs, tmp_path, monkeypatch):

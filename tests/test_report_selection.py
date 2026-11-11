@@ -10,6 +10,69 @@ from mpsae.report import aggregate, figures
 from mpsae.config import Cell, METHOD_VARIANTS
 
 
+@pytest.mark.parametrize("backbone", ["ff2048", "vit_b16", "convnext_tiny", "rn18", "dinov2_vits14"])
+def test_campaign_filters_old_probes_and_timing_without_erasing_cache(backbone):
+    from copy import deepcopy
+    from mpsae.benchmark.config import load_campaign
+    from mpsae.benchmark.run import _selected_imagenet_record
+
+    campaign = load_campaign("configs/thesis.yaml")
+    budgets = campaign.budgets("imagenet", "eval_k", backbone)
+    anchor = campaign.budgets("imagenet", "train_k", backbone)[0]
+    def point(k):
+        return {"k": k, "top1": 70, "probe_top1": 80, "probe_top5": 90,
+                "probe_settings": {"epochs": 10}, "probe_epochs": 10,
+                "retrieval_ms": 1.0, "index_bytes": 256, "timing_status": "success",
+                "timing_config": {"rounds": 2000}, "timing": {"median": 1.0}}
+    record = {"backbone": backbone, "k": anchor, "e1": point(anchor),
+              "e2": {"points": [point(k) for k in (*budgets, 1)], "cached_points": [point(512)]}}
+    original = deepcopy(record)
+    selected = _selected_imagenet_record(campaign, record)
+    assert record == original
+    assert "cached_points" not in selected["e2"]
+    assert [p["k"] for p in selected["e2"]["points"]] == list(budgets)
+    for p in [selected["e1"], *selected["e2"]["points"]]:
+        assert p["top1"] == 70
+        assert ("probe_top1" in p) is campaign.wants_probe(backbone, p["k"])
+        assert not any(k.startswith("probe_") for k in p) or campaign.wants_probe(backbone, p["k"])
+        assert not set(p) & {"retrieval_ms", "index_bytes", "timing_status", "timing_config", "timing"}
+
+
+def test_report_only_filters_old_catalog_and_skips_downstream(tmp_path, monkeypatch):
+    from mpsae.benchmark.config import Campaign
+    from mpsae.benchmark import run, report
+
+    campaign = Campaign.from_mapping({"backbones": ["rn18"], "methods": ["csr"], "seeds": [1227],
+        "imagenet": {"train_k": [8], "eval_k": [2, 8], "probe_k": {}, "timing": False},
+        "downstream": {"enabled": False}})
+    paths = run.campaign_paths(campaign, tmp_path)
+    record = _run(tmp_path / "runs", seed=1227)
+    record["backbone"] = "rn18"
+    record["e1"].update(probe_top1=90)
+    record["e2"] = {"points": [{"k": k, "top1": 60, "probe_top1": 90} for k in (2, 8)]}
+    catalog = {"checkpoints": {"fixture": {}}, "imagenet": [record], "dense": {}, "evaluations": []}
+    _write(paths["state"] / "catalog.json", catalog)
+    before = (paths["state"] / "catalog.json").read_bytes()
+    captured = []
+
+    def no_downstream(*args, **kwargs):
+        pytest.fail("disabled downstream must not produce a report")
+
+    def image_report(*args, records, **kwargs):
+        captured.extend(records)
+        return {"skipped": []}
+
+    monkeypatch.setattr(report, "build_report", no_downstream)
+    monkeypatch.setattr(figures, "build_all", image_report)
+    result = run.report_campaign(campaign, tmp_path)
+    assert result["complete"]
+    assert result["downstream"] is None
+    assert not (paths["reports"] / "downstream").exists()
+    assert "probe_top1" not in captured[0]["e1"]
+    assert all("probe_top1" not in p for p in captured[0]["e2"]["points"])
+    assert (paths["state"] / "catalog.json").read_bytes() == before
+
+
 def _write(path, payload):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")

@@ -36,10 +36,11 @@ def test_invalid_classifier_protocols_fail_at_plan_time(options):
 
 
 def test_classifier_changes_do_not_change_training_cells_or_presets():
-    original = load_campaign("configs/thesis.yaml")
-    original = replace(original, downstream={**deepcopy(original.downstream),
-        "datasets": ["eurosat", "sop"],
-        "tasks": {"eurosat": "knn_classification", "sop": "retrieval"}})
+    original = Campaign.from_mapping({"backbones": ["ff2048", "vit_b16"],
+        "seeds": [1227], "imagenet": {"train_k": {"ff2048": [8, 16, 32, 256], "vit_b16": [12, 48]}},
+        "downstream": {"datasets": ["eurosat", "sop"], "backbones": {"sop": ["ff2048"]},
+            "train_k": {"ff2048": [8, 16, 32, 256], "vit_b16": [12, 48]},
+            "eval_k": {"ff2048": [2, 16, 32, 256], "vit_b16": [12, 48]}}})
     changed = replace(original, downstream={**deepcopy(original.downstream),
         "knn": {"n_neighbors": [1, 5], "temperature": 0.1}})
     assert changed.plan()["plan_id"] != original.plan()["plan_id"]

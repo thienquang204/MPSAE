@@ -306,20 +306,51 @@ def evaluate_point(features, spec, root: Path, *, cell: Cell | None = None,
                 _remove_owned_cache(codes_root, root)
 
 
+def _selected_imagenet_record(campaign, record):
+    """Expose only current metrics; preserve richer source caches on disk."""
+    backbone = record["backbone"]
+
+    def point_view(point):
+        result = dict(point)
+        if not campaign.wants_probe(backbone, point["k"]):
+            result = {key: value for key, value in result.items() if not key.startswith("probe_")}
+        if not campaign.imagenet["timing"]:
+            for key in ("timing", "timing_config", "timing_status", "timing_error",
+                        "retrieval_ms", "index_bytes"):
+                result.pop(key, None)
+        return result
+
+    result = dict(record)
+    if result.get("e1"):
+        result["e1"] = point_view(result["e1"]) if campaign.imagenet["e1"] else None
+    if result.get("e2"):
+        if campaign.imagenet["e2"]:
+            budgets = campaign.budgets("imagenet", "eval_k", backbone)
+            result["e2"] = {**result["e2"], "eval_k": list(budgets),
+                "points": [point_view(p) for p in result["e2"].get("points", []) if p["k"] in budgets]}
+            result["e2"].pop("cached_points", None)
+        else:
+            result["e2"] = None
+    return result
+
+
 def _report(campaign, paths, catalog, failures):
     from ..report.figures import build_all
     from .report import build_report
 
     output = paths["reports"]
     output.mkdir(parents=True, exist_ok=True)
-    downstream = build_report(catalog["evaluations"], output / "downstream",
-                              expected_points=campaign.plan()["downstream_sparse_points"]
-                              + campaign.plan()["downstream_dense_points"],
-                              failures=failures, expected_seeds=campaign.seeds)
+    downstream = None
+    if campaign.downstream["enabled"]:
+        downstream = build_report(catalog["evaluations"], output / "downstream",
+                                  expected_points=campaign.plan()["downstream_sparse_points"]
+                                  + campaign.plan()["downstream_dense_points"],
+                                  failures=failures, expected_seeds=campaign.seeds)
     imagenet = None
     if campaign.imagenet["enabled"]:
         imagenet = build_all(paths["workspace"] / "runs", output / "imagenet",
-                             records=catalog["imagenet"], dense_references=catalog["dense"],
+                             records=[_selected_imagenet_record(campaign, r) for r in catalog["imagenet"]],
+                             dense_references=catalog["dense"],
                              seeds=campaign.seeds)
     selected = [c for c in campaign.source_cells() if campaign.imagenet["enabled"]
                 and c.k in campaign.budgets("imagenet", "train_k", c.backbone)]
@@ -330,11 +361,11 @@ def _report(campaign, paths, catalog, failures):
     completed = {"source_cells": len(catalog["checkpoints"]),
                  "imagenet_e1": sum(bool(r.get("e1")) for r in catalog["imagenet"]),
                  "imagenet_e2": sum(bool(r.get("e2")) for r in catalog["imagenet"])}
-    plot_issues = [reason for report in (downstream, imagenet or {})
+    plot_issues = [reason for report in (downstream or {}, imagenet or {})
                    for reason in report.get("skipped", [])
                    if "Error:" in reason or reason.startswith(("figures:", "all figures:"))]
     manifest = {"name": campaign.name, "plan_id": campaign.plan()["plan_id"],
-                "complete": not failures and not plot_issues and bool(downstream["complete"])
+                "complete": not failures and not plot_issues and (downstream is None or bool(downstream["complete"]))
                 and completed == expected,
                 "expected": expected, "completed": completed, "failures": failures,
                 "plot_issues": plot_issues,
@@ -529,6 +560,7 @@ def run_campaign(campaign: Campaign, workspace: str | Path, *, device="cuda:0",
                     settings = RunSettings(root=root / "runs", embeddings_dir=root / "embeddings",
                                            cache_dir=root / "cache", fit=fits,
                                            linear_probe=campaign.imagenet["linear_probe"],
+                                           probe_k_values=campaign.probe_budgets(name),
                                            run_e2=campaign.imagenet["e2"],
                                            e2_k_values=campaign.budgets("imagenet", "eval_k", name),
                                            measure_timing=campaign.imagenet["timing"],
@@ -589,12 +621,13 @@ def run_campaign(campaign: Campaign, workspace: str | Path, *, device="cuda:0",
                         e1 = read_json(out / "eval_e1.json") if campaign.imagenet["e1"] else None
                         e2 = (read_json(out / "eval_e2.json")
                               if campaign.imagenet["e2"] and cell.k in spec.e2_anchors else None)
-                        catalog["imagenet"].append({"backbone": name, "method": cell.method,
+                        catalog["imagenet"].append(_selected_imagenet_record(campaign, {
+                            "backbone": name, "method": cell.method,
                             "k": cell.k, "seed": cell.seed, "path": str(out),
                             "config": read_json(out / "config.json"), "e1": e1, "e2": e2,
                             "complete": e1 is not None, "missing": [],
                             "has_train_log": (out / "train.jsonl").is_file(),
-                            "code_version": checkpoint["source_code_version"]})
+                            "code_version": checkpoint["source_code_version"]}))
                     if direct or not wants_downstream:
                         del model
                         continue

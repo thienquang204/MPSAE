@@ -30,7 +30,7 @@ from .features import Bundle, load_bundle
 from .io import atomic_json, canonical_hash, read_json
 from .logs import Progress, banner, format_duration, get_logger
 from .train import FitSettings, fit, load_fitted
-from .timing_config import timing_config, runtime_fingerprint
+from .timing_config import DEFAULT_ROUNDS, DEFAULT_WARMUP, timing_config, runtime_fingerprint
 
 
 @dataclass
@@ -46,11 +46,12 @@ class RunSettings:
     gallery_chunk: int = 32768
     query_block: int = 8192
     linear_probe: bool = True
+    probe_k_values: tuple[int, ...] | None = None  # None: all K; empty: no probes
     probe_epochs: int = 10
     measure_timing: bool = True
     timing_query_batch: int = 512
-    timing_warmup: int = 100
-    timing_rounds: int = 2000
+    timing_warmup: int = DEFAULT_WARMUP
+    timing_rounds: int = DEFAULT_ROUNDS
     timing_gallery_chunk: int = 32768
     timing_build_entry_cap: int = 4 * 1024 * 1024
     timing_retry_skipped: bool = False
@@ -67,6 +68,11 @@ class RunSettings:
     #: Legacy callers retain code caches. Campaigns can discard them after
     #: each evaluation point to avoid multi-TiB E2 cache accumulation.
     retain_codes: bool = True
+
+    def at_budget(self, k: int) -> RunSettings:
+        """Resolve optional metrics for one inference K without changing the sweep."""
+        return replace(self, linear_probe=self.linear_probe and (
+            self.probe_k_values is None or k in self.probe_k_values))
 
     def timing_identity(self) -> dict[str, Any]:
         return {**timing_config(query_batch=self.timing_query_batch, warmup=self.timing_warmup,
@@ -239,6 +245,7 @@ def evaluate_at(cell: Cell, bundle: Bundle, model, spec: Backbone, settings: Run
                 on_progress: Callable[[dict[str, Any]], None] | None = None
                 ) -> dict[str, Any]:
     """Encode gallery and queries at budget ``k``, then score exact 1-NN."""
+    settings = settings.at_budget(k)
     identity = {"fit": signature, "data": bundle.identity, "k": k,
                 "backbone": cell.backbone, "method": cell.method, "seed": cell.seed}
     with _code_cache(settings, identity) as cache:
@@ -409,7 +416,8 @@ def run_cell(cell: Cell, bundle: Bundle, settings: RunSettings, *, code_version:
 
     e1_path = out_dir / "eval_e1.json"
     e1 = read_json(e1_path)
-    if not (_cached_e1_complete(e1, settings) and e1.get("signature") == signature and not settings.force):
+    e1_settings = settings.at_budget(cell.k)
+    if not (_cached_e1_complete(e1, e1_settings) and e1.get("signature") == signature and not settings.force):
         model = load_fitted(cell, out_dir, spec, device=settings.fit.device)
         metadata = {"experiment": "E1", "signature": signature, "backbone": cell.backbone,
                     "method": cell.method, "k": cell.k, "seed": cell.seed,
@@ -418,7 +426,7 @@ def run_cell(cell: Cell, bundle: Bundle, settings: RunSettings, *, code_version:
         def persist_point(point):
             atomic_json(e1_path, {**point, **metadata})
 
-        point = evaluate_at(cell, bundle, model, spec, settings, k=cell.k,
+        point = evaluate_at(cell, bundle, model, spec, e1_settings, k=cell.k,
                             signature=signature, want_probe=True, want_timing=True,
                             previous=e1 if not settings.force else None, on_progress=persist_point)
         e1 = {**point, **metadata}
@@ -473,7 +481,7 @@ def run_e2(cell: Cell, bundle: Bundle, settings: RunSettings, *, signature: str,
             record["cached_points"] = unused
         return record
 
-    missing = [k for k in budgets if not _cached_e1_complete(done.get(k), settings)]
+    missing = [k for k in budgets if not _cached_e1_complete(done.get(k), settings.at_budget(k))]
     if missing:
         model = load_fitted(cell, out_dir, spec, device=settings.fit.device)
         progress = Progress(len(missing), stage=f"E2 {cell.slug}", what="budgets",
@@ -486,7 +494,7 @@ def run_e2(cell: Cell, bundle: Bundle, settings: RunSettings, *, signature: str,
             # A legacy point inherits the enclosing E2 fit signature. Reuse its
             # accuracy while filling missing probe/timing measurements.
             cached = {**done[k], "signature": signature} if k in done else None
-            done[k] = evaluate_at(cell, bundle, model, spec, settings, k=k,
+            done[k] = evaluate_at(cell, bundle, model, spec, settings.at_budget(k), k=k,
                                   signature=signature, want_probe=True, want_timing=True,
                                   previous=cached, on_progress=persist_point)
             progress.advance(1, extra=f"K={k} top1 {done[k]['top1']:.2f}% nnz {done[k]['nnz_mean']:.1f}")
@@ -504,7 +512,7 @@ def pending(cells: Iterable[Cell], settings: RunSettings) -> list[Cell]:
     remaining = []
     for cell in cells:
         record = read_json(cell_dir(settings, cell) / "eval_e1.json")
-        if settings.force or not _cached_e1_complete(record, settings):
+        if settings.force or not _cached_e1_complete(record, settings.at_budget(cell.k)):
             remaining.append(cell)
     return remaining
 

@@ -124,7 +124,19 @@ def test_dense_tiles_match_full_matmul_with_negative_scores_and_ties():
 
 
 def test_timing_identity_changes_with_resource_or_sampling_settings():
+    import inspect
+    from mpsae.benchmark.config import Campaign
+    from mpsae.runs import RunSettings
+
     base = timing_config()
+    settings = RunSettings()
+    campaign = Campaign.from_mapping({})
+    assert base["warmup"] == base["rounds"] == 5
+    assert settings.timing_warmup == settings.timing_rounds == 5
+    assert campaign.imagenet["timing_warmup"] == campaign.imagenet["timing_rounds"] == 5
+    for entry in (timing.time_sparse_matmul, timing.time_dense_gemm):
+        parameters = inspect.signature(entry).parameters
+        assert parameters["warmup"].default == parameters["rounds"].default == 5
     for key in ("query_batch", "warmup", "rounds", "gallery_chunk", "build_entry_cap"):
         assert timing_config(**{key: base[key] + 1}) != base
         with pytest.raises(ValueError):
@@ -132,7 +144,8 @@ def test_timing_identity_changes_with_resource_or_sampling_settings():
     assert base["version"] == timing.TIMING_VERSION
 
 
-def test_progress_is_outside_measured_intervals(monkeypatch):
+@pytest.mark.parametrize("warmup,rounds", [(2, 3), (5, 5)])
+def test_progress_is_outside_measured_intervals(monkeypatch, warmup, rounds):
     state = {"active": False, "event": 0, "searches": 0}
     logs = []
     class Event:
@@ -154,18 +167,18 @@ def test_progress_is_outside_measured_intervals(monkeypatch):
     monkeypatch.setattr(torch.cuda, "current_stream", lambda device: None)
     monkeypatch.setattr(torch.cuda, "synchronize", lambda device: None)
     monkeypatch.setattr(timing, "get_logger", lambda name: SimpleNamespace(info=log))
-    result = timing._measure(search, device=torch.device("cuda"), warmup=2,
-                              rounds=3, progress_seconds=1e-12)
-    assert state["searches"] == 5
+    result = timing._measure(search, device=torch.device("cuda"), warmup=warmup,
+                              rounds=rounds, progress_seconds=1e-12)
+    assert state["searches"] == warmup + rounds
     assert result["cuda_seconds"]["median"] == 0.003
-    assert result["rounds"] == 3
+    assert result["rounds"] == rounds
     assert len(logs) >= 5
 
 
 def test_speedup_refuses_mixed_protocols():
     record = dict(queries_per_batch=512, index={"rows": 10, "index_bytes": 100},
                   cuda_seconds={"median": 0.1}, precision="float32_tf32_disabled",
-                  timing_scope=timing.TIMING_SCOPE, warmup=100, rounds=2000,
+                  timing_scope=timing.TIMING_SCOPE, warmup=5, rounds=5,
                   version=timing.TIMING_VERSION, config=timing_config(),
                   runtime={"device_name": "test GPU", "torch": "test", "cuda": "test"})
     assert timing.speedup(record, record)["dense_over_sparse"] == 1

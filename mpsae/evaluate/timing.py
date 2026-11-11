@@ -1,11 +1,10 @@
 """Retrieval-cost measurement: the efficiency figure, not a quality metric.
 
-Protocol from the papers' own efficiency experiments -- CSR App. E.3 and CSRv2
-App. G.1: queries are issued in batches of **512**, a batch is searched **100**
-times untimed to warm caches and autotuners, then **2000** timed rounds of the
-same batch are recorded. Repeating one resident batch is what the papers
-measure, so these numbers are throughput of a warm search, not cold latency and
-not single-query latency.
+Queries are issued in batches of **512**, with **5** untimed warmup searches
+and **5** timed rounds by default. The papers' longer 100/2000 schedule can be
+requested explicitly. The short schedule gives a quick estimate with fewer
+samples; it does not reproduce that longer timing protocol. Repeating one
+resident batch measures warm search throughput, not cold or single-query latency.
 
 Two paths are timed so the paper's speedup ratio can be reproduced:
 
@@ -39,7 +38,7 @@ import torch
 from ..io import human_bytes
 from ..logs import get_logger
 from ..timing_config import (DEFAULT_BUILD_ENTRY_CAP, DEFAULT_GALLERY_CHUNK,
-                             PAPER_QUERY_BATCH, PAPER_ROUNDS, PAPER_WARMUP,
+                             DEFAULT_ROUNDS, DEFAULT_WARMUP, PAPER_QUERY_BATCH,
                              SPARSE_BACKEND, TIMING_SCOPE, TIMING_VERSION,
                              runtime_fingerprint, timing_config)
 from .encode import CodeSource
@@ -57,7 +56,7 @@ _EXTENSION_FAILED = False
 # ------------------------------------------------------------------ summary
 
 def _summarise(samples: list[float]) -> dict[str, float]:
-    """Median first: the mean of 2000 rounds is skewed by occasional preemption."""
+    """Median first: occasional preemption can skew the mean."""
     ordered = sorted(samples)
     return {"median": statistics.median(ordered), "mean": statistics.fmean(ordered),
             "p90": ordered[min(len(ordered) - 1, int(0.9 * (len(ordered) - 1)))],
@@ -337,7 +336,7 @@ def sparse_sharded_top1(shards: tuple[torch.Tensor, ...], queries: torch.Tensor
 
 def time_sparse_matmul(gallery_compact: Any, queries_compact: Any, *, dim: int,
                        device: torch.device | str, query_batch: int = PAPER_QUERY_BATCH,
-                       warmup: int = PAPER_WARMUP, rounds: int = PAPER_ROUNDS,
+                       warmup: int = DEFAULT_WARMUP, rounds: int = DEFAULT_ROUNDS,
                        gallery_rows: int | None = None,
                        batch_index: int = 0,
                        gallery_chunk: int = DEFAULT_GALLERY_CHUNK,
@@ -393,8 +392,8 @@ def time_sparse_matmul(gallery_compact: Any, queries_compact: Any, *, dim: int,
 # ------------------------------------------------------------- dense GEMM path
 
 def time_dense_gemm(gallery: Any, queries: Any, *, dim: int, device: torch.device | str,
-                    query_batch: int = PAPER_QUERY_BATCH, warmup: int = PAPER_WARMUP,
-                    rounds: int = PAPER_ROUNDS, gallery_rows: int | None = None,
+                    query_batch: int = PAPER_QUERY_BATCH, warmup: int = DEFAULT_WARMUP,
+                    rounds: int = DEFAULT_ROUNDS, gallery_rows: int | None = None,
                     batch_index: int = 0, normalize: bool = False,
                     gallery_chunk: int = DEFAULT_GALLERY_CHUNK,
                     progress_seconds: float = 10.0) -> dict[str, Any]:

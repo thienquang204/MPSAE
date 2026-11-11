@@ -16,17 +16,27 @@ from mpsae.config import Cell
 
 
 @pytest.mark.parametrize("path", ["configs/thesis.yaml", "configs/precomputed.yaml"])
-def test_default_campaign_is_source_training_plus_frozen_transfer(path):
+def test_default_campaign_is_imagenet_only_with_selective_probes(path):
     campaign = load_campaign(path)
     plan = campaign.plan()
-    assert plan["source_cells"] == 18
-    assert plan["downstream_sparse_points"] == 48
-    assert plan["downstream_dense_points"] == 1
+    assert plan["source_cells"] == 48
+    assert plan["imagenet_e1_points"] == 48
+    assert plan["imagenet_e2_points"] == 273
+    assert plan["imagenet_shared_points"] == 45
+    assert plan["imagenet_unique_points"] == 276
+    assert plan["imagenet_probe_points"] == 84
+    assert plan["downstream_sparse_points"] == 0
+    assert plan["downstream_dense_points"] == 0
+    assert campaign.downstream["enabled"] is False
+    assert campaign.imagenet["timing"] is False
+    assert campaign.imagenet["timing_warmup"] == campaign.imagenet["timing_rounds"] == 5
+    from mpsae.embeddings_hub import campaign_selection
+    assert campaign_selection(campaign) == (["imagenet"], list(campaign.backbones))
     assert campaign.downstream["mode"] == "frozen"
     assert campaign.execution["precomputed_only"] is True
     assert campaign.seeds == (1227,)
-    assert campaign.target_backbones("sop") == ("ff2048",)
-    assert campaign.backbones == ("ff2048", "vit_b16")
+    assert campaign.target_backbones("sop") == ()
+    assert campaign.backbones == ("ff2048", "vit_b16", "convnext_tiny", "rn18", "dinov2_vits14")
     assert campaign.downstream["datasets"] == ["sop"]
 
 
@@ -36,7 +46,7 @@ def test_retrieval_only_campaign_reuses_main_sources_without_imagenet_work(tmp_p
     main = load_campaign("configs/thesis.yaml")
     retrieval = load_campaign("configs/retrieval.yaml")
     plan = retrieval.plan()
-    assert retrieval.source_cells() == main.downstream_cells("sop")
+    assert retrieval.source_cells() == [c for c in main.source_cells() if c.backbone == "ff2048"]
     assert retrieval.backbones == ("ff2048",)
     assert retrieval.downstream["datasets"] == ["sop"]
     assert retrieval.evaluation_options("sop") == main.evaluation_options("sop")
@@ -63,21 +73,23 @@ def test_dataset_backbone_selection_changes_plan_without_dropping_other_targets(
     assert campaign.target_backbones("eurosat") == ("rn18", "vit_b16")
     assert {cell.backbone for cell in campaign.downstream_cells("sop")} == {"rn18"}
     assert campaign.plan()["downstream_dense_points"] == 3
-    assert campaign.plan()["downstream_sparse_points"] == 8
+    assert campaign.plan()["downstream_sparse_points"] == 20
 
 
 @pytest.mark.parametrize("config", ["configs/thesis.yaml", "configs/precomputed.yaml"])
 @pytest.mark.parametrize("backbone,expected,training", [
     ("ff2048", (2, 16, 32, 256), (8, 16, 32, 256)),
-    ("vit_b16", (12, 48), (12, 48)),
+    ("vit_b16", (3, 12, 48, 96, 192, 384), (12, 48, 192)),
+    ("convnext_tiny", (3, 12, 48, 96, 192, 384), (12, 48, 192)),
+    ("dinov2_vits14", (3, 12, 48, 96, 192, 384), (12, 48, 192)),
+    ("rn18", (2, 8, 16, 32, 64, 128, 256), (8, 32, 128)),
 ])
-def test_campaigns_restrict_training_e2_and_downstream_to_requested_budgets(config, backbone, expected, training):
+def test_campaigns_restrict_training_and_e2_to_requested_budgets(config, backbone, expected, training):
     from mpsae.config import BACKBONES
     campaign = load_campaign(config)
     assert {cell.k for cell in campaign.source_cells() if cell.backbone == backbone} == set(training)
     assert campaign.budgets("imagenet", "eval_k", backbone) == expected
-    assert campaign.budgets("downstream", "eval_k", backbone) == expected
-    assert campaign.budgets("downstream", "train_k", backbone) == training
+    assert campaign.downstream_cells() == []
     assert campaign.resolved()["resolved_budgets"][backbone]["imagenet_eval_k"] == expected
     # Campaign selection does not remove the wider reference grids from the registry.
     assert set(expected) <= set(range(1, BACKBONES[backbone].dim + 1))
@@ -85,8 +97,10 @@ def test_campaigns_restrict_training_e2_and_downstream_to_requested_budgets(conf
 
 
 @pytest.mark.parametrize("backbone,expected", [
-    ("ff2048", (2, 16, 32, 256)), ("rn18", (16, 32, 256)),
-    ("vit_b16", (12, 48)),
+    ("ff2048", (2, 16, 32, 256)), ("rn18", (2, 8, 16, 32, 64, 128, 256)),
+    ("vit_b16", (3, 12, 48, 96, 192, 384)),
+    ("convnext_tiny", (3, 12, 48, 96, 192, 384)),
+    ("dinov2_vits14", (3, 12, 48, 96, 192, 384)),
 ])
 def test_default_inference_selection_matches_all_evaluation_families(backbone, expected):
     from mpsae.config import inference_budgets
@@ -96,18 +110,17 @@ def test_default_inference_selection_matches_all_evaluation_families(backbone, e
     assert campaign.budgets("downstream", "eval_k", backbone) == expected
 
 
-def test_new_source_models_are_evaluated_in_every_downstream_dataset():
+def test_new_source_models_are_imagenet_only():
     campaign = load_campaign("configs/thesis.yaml")
     from mpsae.config import METHODS
     for method in METHODS:
         expected = {("ff2048", method, k, 1227) for k in (8, 16, 32, 256)}
-        for dataset in campaign.downstream["datasets"]:
-            selected = {(c.backbone, c.method, c.k, c.seed)
-                        for c in campaign.downstream_cells(dataset) if c.backbone == "ff2048"
-                        and c.method == method}
-            assert selected == expected
+        selected = {(c.backbone, c.method, c.k, c.seed)
+                    for c in campaign.source_cells() if c.backbone == "ff2048" and c.method == method}
+        assert selected == expected
+        assert campaign.downstream_cells() == []
     assert sum(len(campaign.budgets("imagenet", "eval_k", c.backbone))
-               for c in campaign.source_cells()) == 60
+               for c in campaign.source_cells()) == 273
 
 
 @pytest.mark.parametrize("targets", [[], {"flowers102": ["rn18"]},
@@ -144,6 +157,33 @@ def test_smoke_and_scientific_workspaces_never_overlap(tmp_path):
 def test_invalid_or_adaptation_configs_are_rejected(payload):
     with pytest.raises(ValueError):
         Campaign.from_mapping(payload)
+
+
+@pytest.mark.parametrize("selection", [[2], {"typo": [2]}, {"rn18": [True]},
+    {"rn18": [2, 2]}, {"rn18": [999]}, {"rn18": [4]}, {"rn18": None}])
+def test_invalid_probe_selections_fail_before_training(selection):
+    with pytest.raises(ValueError, match="imagenet.probe_k"):
+        Campaign.from_mapping({"backbones": ["rn18"], "imagenet": {
+            "train_k": [8], "eval_k": [2, 8], "probe_k": selection}})
+
+
+def test_probe_selection_defaults_opt_in_and_master_switch():
+    from dataclasses import replace
+
+    original = Campaign.from_mapping({"backbones": ["ff2048", "rn18"],
+        "imagenet": {"train_k": [8], "eval_k": [2, 8]}, "downstream": {"enabled": False}})
+    assert original.probe_budgets("rn18") is None
+    assert original.wants_probe("rn18", 2)
+    assert "probe_k" not in original.resolved()["imagenet"]
+    selected = replace(original, imagenet={**original.imagenet, "probe_k": {"ff2048": [2]}})
+    assert selected.source_cells() == original.source_cells()
+    assert selected.resolved()["method_presets"] == original.resolved()["method_presets"]
+    assert selected.plan()["plan_id"] != original.plan()["plan_id"]
+    assert selected.wants_probe("ff2048", 2)
+    assert not selected.wants_probe("ff2048", 8)
+    assert not selected.wants_probe("rn18", 2)  # omitted backbones opt out
+    disabled = replace(selected, imagenet={**selected.imagenet, "linear_probe": False})
+    assert not disabled.wants_probe("ff2048", 2)
 
 
 def test_modern_backbones_support_explicit_per_backbone_budgets():

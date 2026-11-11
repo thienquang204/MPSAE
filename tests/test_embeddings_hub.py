@@ -341,8 +341,8 @@ def test_target_runner_keeps_dataset_with_selected_backbone(tmp_path, monkeypatc
     catalog = {"evaluations": []}
     storage.run_targets(campaign, tmp_path, catalog, device="cpu", workers=0, batch_size=2,
                         observer=None, task=lambda name, op: op())
-    assert len(catalog["evaluations"]) == 4  # dense + ResNet inference K=16/32/256
-    assert {options["k"] for options in evaluations if "k" in options} == {16, 32, 256}
+    assert len(catalog["evaluations"]) == 8  # dense + seven selected ResNet-18 inference budgets
+    assert {options["k"] for options in evaluations if "k" in options} == {2, 8, 16, 32, 64, 128, 256}
     assert all(options["task"] == "retrieval" and options["knn"] is None for options in evaluations)
     assert {row["backbone"] for row in catalog["evaluations"]} == {"rn18"}
 

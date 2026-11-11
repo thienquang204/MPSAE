@@ -76,16 +76,21 @@ available).
 imagenet:
   timing: true
   timing_query_batch: 512
-  timing_warmup: 100
-  timing_rounds: 2000
+  timing_warmup: 5
+  timing_rounds: 5
   timing_gallery_chunk: 32768
   timing_build_entry_cap: 4194304
   timing_retry_skipped: false
 ```
 
-The 100/2000 schedule remains the default. A diagnostic run can explicitly use
-10/50 instead; the settings are persisted and must not be mixed with reference
-timing results. Smaller gallery chunks bound score memory; a smaller build entry
+The default schedule is now 5 warmup searches and 5 timed searches. The main
+campaign keeps `timing: false`; the example above explicitly enables it. These
+are quick estimates with fewer samples than the previous 100/2000 schedule.
+The settings are persisted in timing identity, so old timings are not reused
+as 5/5 measurements. Standalone sparse and dense timing functions also default
+to 5/5; the old 100/2000 protocol remains available by explicit arguments.
+Only retrieval timing changes: training epochs, learning rates, checkpoint
+frequency and OT solver iterations are unchanged. Smaller gallery chunks bound score memory; a smaller build entry
 cap bounds sorting scratch. Neither changes the number of gallery rows.
 
 Accuracy and probe results are persisted before timing starts. On interruption,

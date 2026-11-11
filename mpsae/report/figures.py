@@ -332,11 +332,11 @@ def _inference_page(rows, out_dir, name, *, x="k", seeds=SEEDS, page_note=""):
     caption = (
         f"{page_note}ImageNet accuracy. Each method/seed uses the same frozen SAE checkpoint throughout "
         "each inference-K curve; rows separate backbones and training K. Linear probes are fitted "
-        "separately on training codes at each inference K and evaluated on validation codes. "
+        "separately on training codes at selected inference K values and evaluated on validation codes. "
         "The probe classifier is refitted; the SAE is not. Circles outline the training budget. "
         "Curves connect increasing inference K. Mean nonzeros, when used, count measured gallery "
         "entries and can be smaller than K. "
-        f"CSR-MTK denotes CSR multi-TopK. {seed_caption(seeds)}"
+        f"{seed_caption(seeds)}"
     )
     return save_figure(fig, out_dir, name, caption=caption)
 

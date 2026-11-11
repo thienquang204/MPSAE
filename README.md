@@ -19,10 +19,10 @@ applied silently.
 
 ## Run it
 
-One configuration selects the ImageNet experiments and frozen product retrieval
-on SOP. EuroSAT kNN is deferred from the main campaign; COCO image-text retrieval
-and CLIP are future work. `.env` holds credentials and environment settings;
-`configs/thesis.yaml` selects the experiments. No downstream fine-tuning runs.
+The main campaign selects ImageNet E1/E2 for ResNet-50, ViT-B/16,
+ConvNeXt-Tiny, ResNet-18 and DINOv2-S/14, with selective linear probing. All downstream
+experiments (including SOP) and repeated retrieval timing are disabled for now.
+`.env` holds credentials; `configs/thesis.yaml` selects the experiments.
 
 ```bash
 cp .env.example .env                       # if .env does not exist yet
@@ -61,8 +61,8 @@ bash all_in_one.sh
 # Add --skip-setup when the server environment is already installed.
 ```
 
-The default config selects ImageNet for `ff2048`, `vit_b16`
-and SOP for `ff2048`, whose bundles are
+The default config selects only ImageNet for `ff2048`, `vit_b16`,
+`convnext_tiny`, `rn18` and `dinov2_vits14`, whose bundles are
 available in [Lukita/MPSAE-embeddings](https://huggingface.co/datasets/Lukita/MPSAE-embeddings).
 Training still fits the sparse autoencoders. The download step verifies hashes
 and links archives into `work/direct-v1/`; the campaign checks dimensions,
@@ -72,19 +72,16 @@ on missing or incompatible features instead of extracting them.
 As checked on 2026-11-11, the repository has 13 of the wider registry's 20
 bundles: all ImageNet and EuroSAT backbones, plus SOP for `ff2048`, `rn18` and
 `convnext_tiny`. Flowers102 and the other two SOP backbones are missing.
-`configs/thesis.yaml` and `configs/precomputed.yaml` select 3 of those bundles:
-two ImageNet bundles and one SOP bundle.
-Flowers102 is excluded from these campaigns because no bundles are published;
-this does not establish a dataset defect. SOP remains enabled for the selected
-ResNet-50 through `downstream.backbones.sop`. Plans, downloads and
-reports use this same selection (48 sparse and 1 dense downstream evaluations).
+`configs/thesis.yaml` and `configs/precomputed.yaml` select five ImageNet
+bundles. No downstream bundles are selected, downloaded or evaluated.
 Unexpected missing or incompatible bundles fail explicitly rather than being
 silently dropped. Building new bundles requires a separate config with
 `precomputed_only: false`, `--build-missing-embeddings`, and a writable private
 embedding repository. See [docs/data.md](docs/data.md)
 for downloading separately and using the Python entry point.
 
-To run only the current SOP retrieval benchmark using completed source fits:
+The historical SOP config is retained for an explicit future opt-in; it is
+excluded from the current main campaign. To opt in using completed source fits:
 
 ```bash
 bash all_in_one.sh --config configs/retrieval.yaml --skip-setup
@@ -152,27 +149,60 @@ returns, and all search is PyTorch-only.
 
 ## The experiments
 
-**E1 — matched budget.** ResNet-50 is trained separately at **K=8, 16, 32, 256**;
-ViT-B/16 is trained separately at **K=12 and K=48**. Each selected training K
-has its own independent fit; the old ViT K=8 checkpoint is not a starting point.
-Compatible checkpoints at the selected budgets are reused.
+**E1 — matched budget.** Evaluate each checkpoint at its training K.
+**E2 — inference sweep.** Evaluate each fixed checkpoint at every inference K
+below. Linear probing is restricted independently of the 1-NN sweep.
 
-**E2 — fixed checkpoint, inference sweep.** Every selected ResNet checkpoint is
-evaluated at **K=2, 16, 32, 256**. Each ViT checkpoint is evaluated at **K=12 and K=48**.
-These same inference grids apply to every selected downstream checkpoint; the
-main downstream selection is SOP with ResNet-50 only. The campaign has **18 SAE
-fits**, **60 ImageNet E2 points** (15 shared with E1), and **48 sparse + 1 dense**
-downstream evaluations.
-HF backbone embeddings are reused. SAE weights remain fixed within each inference
-sweep. The shared fallback inference grid also uses 16/32/256 for ResNet-18 when
-that backbone is explicitly selected; it is not added to the active campaign.
-ImageNet linear probes are fitted separately on training codes at each K; their
-validation accuracy and 1-NN accuracy are both reported. The existing
-`imagenet.linear_probe` and `imagenet.timing` flags now apply to E2 as well as E1.
-Missing probe/timing components are filled without recomputing completed accuracy.
-The extra inference and probe evaluations do take additional time.
+| Backbone | Training K | Inference K (1-NN) | Linear-probe inference K |
+|---|---|---|---|
+| ResNet-50 (`ff2048`) | 8, 16, 32, 256 | 2, 16, 32, 256 | 2, 16, 32, 256 |
+| ViT-B/16 (`vit_b16`) | 12, 48, 192 | 3, 12, 48, 96, 192, 384 | 3, 48, 96, 384 |
+| ConvNeXt-Tiny (`convnext_tiny`) | 12, 48, 192 | 3, 12, 48, 96, 192, 384 | None |
+| ResNet-18 (`rn18`) | 8, 32, 128 | 2, 8, 16, 32, 64, 128, 256 | None |
+| DINOv2-S/14 (`dinov2_vits14`) | 12, 48, 192 | 3, 12, 48, 96, 192, 384 | None |
 
-**Downstream retrieval.** SOP searches its 60,502 test images against the same
+With CSR, CSRv2, MPSAE and seed 1227, this selects **48 SAE fits**, **273 E2
+points** (45 shared with E1), **276 unique sparse 1-NN conditions**, and **84
+unique linear probes**. The probes are part of those evaluated conditions,
+not additional SAE fits. Existing compatible fits and metrics are reused;
+DINOv2 adds 9 SAE fits to the previous 39-fit selection. These are 3 methods
+across 16 backbone/training-K pairs, with one seed. Backbone networks stay
+frozen; existing HF embeddings are reused. Linear classifiers add 84 fits
+only where requested, independently of the SAE count.
+
+`imagenet.probe_k` selects probes by backbone and **inference K** in both E1
+and E2. Thus ResNet-50 E1 at train K=8 and ViT E1 at train K=12/192 use 1-NN
+only. The same checkpoints still receive probes at the selected E2 K values.
+An empty list or omitted backbone in an explicit probe mapping disables that
+backbone's probes. `probe_k: null` keeps legacy all-K probing;
+`linear_probe: false` disables all probes regardless of the mapping.
+
+All selected points measure exact 1-NN on sparse codes. Each selected probe
+fits a separate linear classifier on ImageNet training codes and evaluates
+validation codes. The SAE stays frozen throughout each inference sweep.
+Source fits at different training K are independent, not sequential fine-tuning.
+Training epochs, learning rates, batch sizes and losses are unchanged. MPSAE's
+existing rule uses MMPOT weight 0.5 for **training K > 64**, otherwise 2.0;
+inference K never changes the trained objective.
+
+`downstream.enabled: false` omits all target data downloads, extraction,
+classification, retrieval and downstream reports. `imagenet.timing: false`
+disables repeated retrieval microbenchmarks. If enabled, timing now defaults
+to **5 warmup + 5 measured rounds**, including standalone timing calls.
+This short schedule gives a quick estimate with fewer samples than the old
+100/2000 protocol; timing identities keep the measurements separate.
+The training schedule and OT solver limits are unchanged. Ordinary 1-NN search still takes
+time, and its elapsed duration can remain in diagnostic tables. No dense or
+published reference curves are added; dense ImageNet 1-NN remains a feature
+integrity diagnostic.
+
+Selection changes create a new report plan without changing the fit identity.
+Completed accuracy is reused when adding missing probes. Historical probe and
+timing scores stay in source JSON caches but are filtered out of the current
+catalog, tables and plots when not selected. E1/E2 share completed anchor
+measurements. Re-running the campaign computes only missing compatible work.
+
+**Deferred downstream retrieval (opt-in only).** SOP searches its 60,502 test images against the same
 gallery, excluding each query's own image. Relevant images share a product
 `item_id`, not merely a broad category. The frozen ImageNet-trained SAE is
 evaluated at each inference K using Recall@1/10/100, Precision@10 and mAP@R.
@@ -195,11 +225,13 @@ no between-seed uncertainty band.
 
 The main ImageNet figures are `inference_summary*.pdf` (also PNG); long grids
 are split into parts with at most two backbone/training-K rows. Per-backbone
-`e2_generalisation_*` plots show linear probe and 1-NN against inference K.
+`e2_generalisation_*` plots show 1-NN and only the selected linear-probe points
+against inference K. ResNet-18, ConvNeXt and DINOv2 figures contain 1-NN only.
 `e2_nnz_*` uses measured gallery nonzeros instead, so saturation of MPSAE can
 compress its horizontal extent there without hiding the larger inference K points
 on the main figure. `e2_cost_*` shows search time, sparse top-1 search time and index
-memory where measured. SOP `quality_*` figures show R@1 and mAP@R;
+memory where measured. No timing microbenchmarks run in this campaign.
+For an explicit optional SOP campaign, `quality_*` figures show R@1 and mAP@R;
 `nonzeros_*`, `storage_*`, `paired_*` and `cost_*` show sparsity, storage,
 paired differences and search cost. Optional classification campaigns produce
 `classification_*` figures separately. All curves
@@ -207,18 +239,11 @@ keep training K fixed, and all figures export vector PDF, 300-dpi PNG and a
 separate caption. The [benchmark protocol](docs/benchmark.md) documents voting,
 ties, empty sparse codes and the relationship to the DINO implementation.
 
-Run `bash all_in_one.sh --skip-setup` for the full ImageNet + SOP campaign,
-or use `configs/retrieval.yaml` as above to evaluate existing fits only. Compatible
-existing checkpoints are reused. `report` alone only redraws measurements already
-present in that campaign's catalog; it cannot compute missing measurements. Full
-campaign outputs are under `work/direct-v1/reports/thesis/<plan_id>/`.
+Run `bash all_in_one.sh --skip-setup` for the selected ImageNet campaign.
+Compatible existing checkpoints are reused. `report` only redraws measurements
+already present in that campaign's catalog; it cannot compute missing work.
+Outputs are under `work/direct-v1/reports/thesis/<plan_id>/`.
 
-| backbone | d | recipe | preset | Training K budgets | E2 anchors | cells |
-|---|---|---|---|---|---|---|
-| `ff2048` | 2048 | MRL | Table 3 | 8, 16, 32, 256 | 8, 16, 32, 256 | 12 |
-| `vit_b16` | 768 | CSRv2 | Table 3 | 12, 48 | 12, 48 | 6 |
-
-18 cells = the selected backbone/K pairs x 3 methods x seed 1227.
 The previous five-method settings are preserved, including archived YAML and resolved presets,
 in [`large_scale_abblation.md`](large_scale_abblation.md) for a later ablation.
 The wider reference grids remain registered for explicit custom campaigns.
@@ -408,7 +433,8 @@ timing protocol and standalone GPU profiler.
   (h = 8192): roughly 20 s per point, so E1 ≈ 4 h and E2 ≈ 26 h on one H100.
   A sparse-product fast path for small K would cut E2 substantially.
 * `csrc/` is built but the inverted-index search driver is not wired in;
-  `evaluate/timing.py` currently measures the paper's `torch.sparse` protocol.
+  `evaluate/timing.py` uses a resident `torch.sparse` search with a short
+  5-warmup/5-measurement schedule by default.
 * The main frozen-transfer benchmark is product retrieval for Stanford Online
   Products. DINO weighted kNN for EuroSAT RGB and the HF custom Flowers102 split
   remains optional. COCO image-text retrieval and CLIP are deferred. DTD, VOC,

@@ -18,7 +18,11 @@ def test_campaign_marks_only_the_affected_training_cell_not_inference_budgets():
 
     current = load_campaign("configs/thesis.yaml")
     assert current.resolved()["cell_objective_overrides"] == {
-        "ff2048/mpsae/k256/seed1227": {"ot_weight": 0.5}}
+        "ff2048/mpsae/k256/seed1227": {"ot_weight": 0.5},
+        "vit_b16/mpsae/k192/seed1227": {"ot_weight": 0.5},
+        "convnext_tiny/mpsae/k192/seed1227": {"ot_weight": 0.5},
+        "rn18/mpsae/k128/seed1227": {"ot_weight": 0.5},
+        "dinov2_vits14/mpsae/k192/seed1227": {"ot_weight": 0.5}}
     low_k = Campaign.from_mapping({"backbones": ["ff2048"], "methods": ["mpsae"],
         "imagenet": {"train_k": [8], "eval_k": [256]},
         "downstream": {"train_k": [8], "eval_k": [256]}})

@@ -248,8 +248,10 @@ BACKBONE_ORDER = BRANCH1 + BRANCH2
 # silently evaluate a different grid from the configured campaigns.
 INFERENCE_BUDGETS: Mapping[str, tuple[int, ...]] = {
     "ff2048": (2, 16, 32, 256),
-    "rn18": (16, 32, 256),
-    "vit_b16": (12, 48),
+    "rn18": (2, 8, 16, 32, 64, 128, 256),
+    "vit_b16": (3, 12, 48, 96, 192, 384),
+    "convnext_tiny": (3, 12, 48, 96, 192, 384),
+    "dinov2_vits14": (3, 12, 48, 96, 192, 384),
 }
 
 
