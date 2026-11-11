@@ -35,6 +35,27 @@ def test_e1_omits_supplied_dense_reference(monkeypatch, tmp_path):
     assert len(captured[1].axes[0].lines) == 1  # no fallback to a published dense value
 
 
+def test_direct_plot_calls_exclude_retired_curves_and_training_diagnostics(monkeypatch, tmp_path):
+    captured = _capture(monkeypatch)
+    rows = [{"backbone": "ff2048", "method": method, "anchor_k": 8, "k": 16,
+             "top1_mean": score, "top1_n": 1,
+             "curve": {"step": [1, 2], "loss_total": [2.0, 1.0]}}
+            for method, score in (("csr", 60), ("mpsae", 61),
+                                   ("mpsaev2", 99), ("csr_multitopk", 98))]
+    figures.figure_e1_curves(rows, tmp_path, "ff2048")
+    figures._inference_figure(rows, tmp_path, "inference_summary")
+    figures.figure_backbone_summary(rows, tmp_path)
+    figures.figure_training(rows, tmp_path, "ff2048")
+    for fig in captured:
+        labels = {line.get_label() for ax in fig.axes for line in ax.lines}
+        assert not labels & {"MPSAEv2", "CSR-MTK", "csr_multitopk", "mpsaev2"}
+        assert {"CSR", "MPSAE"} <= labels
+    retired = rows[2:]
+    assert figures._inference_figure(retired, tmp_path, "retired_only") == []
+    assert figures.figure_backbone_summary(retired, tmp_path) == []
+    assert figures.figure_training(retired, tmp_path, "ff2048") == []
+
+
 def test_all_imagenet_overviews_ignore_reference_inputs(monkeypatch, tmp_path):
     captured = _capture(monkeypatch)
     dense = {backbone: {"top1": 99, "probe_top1": 100}

@@ -13,6 +13,13 @@ imagenet:
   timing: false
 downstream:
   datasets: [eurosat, flowers102, sop]
+  tasks:
+    eurosat: knn_classification
+    flowers102: knn_classification
+    sop: retrieval
+  knn:
+    n_neighbors: [1, 20]
+    temperature: 0.07
   train_k: [8]
   eval_k: [16, 32, 256]
   mode: frozen

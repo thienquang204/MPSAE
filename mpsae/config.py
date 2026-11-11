@@ -7,21 +7,31 @@ can be inspected, planned and reported on a machine without CUDA.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Mapping
+from typing import Iterable, Mapping
 
 # ---------------------------------------------------------------- methods
 
-#: Every trainable configuration. ``csr``/``csrv2`` are baselines reproducing
-#: the released algorithms; ``mpsae``/``mpsaev2`` are ours; ``csr_multitopk``
-#: is the ablation isolating the OT term from merely having three TopK views.
-METHODS = ("csr", "csrv2", "mpsae", "mpsaev2", "csr_multitopk")
+#: Methods admitted to experiments, profiling and current reports.
+METHODS = ("csr", "csrv2", "mpsae")
+#: Retain historical objectives for checkpoint inspection and numerical tests.
+#: This registry must never select work for a campaign or report.
+IMPLEMENTED_METHODS = (*METHODS, "mpsaev2", "csr_multitopk")
 BASELINES = ("csr", "csrv2")
-OURS = ("mpsae", "mpsaev2")
+OURS = ("mpsae",)
 
 # A changed objective gets its own storage namespace and campaign identity.
 # The unversioned mpsaev2 directory belongs to the former annealed OT-only fit.
 METHOD_VARIANTS = {"mpsaev2": "fixed_ot_cl_v1"}
 METHOD_EPOCHS = {"mpsaev2": 15}
+MPSAE_OT_K_THRESHOLD = 64
+MPSAE_HIGH_K_OT_WEIGHT = 0.5
+
+
+def validate_experiment_methods(methods: Iterable[str]) -> None:
+    for method in methods:
+        if method not in METHODS:
+            raise ValueError(f"method {method!r} is not enabled for experiments; "
+                             f"choose from {', '.join(METHODS)}")
 
 
 def method_directory(method: str) -> str:
@@ -81,13 +91,32 @@ FF2048_PRESET = TrainPreset(name="paper-table3", batch_size=4096, cl_coef=0.1)
 TIMM_PRESET = TrainPreset(name="paper-table9", batch_size=1024, cl_coef=1.0)
 
 
-def training_preset(method: str, preset: TrainPreset) -> TrainPreset:
+def effective_ot_weight(method: str, k: int, preset: TrainPreset) -> float:
+    """Use the target training K, never a wider view or an inference budget."""
+    if method == "mpsae" and k > MPSAE_OT_K_THRESHOLD:
+        return MPSAE_HIGH_K_OT_WEIGHT
+    return preset.ot_weight
+
+
+def validate_checkpoint_ot_weight(method: str, k: int, identity: Mapping, *,
+                                  context: str = "checkpoint") -> None:
+    """Do not relabel a historical high-K fit as the new MPSAE objective."""
+    if method == "mpsae" and k > MPSAE_OT_K_THRESHOLD:
+        observed = ((identity.get("objective") or {}).get("ot") or {}).get("weight")
+        if observed != MPSAE_HIGH_K_OT_WEIGHT:
+            raise RuntimeError(f"{context}: MPSAE K={k} requires MMPOT loss weight "
+                               f"{MPSAE_HIGH_K_OT_WEIGHT}, but the saved weight is {observed!r}. "
+                               "Archive the affected fit directory and train it from scratch.")
+
+
+def training_preset(method: str, preset: TrainPreset, *, k: int | None = None) -> TrainPreset:
     """Resolve method-specific batch size and duration; preserve other settings."""
-    if method not in METHODS:
+    if method not in IMPLEMENTED_METHODS:
         raise ValueError(f"unknown method {method!r}")
     if method == "mpsaev2":
         return replace(preset, batch_size=1024, epochs=METHOD_EPOCHS[method])
-    return replace(preset, batch_size=1024) if method in OURS else preset
+    result = replace(preset, batch_size=1024) if method in OURS else preset
+    return replace(result, ot_weight=effective_ot_weight(method, k, result)) if k is not None else result
 
 
 # ---------------------------------------------------------------- backbone
@@ -220,7 +249,7 @@ BACKBONE_ORDER = BRANCH1 + BRANCH2
 INFERENCE_BUDGETS: Mapping[str, tuple[int, ...]] = {
     "ff2048": (16, 32, 256),
     "rn18": (16, 32, 256),
-    "vit_b16": (3, 12, 48, 96),
+    "vit_b16": (12, 48),
 }
 
 
@@ -251,6 +280,8 @@ class Cell:
 def grid(backbones=BACKBONE_ORDER, methods=METHODS, seeds=SEEDS,
          k_values=None) -> list[Cell]:
     """Every training cell, in a stable order suitable for resumable runs."""
+    methods = tuple(methods)
+    validate_experiment_methods(methods)
     cells = []
     for name in backbones:
         spec = BACKBONES[name]
@@ -258,11 +289,20 @@ def grid(backbones=BACKBONE_ORDER, methods=METHODS, seeds=SEEDS,
             if k_values is not None and k not in set(k_values):
                 continue
             for method in methods:
-                if method not in METHODS:
-                    raise ValueError(f"unknown method {method!r}")
                 for seed in seeds:
                     cells.append(Cell(name, method, k, seed))
     return cells
+
+
+def cell_objective_overrides(cells: Iterable[Cell]) -> dict[str, dict[str, float]]:
+    """Record only selected budget overrides, preserving unaffected plan IDs."""
+    overrides = {}
+    for cell in cells:
+        base = training_preset(cell.method, BACKBONES[cell.backbone].preset)
+        weight = effective_ot_weight(cell.method, cell.k, base)
+        if weight != base.ot_weight:
+            overrides[cell.slug] = {"ot_weight": weight}
+    return overrides
 
 
 # ------------------------------------------------- CSRv2 annealing schedule

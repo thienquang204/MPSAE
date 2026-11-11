@@ -123,16 +123,46 @@ def test_training_summary_explicit_selection_ignores_malformed_unselected_log(tm
     assert aggregate.training_summary(root, selected_cells=[]) == []
 
 
-def test_imagenet_reports_added_instance_cl_as_a_paired_ablation(tmp_path, monkeypatch):
+def test_imagenet_reports_exclude_retired_methods_from_mixed_explicit_records(tmp_path, monkeypatch):
     root = tmp_path / "runs"
-    records = [_run(root, method="mpsae", top1=61, log=False),
-               _run(root, method="mpsaev2", top1=60, log=False)]
+    records = [_run(root, method=method, top1=value)
+               for method, value in (("csr", 59), ("csrv2", 60), ("mpsae", 61),
+                                     ("mpsaev2", 99), ("csr_multitopk", 98))]
+    for item in records:
+        item["e2"] = {"anchor_k": 8, "points": [{"k": 16, "top1": item["e1"]["top1"]}]}
+        if item["method"] in ("mpsaev2", "csr_multitopk"):
+            # Exclusion happens before validation of old objective metadata or logs.
+            item["config"] = None
+            (root / Cell("ff2048", item["method"], 8, 7).slug / "train.jsonl").write_text(
+                "invalid retired log", encoding="utf-8")
     _tables_only(monkeypatch)
     manifest = figures.build_all(root, tmp_path / "reports", records=records, seeds=(7,))
-    with open(manifest["tables"]["paired_mpsaev2_vs_mpsae"]["csv"], encoding="utf-8", newline="") as handle:
-        row, = list(csv.DictReader(handle))
-    assert float(row["delta_top1_mean"]) == -1
-    assert row["seeds_paired"] == "7"
+    assert manifest["counts"] == {"runs": 3, "runs_with_e1": 3, "e1_cells": 3,
+                                  "e2_points": 3, "training_logs": 3}
+    for table in ("e1_accuracy", "e2_generalisation", "training_summary"):
+        with open(manifest["tables"][table]["csv"], encoding="utf-8", newline="") as handle:
+            assert {row["method"] for row in csv.DictReader(handle)} == {"csr", "csrv2", "mpsae"}
+    assert {name for name in manifest["tables"] if name.startswith("paired_")} == {
+        "paired_mpsae_vs_csr", "paired_mpsae_vs_csrv2"}
+    assert {row["method"] for row in aggregate.aggregate_e1(records)} == {"csr", "csrv2", "mpsae"}
+    assert {row["method"] for row in aggregate.aggregate_e2(records)} == {"csr", "csrv2", "mpsae"}
+
+
+def test_workspace_reports_never_parse_retired_results_or_logs(tmp_path):
+    root = tmp_path / "runs"
+    _run(root, seed=1227)
+    for directory in ("csr_multitopk", "mpsaev2", "mpsaev2__fixed_ot_cl_v1"):
+        old = root / "ff2048" / directory / "k8" / "seed1227"
+        old.mkdir(parents=True, exist_ok=True)
+        for name in ("config.json", "eval_e1.json", "eval_e2.json", "train.jsonl"):
+            (old / name).write_text("invalid historical JSON", encoding="utf-8")
+    assert [row["method"] for row in aggregate.load_runs(root)] == ["csr"]
+    assert [row["method"] for row in aggregate.training_summary(root)] == ["csr"]
+    assert aggregate.training_summary(root, selected_cells=[
+        ("ff2048", "mpsaev2", 8, 1227), ("ff2048", "csr_multitopk", 8, 1227)]) == []
+    for old in root.glob("ff2048/*/k8/seed1227/config.json"):
+        if old.parents[2].name != "csr":
+            assert old.read_text(encoding="utf-8") == "invalid historical JSON"
 
 
 def test_explicit_duplicate_training_cells_are_rejected(tmp_path):

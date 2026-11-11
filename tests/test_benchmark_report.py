@@ -89,13 +89,41 @@ def test_paired_differences_never_cross_dataset_revision():
         record("csr", comparison_id="one"), record("mpsae", comparison_id="two")]) == []
 
 
-def test_hybrid_is_paired_with_mpsae_to_measure_added_instance_cl():
+def test_paired_comparison_is_mpsae_against_both_active_baselines():
     rows = report.paired_differences([
-        record("mpsae", value=0.7), record("mpsaev2", value=0.65)], expected_seeds=(1227,))
-    row, = rows
-    assert (row["treatment"], row["control"]) == ("mpsaev2", "mpsae")
-    assert row["delta_recall_at_1_mean"] == pytest.approx(-0.05)
-    assert row["seeds_paired"] == [1227]
+        record("mpsae", value=0.7), record("csr", value=0.6), record("csrv2", value=0.65),
+        record("mpsaev2", value=0.99), record("csr_multitopk", value=0.98)], expected_seeds=(1227,))
+    assert {(row["treatment"], row["control"]) for row in rows} == {
+        ("mpsae", "csr"), ("mpsae", "csrv2")}
+    deltas = {row["control"]: row["delta_recall_at_1_mean"] for row in rows}
+    assert deltas == pytest.approx({"csr": 0.1, "csrv2": 0.05})
+    assert all(row["seeds_paired"] == [1227] for row in rows)
+
+
+def test_reports_exclude_retired_records_before_validation_and_rendering(tmp_path, monkeypatch):
+    captured = []
+    def render(rows, paired, output):
+        captured.extend(rows)
+        return {}, [], {}
+    monkeypatch.setattr(report, "_render_figures", render)
+    records = [record("csr"), record("csrv2"), record("mpsae"), record("dense"),
+               {"method": "mpsaev2", "metrics": "invalid historical metrics"},
+               {"method": "csr_multitopk", "complete": False}]
+    manifest = report.build_report(records, tmp_path, expected_points=4)
+    assert manifest["complete"] is True
+    assert manifest["counts"]["completed_points"] == 4
+    assert manifest["incomplete_evaluation_ids"] == []
+    for name in ("retrieval", "evaluations"):
+        rows = json.loads((tmp_path / "tables" / f"{name}.json").read_text(encoding="utf-8"))
+        assert {row["method"] for row in rows} == {"csr", "csrv2", "mpsae", "dense"}
+    assert {row["method"] for row in captured} == {"csr", "csrv2", "mpsae", "dense"}
+    assert not any("mpsaev2" in value or "csr_multitopk" in value
+                   for value in manifest["evaluation_ids"])
+
+
+def test_unknown_method_is_rejected_instead_of_silently_excluded():
+    with pytest.raises(ValueError, match="unknown benchmark method"):
+        report.aggregate_records([record("misspelled-method")])
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), -0.1, 70.0])

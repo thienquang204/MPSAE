@@ -21,7 +21,8 @@ import time
 from typing import Any
 
 from . import methods
-from .config import BACKBONES, METHOD_EPOCHS, METHOD_VARIANTS, Backbone, Cell, TrainPreset, training_preset
+from .config import (BACKBONES, METHOD_EPOCHS, METHOD_VARIANTS, Backbone, Cell, TrainPreset,
+                     training_preset, validate_checkpoint_ot_weight)
 from .features import Bundle, BatchSource
 from .io import atomic_json, canonical_hash, exclusive_lock, read_json, read_jsonl, truncate_jsonl
 from .logs import MetricWriter, Progress, format_duration, get_logger
@@ -72,7 +73,7 @@ def total_updates(bundle: Bundle, preset: TrainPreset, *, max_steps: int = 0) ->
 def fit_identity(cell: Cell, bundle: Bundle, preset: TrainPreset, *,
                  total_steps: int, per_epoch: int, code_version: str) -> dict[str, Any]:
     """Everything that must match for a checkpoint to be resumable."""
-    preset = training_preset(cell.method, preset)
+    preset = training_preset(cell.method, preset, k=cell.k)
     identity = {
         "format": CHECKPOINT_FORMAT,
         "code_version": code_version,
@@ -217,7 +218,7 @@ def _fit(cell: Cell, bundle: Bundle, out_dir: str | Path, settings: FitSettings,
     import torch
 
     spec = spec or BACKBONES[cell.backbone]
-    preset = training_preset(cell.method, spec.preset)
+    preset = training_preset(cell.method, spec.preset, k=cell.k)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     log = get_logger(f"fit {cell.slug}")
@@ -457,6 +458,7 @@ def load_fitted(cell: Cell, out_dir: str | Path, spec: Backbone, *, device) -> A
                 "target_k": cell.k, "seed": cell.seed}
     if any(identity.get(key) != value for key, value in expected.items()):
         raise RuntimeError(f"{out_dir}: checkpoint belongs to a different training cell")
+    validate_checkpoint_ot_weight(cell.method, cell.k, identity, context=str(out_dir))
     variant = METHOD_VARIANTS.get(cell.method)
     if variant and (identity.get("objective") or {}).get("variant") != variant:
         raise RuntimeError(f"{out_dir}: checkpoint uses a different {cell.method} objective variant; "

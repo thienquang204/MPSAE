@@ -3474,3 +3474,502 @@ execution:
   checkpoint_every: 100
   feature_residency: auto
 ```
+
+## Archived five-method campaign before method exclusion (2026-11-11)
+
+This historical snapshot predates removal of `csr_multitopk` and `mpsaev2`
+from all experiments. It selected 25 source fits, 80 ImageNet E2 points
+(15 shared with E1), and 140 sparse plus 3 dense downstream evaluations.
+The active campaign now selects only CSR, CSRv2 and MPSAE, with the same
+backbones and K grids: 15 source fits, 48 E2 points (9 shared with E1), and
+84 sparse plus 3 dense downstream evaluations. The YAML below is archival;
+excluded method names must be removed before using it with the current code.
+
+### Previous `configs/thesis.yaml`
+
+```yaml
+# Main campaign: ResNet-50 train K=8/16/32/256; ViT train K=8. Previous 20-fit setup: ../large_scale_abblation.md.
+# Published embeddings only. Training presets remain in mpsae/config.py.
+# Selected published bundles: ImageNet/EuroSAT for both; SOP for ResNet-50.
+name: thesis
+backbones: [ff2048, vit_b16]
+methods: [csr, csrv2, mpsae, mpsaev2, csr_multitopk]
+seeds: [1227]
+imagenet:
+  enabled: true
+  prepare: false
+  train_k:
+    ff2048: [8, 16, 32, 256]
+    vit_b16: [8]
+  eval_k:                       # E2 inference budgets; E1 evaluates at train_k
+    ff2048: [16, 32, 256]
+    vit_b16: [3, 12, 48, 96]
+  e1: true
+  e2: true
+  linear_probe: true
+  timing: true
+  timing_query_batch: 512
+  timing_warmup: 100
+  timing_rounds: 2000
+  timing_gallery_chunk: 32768
+  timing_build_entry_cap: 4194304
+  timing_retry_skipped: false
+downstream:
+  enabled: true
+  datasets: [eurosat, sop]
+  backbones:
+    sop: [ff2048]
+  train_k:                      # evaluate every selected ImageNet checkpoint
+    ff2048: [8, 16, 32, 256]
+    vit_b16: [8]
+  eval_k:
+    ff2048: [16, 32, 256]
+    vit_b16: [3, 12, 48, 96]
+  mode: frozen
+  revisions: {}                  # main is resolved once to an immutable commit
+execution:
+  storage_mode: direct_v1        # isolated work/direct-v1; no FFCV image copy
+  precomputed_only: true        # missing/incompatible bundles fail without extracting images
+  cleanup_raw: false
+  train_missing: true
+  continue_on_error: true
+  retain_codes: false            # metrics persist; avoid accumulating TB of codes
+  max_steps: 0
+  train_log_every: 10
+  checkpoint_every: 100
+  feature_residency: auto
+```
+
+### Previous `configs/precomputed.yaml`
+
+```yaml
+# Main campaign: ResNet-50 train K=8/16/32/256; ViT train K=8. Previous 20-fit setup: ../large_scale_abblation.md.
+# Selected published embeddings: ImageNet/EuroSAT for ff2048/vit_b16;
+# SOP for ff2048.
+# Same fitting/evaluation and target coverage as thesis.yaml.
+name: precomputed
+backbones: [ff2048, vit_b16]
+methods: [csr, csrv2, mpsae, mpsaev2, csr_multitopk]
+seeds: [1227]
+imagenet:
+  enabled: true
+  prepare: false
+  train_k:
+    ff2048: [8, 16, 32, 256]
+    vit_b16: [8]
+  eval_k:                       # E2 inference budgets; E1 evaluates at train_k
+    ff2048: [16, 32, 256]
+    vit_b16: [3, 12, 48, 96]
+  e1: true
+  e2: true
+  linear_probe: true
+  timing: true
+  timing_query_batch: 512
+  timing_warmup: 100
+  timing_rounds: 2000
+  timing_gallery_chunk: 32768
+  timing_build_entry_cap: 4194304
+  timing_retry_skipped: false
+downstream:
+  enabled: true
+  datasets: [eurosat, sop]
+  backbones:
+    sop: [ff2048]
+  train_k:
+    ff2048: [8, 16, 32, 256]
+    vit_b16: [8]
+  eval_k:
+    ff2048: [16, 32, 256]
+    vit_b16: [3, 12, 48, 96]
+  mode: frozen
+  revisions: {}
+execution:
+  storage_mode: direct_v1
+  precomputed_only: true
+  cleanup_raw: false
+  train_missing: true
+  continue_on_error: true
+  retain_codes: false
+  max_steps: 0
+  train_log_every: 10
+  checkpoint_every: 100
+  feature_residency: auto
+```
+
+## Archived retrieval-only downstream campaign before DINO kNN (2026-11-11)
+
+This exact snapshot predates the EuroSAT switch from class-relevance retrieval
+to DINO weighted kNN classification. It already excludes CSR multi-TopK and
+MPSAEv2. The 15 source fits and all training/inference K selections remain
+unchanged in the new campaign. The 48 EuroSAT sparse evaluation conditions now
+each produce 1-NN and 20-NN classification metrics; 36 SOP sparse conditions
+retain product retrieval. Each condition still corresponds to one result record.
+The YAML below is historical: add an explicit retrieval task override if its
+former downstream behaviour is needed with the new default task selection.
+
+### Previous `configs/thesis.yaml`
+
+```yaml
+# Main campaign: CSR, CSRv2, MPSAE. Previous settings: ../large_scale_abblation.md.
+# Published embeddings only. Training presets remain in mpsae/config.py.
+# Selected published bundles: ImageNet/EuroSAT for both; SOP for ResNet-50.
+name: thesis
+backbones: [ff2048, vit_b16]
+methods: [csr, csrv2, mpsae]
+seeds: [1227]
+imagenet:
+  enabled: true
+  prepare: false
+  train_k:
+    ff2048: [8, 16, 32, 256]
+    vit_b16: [8]
+  eval_k:                       # E2 inference budgets; E1 evaluates at train_k
+    ff2048: [16, 32, 256]
+    vit_b16: [3, 12, 48, 96]
+  e1: true
+  e2: true
+  linear_probe: true
+  timing: true
+  timing_query_batch: 512
+  timing_warmup: 100
+  timing_rounds: 2000
+  timing_gallery_chunk: 32768
+  timing_build_entry_cap: 4194304
+  timing_retry_skipped: false
+downstream:
+  enabled: true
+  datasets: [eurosat, sop]
+  backbones:
+    sop: [ff2048]
+  train_k:                      # evaluate every selected ImageNet checkpoint
+    ff2048: [8, 16, 32, 256]
+    vit_b16: [8]
+  eval_k:
+    ff2048: [16, 32, 256]
+    vit_b16: [3, 12, 48, 96]
+  mode: frozen
+  revisions: {}                  # main is resolved once to an immutable commit
+execution:
+  storage_mode: direct_v1        # isolated work/direct-v1; no FFCV image copy
+  precomputed_only: true        # missing/incompatible bundles fail without extracting images
+  cleanup_raw: false
+  train_missing: true
+  continue_on_error: true
+  retain_codes: false            # metrics persist; avoid accumulating TB of codes
+  max_steps: 0
+  train_log_every: 10
+  checkpoint_every: 100
+  feature_residency: auto
+```
+
+### Previous `configs/precomputed.yaml`
+
+```yaml
+# Main campaign: CSR, CSRv2, MPSAE. Previous settings: ../large_scale_abblation.md.
+# Selected published embeddings: ImageNet/EuroSAT for ff2048/vit_b16;
+# SOP for ff2048.
+# Same fitting/evaluation and target coverage as thesis.yaml.
+name: precomputed
+backbones: [ff2048, vit_b16]
+methods: [csr, csrv2, mpsae]
+seeds: [1227]
+imagenet:
+  enabled: true
+  prepare: false
+  train_k:
+    ff2048: [8, 16, 32, 256]
+    vit_b16: [8]
+  eval_k:                       # E2 inference budgets; E1 evaluates at train_k
+    ff2048: [16, 32, 256]
+    vit_b16: [3, 12, 48, 96]
+  e1: true
+  e2: true
+  linear_probe: true
+  timing: true
+  timing_query_batch: 512
+  timing_warmup: 100
+  timing_rounds: 2000
+  timing_gallery_chunk: 32768
+  timing_build_entry_cap: 4194304
+  timing_retry_skipped: false
+downstream:
+  enabled: true
+  datasets: [eurosat, sop]
+  backbones:
+    sop: [ff2048]
+  train_k:
+    ff2048: [8, 16, 32, 256]
+    vit_b16: [8]
+  eval_k:
+    ff2048: [16, 32, 256]
+    vit_b16: [3, 12, 48, 96]
+  mode: frozen
+  revisions: {}
+execution:
+  storage_mode: direct_v1
+  precomputed_only: true
+  cleanup_raw: false
+  train_missing: true
+  continue_on_error: true
+  retain_codes: false
+  max_steps: 0
+  train_log_every: 10
+  checkpoint_every: 100
+  feature_residency: auto
+```
+
+## Archived EuroSAT DINO kNN campaign before SOP-first benchmark (2026-11-11)
+
+The previous main campaign used 15 source checkpoints, 48 ImageNet E2 points,
+48 EuroSAT sparse classification conditions and 36 SOP sparse retrieval conditions,
+plus 3 dense diagnostics. The following YAML is preserved before selecting SOP
+as the only active downstream benchmark. EuroSAT/DINO kNN remains available
+for explicit optional campaigns; COCO image-text retrieval and CLIP are deferred.
+The MPSAE training-K rule remains OT weight 2.0 through K=64 and 0.5 above K=64.
+
+### `configs/thesis.yaml`
+
+```yaml
+# Main campaign: CSR, CSRv2, MPSAE. Previous settings: ../large_scale_abblation.md.
+# Published embeddings only. Training presets remain in mpsae/config.py.
+# Selected published bundles: ImageNet/EuroSAT for both; SOP for ResNet-50.
+name: thesis
+backbones: [ff2048, vit_b16]
+methods: [csr, csrv2, mpsae]
+seeds: [1227]
+imagenet:
+  enabled: true
+  prepare: false
+  train_k:
+    ff2048: [8, 16, 32, 256]
+    vit_b16: [8]
+  eval_k:                       # E2 inference budgets; E1 evaluates at train_k
+    ff2048: [16, 32, 256]
+    vit_b16: [3, 12, 48, 96]
+  e1: true
+  e2: true
+  linear_probe: true
+  timing: true
+  timing_query_batch: 512
+  timing_warmup: 100
+  timing_rounds: 2000
+  timing_gallery_chunk: 32768
+  timing_build_entry_cap: 4194304
+  timing_retry_skipped: false
+downstream:
+  enabled: true
+  datasets: [eurosat, sop]
+  tasks:
+    eurosat: knn_classification
+    sop: retrieval
+  knn:
+    n_neighbors: [1, 20]        # classifier neighbors, independent of sparse eval_k
+    temperature: 0.07
+  backbones:
+    sop: [ff2048]
+  train_k:                      # evaluate every selected ImageNet checkpoint
+    ff2048: [8, 16, 32, 256]
+    vit_b16: [8]
+  eval_k:
+    ff2048: [16, 32, 256]
+    vit_b16: [3, 12, 48, 96]
+  mode: frozen
+  revisions: {}                  # main is resolved once to an immutable commit
+execution:
+  storage_mode: direct_v1        # isolated work/direct-v1; no FFCV image copy
+  precomputed_only: true        # missing/incompatible bundles fail without extracting images
+  cleanup_raw: false
+  train_missing: true
+  continue_on_error: true
+  retain_codes: false            # metrics persist; avoid accumulating TB of codes
+  max_steps: 0
+  train_log_every: 10
+  checkpoint_every: 100
+  feature_residency: auto
+```
+
+### `configs/precomputed.yaml`
+
+```yaml
+# Main campaign: CSR, CSRv2, MPSAE. Previous settings: ../large_scale_abblation.md.
+# Selected published embeddings: ImageNet/EuroSAT for ff2048/vit_b16;
+# SOP for ff2048.
+# Same fitting/evaluation and target coverage as thesis.yaml.
+name: precomputed
+backbones: [ff2048, vit_b16]
+methods: [csr, csrv2, mpsae]
+seeds: [1227]
+imagenet:
+  enabled: true
+  prepare: false
+  train_k:
+    ff2048: [8, 16, 32, 256]
+    vit_b16: [8]
+  eval_k:                       # E2 inference budgets; E1 evaluates at train_k
+    ff2048: [16, 32, 256]
+    vit_b16: [3, 12, 48, 96]
+  e1: true
+  e2: true
+  linear_probe: true
+  timing: true
+  timing_query_batch: 512
+  timing_warmup: 100
+  timing_rounds: 2000
+  timing_gallery_chunk: 32768
+  timing_build_entry_cap: 4194304
+  timing_retry_skipped: false
+downstream:
+  enabled: true
+  datasets: [eurosat, sop]
+  tasks:
+    eurosat: knn_classification
+    sop: retrieval
+  knn:
+    n_neighbors: [1, 20]        # classifier neighbors, independent of sparse eval_k
+    temperature: 0.07
+  backbones:
+    sop: [ff2048]
+  train_k:
+    ff2048: [8, 16, 32, 256]
+    vit_b16: [8]
+  eval_k:
+    ff2048: [16, 32, 256]
+    vit_b16: [3, 12, 48, 96]
+  mode: frozen
+  revisions: {}
+execution:
+  storage_mode: direct_v1
+  precomputed_only: true
+  cleanup_raw: false
+  train_missing: true
+  continue_on_error: true
+  retain_codes: false
+  max_steps: 0
+  train_log_every: 10
+  checkpoint_every: 100
+  feature_residency: auto
+```
+
+## Archived ViT train-K=8 campaign before train-K=12/48 (2026-11-11)
+
+Previously ViT trained at K=8 and swept inference K=3/12/48/96.
+The main campaign selected 15 source fits and 48 E2 points (9 shared with E1).
+The replacement trains ViT independently at K=12 and K=48, sweeping both
+inference K=12 and K=48 for each checkpoint. ResNet and SOP scopes are unchanged.
+ViT MPSAE keeps OT weight 2.0 because both target training budgets are <=64.
+
+### `configs/thesis.yaml`
+
+```yaml
+# Main campaign: CSR, CSRv2, MPSAE. Previous settings: ../large_scale_abblation.md.
+# Published embeddings only. Training presets remain in mpsae/config.py.
+# Selected bundles: ImageNet for both; SOP retrieval for ResNet-50.
+# EuroSAT kNN and COCO/CLIP are deferred. Retrieval-only: configs/retrieval.yaml.
+name: thesis
+backbones: [ff2048, vit_b16]
+methods: [csr, csrv2, mpsae]
+seeds: [1227]
+imagenet:
+  enabled: true
+  prepare: false
+  train_k:
+    ff2048: [8, 16, 32, 256]
+    vit_b16: [8]
+  eval_k:                       # E2 inference budgets; E1 evaluates at train_k
+    ff2048: [16, 32, 256]
+    vit_b16: [3, 12, 48, 96]
+  e1: true
+  e2: true
+  linear_probe: true
+  timing: true
+  timing_query_batch: 512
+  timing_warmup: 100
+  timing_rounds: 2000
+  timing_gallery_chunk: 32768
+  timing_build_entry_cap: 4194304
+  timing_retry_skipped: false
+downstream:
+  enabled: true
+  datasets: [sop]
+  tasks:
+    sop: retrieval
+  backbones:
+    sop: [ff2048]
+  train_k:                      # evaluate every selected ImageNet checkpoint
+    ff2048: [8, 16, 32, 256]
+    vit_b16: [8]
+  eval_k:
+    ff2048: [16, 32, 256]
+    vit_b16: [3, 12, 48, 96]
+  mode: frozen
+  revisions: {}                  # main is resolved once to an immutable commit
+execution:
+  storage_mode: direct_v1        # isolated work/direct-v1; no FFCV image copy
+  precomputed_only: true        # missing/incompatible bundles fail without extracting images
+  cleanup_raw: false
+  train_missing: true
+  continue_on_error: true
+  retain_codes: false            # metrics persist; avoid accumulating TB of codes
+  max_steps: 0
+  train_log_every: 10
+  checkpoint_every: 100
+  feature_residency: auto
+```
+
+### `configs/precomputed.yaml`
+
+```yaml
+# Main campaign: CSR, CSRv2, MPSAE. Previous settings: ../large_scale_abblation.md.
+# Selected published embeddings: ImageNet for ff2048/vit_b16; SOP for ff2048.
+# EuroSAT kNN and COCO/CLIP are deferred. Retrieval-only: configs/retrieval.yaml.
+# Same fitting/evaluation and target coverage as thesis.yaml.
+name: precomputed
+backbones: [ff2048, vit_b16]
+methods: [csr, csrv2, mpsae]
+seeds: [1227]
+imagenet:
+  enabled: true
+  prepare: false
+  train_k:
+    ff2048: [8, 16, 32, 256]
+    vit_b16: [8]
+  eval_k:                       # E2 inference budgets; E1 evaluates at train_k
+    ff2048: [16, 32, 256]
+    vit_b16: [3, 12, 48, 96]
+  e1: true
+  e2: true
+  linear_probe: true
+  timing: true
+  timing_query_batch: 512
+  timing_warmup: 100
+  timing_rounds: 2000
+  timing_gallery_chunk: 32768
+  timing_build_entry_cap: 4194304
+  timing_retry_skipped: false
+downstream:
+  enabled: true
+  datasets: [sop]
+  tasks:
+    sop: retrieval
+  backbones:
+    sop: [ff2048]
+  train_k:
+    ff2048: [8, 16, 32, 256]
+    vit_b16: [8]
+  eval_k:
+    ff2048: [16, 32, 256]
+    vit_b16: [3, 12, 48, 96]
+  mode: frozen
+  revisions: {}
+execution:
+  storage_mode: direct_v1
+  precomputed_only: true
+  cleanup_raw: false
+  train_missing: true
+  continue_on_error: true
+  retain_codes: false
+  max_steps: 0
+  train_log_every: 10
+  checkpoint_every: 100
+  feature_residency: auto
+```

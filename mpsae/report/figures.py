@@ -45,14 +45,13 @@ def _pyplot() -> Any:
 # ---------------------------------------------------------------- row helpers
 
 def _for_backbone(rows: Sequence[Mapping[str, Any]], backbone: str) -> list[Mapping[str, Any]]:
-    return [row for row in rows if row.get("backbone") == backbone]
+    return [row for row in rows if row.get("backbone") == backbone and row.get("method") in METHODS]
 
 
 def _methods_present(rows: Sequence[Mapping[str, Any]]) -> list[str]:
     """Methods with data, in the canonical order so the legend never shuffles."""
     found = {row["method"] for row in rows if row.get("method")}
-    ordered = [method for method in METHODS if method in found]
-    return ordered + sorted(found - set(ordered))
+    return [method for method in METHODS if method in found]
 
 
 def _series(rows: Sequence[Mapping[str, Any]], *, method: str, x: str = "k",
@@ -269,6 +268,7 @@ def figure_e1_delta(records: Sequence[Mapping[str, Any]], out_dir: str | Path, b
 
 def _inference_figure(rows, out_dir, name, *, x="k", seeds=SEEDS, dense=None):
     """Export at most two backbone/training-K groups per publication figure."""
+    rows = [row for row in rows if row.get("method") in METHODS]
     groups = sorted({(row["backbone"], int(row["anchor_k"])) for row in rows})
     if len(groups) <= 2:
         return _inference_page(rows, out_dir, name, x=x, seeds=seeds)
@@ -367,7 +367,7 @@ def figure_training(rows: Sequence[Mapping[str, Any]], out_dir: str | Path, back
     because disagreement between seeds is exactly what we want to see here.
     """
     log = get_logger("report")
-    subset = [row for row in rows if row.get("backbone") == backbone and row.get("curve")]
+    subset = [row for row in _for_backbone(rows, backbone) if row.get("curve")]
     if not subset:
         log.info("skip figure_training[%s]: no training logs", backbone)
         return []
@@ -443,6 +443,7 @@ def figure_backbone_summary(rows: Sequence[Mapping[str, Any]], out_dir: str | Pa
     the outcome is stated in the caption.
     """
     log = get_logger("report")
+    rows = [row for row in rows if row.get("method") in METHODS]
     present = [name for name in BACKBONE_ORDER
                if any(row.get("backbone") == name for row in rows)]
     present += sorted({row["backbone"] for row in rows} - set(present))
@@ -594,7 +595,7 @@ def build_all(root: str | Path, out_dir: str | Path, *,
     if explicit:
         wanted_backbones = set(backbones) if backbones is not None else None
         records = [dict(record) for record in records
-                   if record["seed"] in seeds
+                   if record.get("method") in METHODS and record["seed"] in seeds
                    and (wanted_backbones is None or record["backbone"] in wanted_backbones)]
         selected_cells = {(record["backbone"], record["method"], record["k"], record["seed"])
                           for record in records}
@@ -628,8 +629,7 @@ def build_all(root: str | Path, out_dir: str | Path, *,
         manifest["tables"][name] = {key: str(path) for key, path
                                     in write_tables(table_rows, table_dir, name).items()}
     pairs = [(treatment, control) for control in BASELINES
-             for treatment in tuple(OURS) + ("csr_multitopk",) if treatment != control]
-    pairs.append(("mpsaev2", "mpsae"))  # fixed-K OT + CL versus fixed-K OT
+             for treatment in OURS if treatment != control]
     for treatment, control in pairs:
         rows = paired_difference(records, treatment=treatment, control=control, seeds=seeds)
         if not rows:

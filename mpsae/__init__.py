@@ -9,7 +9,7 @@ Layout
 ``losses``    reconstruction, AuxK, the two released contrastive objectives
 ``schedules`` CSRv2 linear k-annealing
 ``ot``        entropic multi-marginal partial-OT matching gap (ours)
-``methods``   one objective per method: csr, csrv2, mpsae, mpsaev2, csr_multitopk
+``methods``   active objectives: csr, csrv2, mpsae; historical recipes retained
 ``train``     a single resumable fit
 ``runs``      the run matrix, resume and skip logic
 ``data``      ImageNet acquisition and FFCV serialisation

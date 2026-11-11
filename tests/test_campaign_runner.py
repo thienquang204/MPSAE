@@ -94,7 +94,7 @@ def heavy_boundaries(monkeypatch):
     """Patch runtime dependencies while keeping runner/cache/provenance real."""
     from mpsae import features, pipeline
     from mpsae.benchmark import data, extract, report
-    from mpsae.evaluate import ranking
+    from mpsae.evaluate import classification, ranking
     from mpsae.report import figures
     import mpsae.evaluate as evaluation_package
 
@@ -202,6 +202,14 @@ def heavy_boundaries(monkeypatch):
                 "map_at_r": 0.5, "queries": len(query_labels), "seconds": 0.01}
 
     monkeypatch.setattr(ranking, "evaluate_retrieval", score)
+
+    def classify(gallery, gallery_labels, queries, query_labels, **kwargs):
+        score(gallery, gallery_labels, queries, query_labels, exclude_self=False, **kwargs)
+        return {"units": "fraction", "queries": len(query_labels), "seconds": 0.01,
+                **{f"knn_{n}_{field}": 0.5 for n in kwargs["n_neighbors"]
+                   for field in ("top1", "top5", "balanced_accuracy", "macro_f1")}}
+
+    monkeypatch.setattr(classification, "evaluate_knn", classify)
 
     def downstream_report(records, out_dir, *, expected_points, failures, expected_seeds):
         captured.report_calls.append((len(records), expected_points, tuple(expected_seeds)))
@@ -315,7 +323,8 @@ def test_downstream_campaign_reuses_source_and_resumes_all_dataset_budget_points
         "source_cells": 2, "imagenet_e1": 0, "imagenet_e2": 0}
     assert expected["downstream_sparse_points"] == 12
     assert expected["downstream_dense_points"] == 3
-    assert len([name for name in observed if name.startswith("retrieval/")]) == 12
+    assert len([name for name in observed if name.startswith("retrieval/")]) == 4
+    assert len([name for name in observed if name.startswith("knn_classification/")]) == 8
     assert len([name for name in observed if name.startswith("source/")]) == 2
     assert len(catalog["evaluations"]) == 15
     assert heavy_boundaries.fit_calls == []
@@ -324,6 +333,9 @@ def test_downstream_campaign_reuses_source_and_resumes_all_dataset_budget_points
     assert Counter(name for _, name, _ in heavy_boundaries.feature_calls) == {
         "eurosat": 1, "flowers102": 1, "sop": 1}
     assert len(heavy_boundaries.rank_calls) == 15
+    assert sum("n_neighbors" in call for call in heavy_boundaries.rank_calls) == 10
+    assert all(call["n_neighbors"] == [1, 20] and call["temperature"] == 0.07
+               for call in heavy_boundaries.rank_calls if "n_neighbors" in call)
     assert all(point["mode"] == "frozen" and not point["training_on_target"]
                for point in catalog["evaluations"])
     for checkpoint in catalog["checkpoints"].values():
@@ -453,5 +465,11 @@ def test_real_cpu_smoke_campaign_when_torch_is_available(tmp_path, monkeypatch):
                    / "k8" / "seed1227" / "eval_e2.json")
     assert [point["k"] for point in e2["points"]] == [4, 8]
     assert len(status["catalog"]["evaluations"]) == 3
+    assert all(point["task"] == "knn_classification" and point["uses_target_support_labels"]
+               and not point["parameter_updates_on_target"]
+               for point in status["catalog"]["evaluations"])
+    assert all("knn_20_top1" in point["metrics"] and "knn_1_top1" in point["metrics"]
+               and "recall_at_1" not in point["metrics"]
+               for point in status["catalog"]["evaluations"])
     assert all(not point["scientific"] for point in status["catalog"]["evaluations"])
     assert Path(status["workspace"]) != tmp_path

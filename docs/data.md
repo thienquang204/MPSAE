@@ -205,17 +205,19 @@ features stop the campaign instead of triggering extraction. Pinned target
 dataset revisions must match the linked bundle. The embedding dimensions and
 backbone weights must match the source checkpoint.
 
-On 2026-11-09, commit `f67f3f36ea13e61bf70287a14a3f7df636131dda` contained all five
+On 2026-11-11, commit `f67f3f36ea13e61bf70287a14a3f7df636131dda` contained all five
 ImageNet and EuroSAT bundles, and SOP for `ff2048`, `rn18`, `convnext_tiny`.
 Flowers102 and SOP for `vit_b16`, `dinov2_vits14` were absent. The supplied
-`thesis.yaml` and `precomputed.yaml` select ImageNet/EuroSAT for `ff2048`,
-`vit_b16` and SOP for ResNet-50. Flowers102 is excluded because it
+`thesis.yaml` and `precomputed.yaml` select three bundles: ImageNet for `ff2048`
+and `vit_b16`, plus SOP for ResNet-50. EuroSAT kNN is deferred from the main
+campaign; its existing bundles remain reusable in explicit custom campaigns.
+COCO image-text retrieval and CLIP are future work. Flowers102 is excluded because it
 has no published embeddings; absence alone does not prove the dataset is faulty.
 Run `status` to check current coverage. Per-dataset coverage is explicit:
 
 ```yaml
 downstream:
-  datasets: [eurosat, sop]
+  datasets: [sop]
   backbones:
     sop: [ff2048]
 ```
@@ -223,6 +225,27 @@ downstream:
 Datasets omitted from `backbones` use all campaign backbones. The same filter
 controls Hub downloads, target evaluation, expected counts and report completion.
 The Flowers102 adapter remains available for a future validated embedding release.
+
+`configs/retrieval.yaml` is a smaller evaluation-only selection. It downloads
+only `sop_ff2048_2048` and uses completed ResNet-50 source checkpoints:
+
+```bash
+python -m mpsae.embeddings_hub status --config configs/retrieval.yaml
+python -m mpsae.embeddings_hub sync --download-only --config configs/retrieval.yaml
+python -m mpsae --config configs/retrieval.yaml run
+# Or include result backup using the installed server environment:
+bash all_in_one.sh --config configs/retrieval.yaml --skip-setup
+```
+
+Use the same workspace containing the original fits. The full ImageNet feature
+arrays are unnecessary for this mode, but the fits must retain their original
+backbone weights/preprocessing provenance in `config.json` or the corresponding
+ImageNet `.npz.json` sidecars. Source `config.json`, `summary.json` and
+`checkpoint.pt` are all required. Missing or incompatible source fits stop the
+run because `train_missing: false`; missing SOP features cannot trigger
+extraction because `precomputed_only: true`. Old MPSAE training-K=256 fits with
+OT weight 2.0 are incompatible with the current weight 0.5 and need a separate
+fresh source fit.
 
 The explicit build/upload workflow remains available with `sync` without
 `--download-only` (and without `precomputed_only: true` in the config):
@@ -237,8 +260,10 @@ The explicit build/upload workflow remains available with `sync` without
   `MPSAE_EMBEDDINGS_REPO` in `.env` also selects the library for the launcher.
   Uploads require write access to a private destination; a missing destination
   is created private. The public source repository can be downloaded directly.
-* Downstream features use the backbone weights recorded in that backbone's
-  ImageNet folder, so ImageNet is always done first.
+* Building downstream features uses the backbone weights recorded in that
+  backbone's ImageNet folder, so a new feature library builds ImageNet first.
+  Evaluation-only download/reuse can read target bundles without downloading
+  ImageNet arrays; the source checkpoint provenance still has to match.
 * `bash all_in_one.sh` runs `embeddings_hub sync --download-only --config <campaign>` before the
   campaign (`--skip-embeddings` turns it off) and hard-links the folders where
   the campaign reads them: ImageNet archives into
@@ -275,8 +300,9 @@ have shrunk the gallery and made the dense gate unable to reach 71.19.
 
 ## Downstream benchmarks
 
-The campaign implements frozen retrieval for EuroSAT RGB, Flowers102 and SOP;
-see [benchmark.md](benchmark.md) for their protocols. `data_usage.md` also
+The main campaign implements frozen product retrieval for SOP. DINO weighted
+kNN on EuroSAT RGB and Flowers102 remains optional; see
+[benchmark.md](benchmark.md) for their protocols. `data_usage.md` also
 lists planned datasets: DTD, VOC 2012, SPair-71k, DeepFashion In-Shop and
 ROxford/RParis. Two notes for those additions:
 

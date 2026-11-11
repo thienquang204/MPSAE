@@ -1,10 +1,13 @@
-"""One training objective per method, sharing a single autoencoder.
+"""Training objectives, including historical recipes for checkpoint inspection.
+
+Only csr, csrv2 and mpsae participate in experiments. The retained mpsaev2 and
+csr_multitopk implementations below are excluded by the experiment registry.
 
     method          K during training   gates per step      regulariser
     -------------   -----------------   -----------------   ------------------------
     csr             fixed K             K, 4K, K            gamma * inbatch_cl
     csrv2           annealed k(t)       k, 4k, k            gamma * label_based_cl
-    mpsae           fixed K             K, 4K, 2K           2 * OT matching gap
+    mpsae           fixed K             K, 4K, 2K           lambda(K) * OT matching gap
     mpsaev2         fixed K             K, 4K, 2K           2 * OT gap + gamma * inbatch_cl
     csr_multitopk   fixed K             K, 4K, 2K           gamma * inbatch_cl  (+ L(2K)/8)
 
@@ -18,6 +21,9 @@ difference from ``csr`` is the extra ``L(2K)/8`` reconstruction term and the
 objective differences from ``mpsae`` are the extra reconstruction and OT
 versus contrastive. MPSAE uses batches of 1024; baseline batch sizes follow
 the backbone preset, so update counts can also differ.
+
+For active MPSAE, lambda(K) is 0.5 when target training K > 64, otherwise
+the preset weight (2.0 by default). The wider OT views do not trigger this rule.
 
 Shared objective (released CSR):
 
@@ -39,7 +45,8 @@ from typing import Any
 import torch
 
 from . import losses, ot
-from .config import METHODS, METHOD_VARIANTS, TrainPreset, initial_topk
+from .config import (IMPLEMENTED_METHODS, METHOD_VARIANTS, TrainPreset, initial_topk,
+                     effective_ot_weight)
 from .model import SparseAutoencoder
 from .schedules import current_k
 
@@ -70,8 +77,8 @@ def requires_labels(method: str) -> bool:
 
 
 def _check(method: str) -> None:
-    if method not in METHODS:
-        raise ValueError(f"unknown method {method!r}; choose from {METHODS}")
+    if method not in IMPLEMENTED_METHODS:
+        raise ValueError(f"unknown method {method!r}; choose from {IMPLEMENTED_METHODS}")
 
 
 def plan_budget(method: str, k: int, preset: TrainPreset, *, step: int, total_steps: int) -> int:
@@ -108,7 +115,7 @@ def describe(method: str, k: int, preset: TrainPreset) -> dict[str, Any]:
             "views": "two identical deterministic forward passes",
         }
     if method in OT_METHODS:
-        described["ot"] = {"weight": preset.ot_weight, "cost": "angular", "mass": preset.ot_mass,
+        described["ot"] = {"weight": effective_ot_weight(method, k, preset), "cost": "angular", "mass": preset.ot_mass,
                            "eta": preset.ot_eta, "microbatch": preset.ot_microbatch,
                            "max_iters": preset.ot_max_iters, "tol": preset.ot_tol,
                            "views": ["k", "2k", "4k"]}
@@ -204,9 +211,11 @@ def compute_step(method: str, sae: SparseAutoencoder, x: torch.Tensor, *,
             max_iters=preset.ot_max_iters, tol=preset.ot_tol,
             microbatch=preset.ot_microbatch, max_refine_iters=preset.ot_max_refine_iters,
             collect_metrics=collect_metrics)
-        components["ot"] = preset.ot_weight * gap
+        ot_weight = effective_ot_weight(method, k, preset)
+        components["ot"] = ot_weight * gap
         if collect_metrics:
             metric_tensors["loss_ot"] = gap
+            metrics["ot_weight"] = ot_weight
             metrics.update({f"ot_{name}": value for name, value in gap_stats.items()})
 
     total = sum(components.values())

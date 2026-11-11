@@ -1,0 +1,37 @@
+# Evaluate existing ImageNet-trained checkpoints on SOP; no new source fitting.
+# Run from the same workspace as thesis.yaml so compatible checkpoints/cache are reused.
+# Preserve source config/summary/checkpoint and backbone-provenance sidecars.
+# MPSAE train K=256 requires the current OT weight 0.5 checkpoint.
+name: retrieval
+backbones: [ff2048]
+methods: [csr, csrv2, mpsae]
+seeds: [1227]
+imagenet:
+  enabled: false
+  prepare: false
+  e1: false
+  e2: false
+  linear_probe: false
+  timing: false
+downstream:
+  enabled: true
+  datasets: [sop]
+  tasks:
+    sop: retrieval
+  backbones:
+    sop: [ff2048]
+  train_k: [8, 16, 32, 256]
+  eval_k: [16, 32, 256]
+  mode: frozen
+  revisions: {}
+execution:
+  storage_mode: direct_v1
+  precomputed_only: true
+  cleanup_raw: false
+  train_missing: false
+  continue_on_error: false
+  retain_codes: false
+  max_steps: 0
+  train_log_every: 10
+  checkpoint_every: 100
+  feature_residency: auto

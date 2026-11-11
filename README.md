@@ -5,10 +5,9 @@ Working notes for this repository. Not a release document.
 **What we claim.** CSR sparsifies a frozen embedding with a tied Top-K
 autoencoder and regularises the codes with a contrastive term. MPSAE replaces
 that term with an entropic **multi-marginal partial-OT matching gap** across
-three budgets (K, 2K, 4K). Current MPSAEv2 combines the OT gap with instance
-contrastive learning at fixed K. Both use the same Top-K inference code and
-the MPSAE-specific optimisation settings below; their effectiveness is tested
-against the baselines.
+three budgets (K, 2K, 4K). We compare CSR, CSRv2 and MPSAE using the same
+Top-K inference code and the optimisation settings below. CSR multi-TopK and
+MPSAEv2 are excluded from all experiments and reports.
 
 **Ground rules.** Settings follow the published papers (CSR Table 3/9, CSRv2
 Table 11). Algorithms follow the *released code*. Where the released code
@@ -20,8 +19,9 @@ applied silently.
 
 ## Run it
 
-One configuration selects the ImageNet experiments and downstream frozen
-retrieval benchmarks. `.env` holds credentials and environment settings;
+One configuration selects the ImageNet experiments and frozen product retrieval
+on SOP. EuroSAT kNN is deferred from the main campaign; COCO image-text retrieval
+and CLIP are future work. `.env` holds credentials and environment settings;
 `configs/thesis.yaml` selects the experiments. No downstream fine-tuning runs.
 
 ```bash
@@ -61,7 +61,7 @@ bash all_in_one.sh
 # Add --skip-setup when the server environment is already installed.
 ```
 
-The default config selects ImageNet/EuroSAT for `ff2048`, `vit_b16`
+The default config selects ImageNet for `ff2048`, `vit_b16`
 and SOP for `ff2048`, whose bundles are
 available in [Lukita/MPSAE-embeddings](https://huggingface.co/datasets/Lukita/MPSAE-embeddings).
 Training still fits the sparse autoencoders. The download step verifies hashes
@@ -69,19 +69,37 @@ and links archives into `work/direct-v1/`; the campaign checks dimensions,
 sample IDs, backbone weights and preprocessing. `precomputed_only: true` stops
 on missing or incompatible features instead of extracting them.
 
-As checked on 2026-11-09, the repository has 13 of the full campaign's 20
+As checked on 2026-11-11, the repository has 13 of the wider registry's 20
 bundles: all ImageNet and EuroSAT backbones, plus SOP for `ff2048`, `rn18` and
 `convnext_tiny`. Flowers102 and the other two SOP backbones are missing.
-`configs/thesis.yaml` and `configs/precomputed.yaml` now select 5 of those bundles.
+`configs/thesis.yaml` and `configs/precomputed.yaml` select 3 of those bundles:
+two ImageNet bundles and one SOP bundle.
 Flowers102 is excluded from these campaigns because no bundles are published;
 this does not establish a dataset defect. SOP remains enabled for the selected
 ResNet-50 through `downstream.backbones.sop`. Plans, downloads and
-reports use this same selection (140 sparse and 3 dense downstream evaluations).
+reports use this same selection (36 sparse and 1 dense downstream evaluations).
 Unexpected missing or incompatible bundles fail explicitly rather than being
 silently dropped. Building new bundles requires a separate config with
 `precomputed_only: false`, `--build-missing-embeddings`, and a writable private
 embedding repository. See [docs/data.md](docs/data.md)
 for downloading separately and using the Python entry point.
+
+To run only the current SOP retrieval benchmark using completed source fits:
+
+```bash
+bash all_in_one.sh --config configs/retrieval.yaml --skip-setup
+```
+
+This selects ResNet-50, CSR/CSRv2/MPSAE, seed 1227, training checkpoints
+K=8/16/32/256 and inference K=16/32/256: **12 existing checkpoints, 36 sparse
+evaluations and one dense diagnostic**. It downloads only the SOP feature bundle
+and performs no source fitting, ImageNet evaluation, linear probing or repeated
+ImageNet timing. Use the same workspace as the source fits. Each fit needs its
+`config.json`, `summary.json`, `checkpoint.pt` and original backbone
+weights/preprocessing provenance, either in the config or the ImageNet archive
+sidecars. Missing or incompatible fits stop this campaign. In particular, MPSAE
+at training K=256 must use OT weight **0.5**; an old weight-2.0 fit cannot be reused.
+Reports are under `work/direct-v1/reports/retrieval/<plan_id>/`.
 
 The native installer supports Ubuntu 22.04/24.04 on x86_64 and ARM64/SBSA.
 It defaults to CUDA 13.0 on H100, A100, RTX A6000 and other supported
@@ -107,11 +125,11 @@ Use `--config` with direct Python commands to select the campaign explicitly.
 Without a config or `MPSAE_CONFIG`, the old ImageNet-only CLI remains available.
 The default direct campaign uses `work/direct-v1/` for features, fits and reports;
 historical `work/runs/` results remain separate. ImageNet JPEGs at `work/imagenet`
-are reused, then retired only after all five feature bundles have verified HF backups. Docker is an optional older
+are reused, then retired only after the required feature bundles have verified HF backups. Docker is an optional older
 deployment path, described separately in `docs/benchmark.md`.
 
 The smoke configuration synthesises class-structured source and target data
-and runs capped fits, retrieval and reporting in a separate workspace. Its
+and runs capped fits, classification, retrieval and reporting in a separate workspace. Its
 numbers are not science and are labelled synthetic in the manifests.
 
 ### Hardware
@@ -119,7 +137,7 @@ numbers are not science and are labelled synthetic in the manifests.
 x86_64 or ARM64/SBSA, ≥ 24 GB VRAM (40–80 GB comfortable), ≥ 64 GB RAM, ≥ 16 CPU cores,
 SSD sized for the peak storage budget below.
 
-The default five-backbone campaign needs about 24 GB for one copy of ImageNet
+The wider five-backbone selection needs about 24 GB for one copy of ImageNet
 embeddings. Peak disk use also includes original images, one active writer,
 download caches and the environment; 500 GB is not an unconditional guarantee.
 Dataset preparation and cleanup are sequential. Read the storage and resume
@@ -135,14 +153,16 @@ returns, and all search is PyTorch-only.
 ## The experiments
 
 **E1 — matched budget.** ResNet-50 is trained separately at **K=8, 16, 32, 256**;
-ViT-B/16 remains trained at **K=8**. Existing compatible K=8 checkpoints are reused.
-Each newly selected ResNet training K has its own independently initialized fit.
+ViT-B/16 is trained separately at **K=12 and K=48**. Each selected training K
+has its own independent fit; the old ViT K=8 checkpoint is not a starting point.
+Compatible checkpoints at the selected budgets are reused.
 
 **E2 — fixed checkpoint, inference sweep.** Every selected ResNet checkpoint is
-evaluated at **K=16, 32, 256**. The ViT checkpoint is evaluated at **K=3, 12, 48, 96**.
-These same inference grids apply to downstream retrieval for every method and
-selected training checkpoint. The campaign has **25 SAE fits**, **80 ImageNet E2
-points** (15 shared with E1), and **140 sparse + 3 dense** downstream evaluations.
+evaluated at **K=16, 32, 256**. Each ViT checkpoint is evaluated at **K=12 and K=48**.
+These same inference grids apply to every selected downstream checkpoint; the
+main downstream selection is SOP with ResNet-50 only. The campaign has **18 SAE
+fits**, **48 ImageNet E2 points** (15 shared with E1), and **36 sparse + 1 dense**
+downstream evaluations.
 HF backbone embeddings are reused. SAE weights remain fixed within each inference
 sweep. The shared fallback inference grid also uses 16/32/256 for ResNet-18 when
 that backbone is explicitly selected; it is not added to the active campaign.
@@ -152,9 +172,24 @@ validation accuracy and 1-NN accuracy are both reported. The existing
 Missing probe/timing components are filled without recomputing completed accuracy.
 The extra inference and probe evaluations do take additional time.
 
-Figures show only the measured sparse methods: CSR, CSRv2, CSR-MTK (CSR multi-TopK),
-MPSAE and MPSAEv2. There are **no published, Dense, or Full-representation reference
-curves or markers**. Dense diagnostics remain available as numerical tables.
+**Downstream retrieval.** SOP searches its 60,502 test images against the same
+gallery, excluding each query's own image. Relevant images share a product
+`item_id`, not merely a broad category. The frozen ImageNet-trained SAE is
+evaluated at each inference K using Recall@1/10/100, Precision@10 and mAP@R.
+There is no target-data training. The HF source is checked for expected counts
+and disjoint train/test products; parity with the original `Ebay_test.txt` file
+list has not been independently certified. Existing compatible SOP results are
+reused even when the campaign selection changes.
+
+**Optional classification.** The DINO weighted kNN implementation remains
+available for explicitly selected EuroSAT/Flowers102 campaigns and the synthetic
+smoke test. It evaluates 1-NN and 20-NN with temperature 0.07, keeping neighbour
+count separate from sparse budget K. EuroSAT results and feature archives are
+retained, but do not enter the current main reports. COCO/CLIP is deferred.
+
+Figures show only the measured sparse methods: CSR, CSRv2 and MPSAE. There are
+**no published, Dense, or Full-representation reference curves or markers**.
+Dense diagnostics remain available as numerical tables.
 Seed counts, protocols and checkpoint IDs stay in captions/tables. One seed yields
 no between-seed uncertainty band.
 
@@ -164,22 +199,27 @@ are split into parts with at most two backbone/training-K rows. Per-backbone
 `e2_nnz_*` uses measured gallery nonzeros instead, so saturation of MPSAE can
 compress its horizontal extent there without hiding the larger inference K points
 on the main figure. `e2_cost_*` shows search time, sparse top-1 search time and index
-memory where measured. Downstream `quality_*` shows R@1 and mAP@R versus inference
-K; `cost_*` shows retrieval cost and stored code size. All curves keep training K
-fixed, and all figures export vector PDF, 300-dpi PNG and a separate caption.
+memory where measured. SOP `quality_*` figures show R@1 and mAP@R;
+`nonzeros_*`, `storage_*`, `paired_*` and `cost_*` show sparsity, storage,
+paired differences and search cost. Optional classification campaigns produce
+`classification_*` figures separately. All curves
+keep training K fixed, and all figures export vector PDF, 300-dpi PNG and a
+separate caption. The [benchmark protocol](docs/benchmark.md) documents voting,
+ties, empty sparse codes and the relationship to the DINO implementation.
 
-After pulling this change, run `bash all_in_one.sh --skip-setup` to fill missing
-K evaluations and train the newly selected ResNet cells. Compatible existing checkpoints are reused. `report` alone only redraws
-measurements already present in that campaign's catalog; it cannot create new K
-results. Outputs are under `work/direct-v1/reports/thesis/<plan_id>/`.
+Run `bash all_in_one.sh --skip-setup` for the full ImageNet + SOP campaign,
+or use `configs/retrieval.yaml` as above to evaluate existing fits only. Compatible
+existing checkpoints are reused. `report` alone only redraws measurements already
+present in that campaign's catalog; it cannot compute missing measurements. Full
+campaign outputs are under `work/direct-v1/reports/thesis/<plan_id>/`.
 
 | backbone | d | recipe | preset | Training K budgets | E2 anchors | cells |
 |---|---|---|---|---|---|---|
-| `ff2048` | 2048 | MRL | Table 3 | 8, 16, 32, 256 | 8, 16, 32, 256 | 20 |
-| `vit_b16` | 768 | CSRv2 | Table 3 | 8 | 8 | 5 |
+| `ff2048` | 2048 | MRL | Table 3 | 8, 16, 32, 256 | 8, 16, 32, 256 | 12 |
+| `vit_b16` | 768 | CSRv2 | Table 3 | 12, 48 | 12, 48 | 6 |
 
-25 cells = the selected backbone/K pairs x 5 methods x seed 1227.
-The previous 20-fit, 35-fit and original 80-fit setups are preserved, including exact YAML and resolved presets,
+18 cells = the selected backbone/K pairs x 3 methods x seed 1227.
+The previous five-method settings are preserved, including archived YAML and resolved presets,
 in [`large_scale_abblation.md`](large_scale_abblation.md) for a later ablation.
 The wider reference grids remain registered for explicit custom campaigns.
 K never exceeds the backbone's own width, so every point is a compression.
@@ -187,24 +227,35 @@ The 768-d backbones are treated like FF2048, the 384-d one like RN18.
 
 ### Methods
 
-`mpsae` and `mpsaev2` use training batches of **1024** on every backbone and
-the original constant learning rate of **4e-5**. Baseline batch sizes retain
-their backbone presets. OT solver limits remain **400** initial iterations
-and **8000** refinement iterations; early stopping still applies. **MPSAEv2 trains
-for 15 epochs; all other methods retain 10 epochs.** OT group size, loss weights
-and the MPSAEv2 objective remain unchanged. Comparisons
-with CSR include the batch-size and update-count differences where applicable.
+The selectable methods are **CSR, CSRv2 and MPSAE**. This applies to every
+campaign, legacy CLI entry point, ImageNet E1/E2, probes, retrieval, timing and
+report. Explicitly selecting `mpsaev2` or `csr_multitopk` is rejected. Old
+checkpoints and downloaded embeddings are retained, while excluded methods'
+measurements are omitted from newly generated reports.
+
+`mpsae` uses training batches of **1024** on every backbone and the original
+constant learning rate of **4e-5**. Baseline batch sizes retain their backbone
+presets. All three methods train for **10 epochs**. OT solver limits remain
+**400** initial iterations and **8000** refinement iterations; early stopping
+still applies. Comparisons with CSR include the batch-size and update-count
+differences where applicable.
 
 | method | K during training | gates/step | regulariser | extra reconstruction |
 |---|---|---|---|---|
 | `csr` | fixed | K, 4K, K | γ · `inbatch_cl` | — |
 | `csrv2` | annealed | k, 4k, k | γ · `label_based_cl` | — |
-| `mpsae` | fixed | K, 4K, 2K | 2 · OT gap | — |
-| `mpsaev2` | fixed | K, 4K, 2K | 2 · OT gap + γ · `inbatch_cl` | — |
-| `csr_multitopk` | fixed | K, 4K, 2K | γ · `inbatch_cl` | L(2K)/8 |
+| `mpsae` | fixed | K, 4K, 2K | λ(K) · OT gap | — |
 
 Shared reconstruction: `B(k) = L(k) + 0.125·L(4k) + (1/32)·NMSE_aux`.
 Add the weighted regulariser(s) and extra reconstruction listed above.
+
+MPSAE uses **λ(K)=2.0 for training K ≤ 64** and **λ(K)=0.5 for training K > 64**.
+The threshold refers to the main training budget, not the 2K/4K views or an
+inference sweep. In the current campaign only the ResNet-50 K=256 fit changes.
+Existing high-K fits trained with weight 2.0 must be archived outside `runs/`
+before fresh training; they cannot be resumed or evaluated as the new recipe.
+The selected overrides appear in the campaign plan, and `ot_weight` is logged
+alongside the unweighted `loss_ot`.
 
 Every method gates exactly **three** times per step, so `dead_threshold=30`
 means the same thing for all of them. For the baselines that is the released
@@ -212,42 +263,12 @@ sequence verbatim: CSR runs three forward passes, the third only to build a
 duplicate contrastive view. Ours spend the third gate on the 2K view they
 actually consume.
 
-`csr_multitopk` is the control for supervising a 2K view. It shares `csr`'s
-K/4K reconstruction and contrastive term, adds `L(2K)/8`, and uses the 2K view
-for its third activity-counter update. MPSAE uses the batch size described above. It
-follows CSRv2 App. G's "Diverse Multi-TopK" ablation in spirit.
+Only `csrv2` anneals in the active method set. Historical MPSAEv2 and
+CSR multi-TopK definitions are preserved in
+[`docs/notes/excluded_methods.md`](docs/notes/excluded_methods.md).
+Removing them from experiment selection does not change any active loss or
+checkpoint identity. Compatible CSR, CSRv2 and MPSAE checkpoints remain reusable.
 
-`mpsaev2` now uses **fixed K with both OT and instance contrastive learning**:
-`B(K) + 2·gap(z_K,z_2K,z_4K) + γ·C_instance(z_K)`. It needs no labels and adds
-no `L(2K)/8` reconstruction. The contrastive coefficient is 0.1 for ResNet-50,
-ConvNeXt and ViT, and 1.0 for ResNet-18 and DINO; temperature is 0.2. The
-contrastive term operates on the existing K code, so the three activity-counter
-updates remain K, 4K, 2K. Against MPSAE, the objective adds contrastive loss;
-MPSAEv2 now also trains for 15 epochs versus MPSAE's 10. Batch size and fixed K
-match, but this comparison includes training duration. Better accuracy remains
-a hypothesis to test.
-ImageNet reports include `paired_mpsaev2_vs_mpsae`; downstream paired tables
-also include this treatment/control pair, alongside the existing comparisons.
-Each difference uses matching seeds and evaluation settings.
-
-MPSAEv2 is displayed as `MPSAEv2`; its internal key and objective variant
-remain `mpsaev2` and `fixed_ot_cl_v1`. An otherwise identical 10-epoch
-checkpoint continues through epoch 15 with its weights, Adam state, RNG
-and activity counters preserved. Only the stopping point changes; the
-constant learning rate and fixed-K loss are unchanged. A different loss,
-optimizer, seed or dataset still prevents continuation. The completed
-15-epoch fit receives a new signature, so E1/E2 and downstream results
-are recomputed for the final weights. Interrupted extensions resume.
-
-Only `csrv2` anneals in the current method set. The former MPSAEv2 **variant B**
-(annealed main budget with OT only) is retired; its checkpoints are incompatible
-with the new objective. Historical variants A and B are described in
-[`docs/notes/mpsaev2_legacy_A.md`](docs/notes/mpsaev2_legacy_A.md).
-New hybrid fits use `runs/<backbone>/mpsaev2__fixed_ot_cl_v1/k<K>/seed<SEED>/`
-and record objective variant `fixed_ot_cl_v1`, while reports retain the logical
-method name `mpsaev2`. Existing unversioned MPSAEv2 directories remain intact
-and are excluded from current-method reports. The hybrid starts a new fit;
-compatible checkpoints for the other methods remain reusable.
 
 ---
 
@@ -352,7 +373,7 @@ pytest tests/test_grid.py tests/test_schedules.py -q    # these run anywhere
 * `test_against_release.py` — our model, losses, counter and one Adam step
   against `tests/reference/csr_released.py`, a transcription of the published
   source. This is what makes the baseline claim defensible.
-* `test_methods.py` — the five methods differ *only* as designed; gate counts
+* `test_methods.py` — active and historical objectives differ as designed; gate counts
   match; the ablation really isolates the OT term.
 * `test_schedules.py` — k-annealing against the released function at every step.
 * `test_ot.py` — feasibility, nonnegativity, the envelope gradient, group
@@ -388,8 +409,9 @@ timing protocol and standalone GPU profiler.
   A sparse-product fast path for small K would cut E2 substantially.
 * `csrc/` is built but the inverted-index search driver is not wired in;
   `evaluate/timing.py` currently measures the paper's `torch.sparse` protocol.
-* Frozen-transfer retrieval for EuroSAT RGB, the HF custom Flowers102 split,
-  and Stanford Online Products is implemented in the campaign path. DTD, VOC,
+* The main frozen-transfer benchmark is product retrieval for Stanford Online
+  Products. DINO weighted kNN for EuroSAT RGB and the HF custom Flowers102 split
+  remains optional. COCO image-text retrieval and CLIP are deferred. DTD, VOC,
   SPair, DeepFashion and ROxford/RParis in `data_usage.md` remain future work.
   That file's DTD test split should be 40 images/class, not 10.
 * Nothing in this rewrite has executed on a GPU yet. The first real

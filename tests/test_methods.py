@@ -14,7 +14,7 @@ import pytest
 pytest.importorskip("torch")
 
 from mpsae import losses, methods  # noqa: E402
-from mpsae.config import FF2048_PRESET, METHODS  # noqa: E402
+from mpsae.config import FF2048_PRESET, IMPLEMENTED_METHODS as METHODS  # noqa: E402
 from mpsae.model import build_sae  # noqa: E402
 
 DIM, HIDDEN, K = 12, 64, 3

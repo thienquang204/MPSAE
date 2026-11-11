@@ -16,7 +16,8 @@ import time
 from typing import Any
 
 from . import __version__
-from .config import BACKBONES, METHODS, METHOD_VARIANTS, training_preset
+from .config import (BACKBONES, METHODS, METHOD_VARIANTS, training_preset,
+                     validate_experiment_methods, validate_checkpoint_ot_weight)
 from .io import atomic_json, sha256_file
 
 
@@ -51,6 +52,7 @@ def _summary(values: list[float]) -> dict[str, float]:
 
 def run_profile(args: argparse.Namespace) -> dict[str, Any]:
     """Benchmark fresh optimizer updates on an independent model instance."""
+    validate_experiment_methods((args.method,))
     import torch
 
     from . import methods
@@ -62,7 +64,7 @@ def run_profile(args: argparse.Namespace) -> dict[str, Any]:
     if args.start_step is not None and args.start_step < 0:
         raise ValueError("start-step must be nonnegative")
     spec = BACKBONES[args.backbone]
-    preset = training_preset(args.method, spec.preset)
+    preset = training_preset(args.method, spec.preset, k=args.k)
     if not 1 <= args.k <= preset.hidden_dim:
         raise ValueError(f"k must lie in 1..{preset.hidden_dim}")
     if args.trace is not None and args.trace.resolve() == args.out.resolve():
@@ -95,6 +97,7 @@ def run_profile(args: argparse.Namespace) -> dict[str, Any]:
             if not isinstance(saved, dict) or not isinstance(saved.get("model"), dict):
                 raise ValueError("checkpoint must contain the campaign's model state dictionary")
             identity = saved.get("identity") or {}
+            validate_checkpoint_ot_weight(args.method, args.k, identity, context=str(args.checkpoint))
             for key, value in (("backbone", args.backbone), ("method", args.method),
                                ("target_k", args.k)):
                 if key in identity and identity[key] != value:

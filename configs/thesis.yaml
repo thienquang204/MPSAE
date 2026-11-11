@@ -1,19 +1,20 @@
-# Main campaign: ResNet-50 train K=8/16/32/256; ViT train K=8. Previous 20-fit setup: ../large_scale_abblation.md.
+# Main campaign: CSR, CSRv2, MPSAE. Previous settings: ../large_scale_abblation.md.
 # Published embeddings only. Training presets remain in mpsae/config.py.
-# Selected published bundles: ImageNet/EuroSAT for both; SOP for ResNet-50.
+# Selected bundles: ImageNet for both; SOP retrieval for ResNet-50.
+# EuroSAT kNN and COCO/CLIP are deferred. Retrieval-only: configs/retrieval.yaml.
 name: thesis
 backbones: [ff2048, vit_b16]
-methods: [csr, csrv2, mpsae, mpsaev2, csr_multitopk]
+methods: [csr, csrv2, mpsae]
 seeds: [1227]
 imagenet:
   enabled: true
   prepare: false
   train_k:
     ff2048: [8, 16, 32, 256]
-    vit_b16: [8]
+    vit_b16: [12, 48]
   eval_k:                       # E2 inference budgets; E1 evaluates at train_k
     ff2048: [16, 32, 256]
-    vit_b16: [3, 12, 48, 96]
+    vit_b16: [12, 48]
   e1: true
   e2: true
   linear_probe: true
@@ -26,15 +27,17 @@ imagenet:
   timing_retry_skipped: false
 downstream:
   enabled: true
-  datasets: [eurosat, sop]
+  datasets: [sop]
+  tasks:
+    sop: retrieval
   backbones:
     sop: [ff2048]
   train_k:                      # evaluate every selected ImageNet checkpoint
     ff2048: [8, 16, 32, 256]
-    vit_b16: [8]
+    vit_b16: [12, 48]
   eval_k:
     ff2048: [16, 32, 256]
-    vit_b16: [3, 12, 48, 96]
+    vit_b16: [12, 48]
   mode: frozen
   revisions: {}                  # main is resolved once to an immutable commit
 execution:

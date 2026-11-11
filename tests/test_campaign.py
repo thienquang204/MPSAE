@@ -15,18 +15,45 @@ from mpsae.io import atomic_json, canonical_hash
 from mpsae.config import Cell
 
 
-def test_default_campaign_is_source_training_plus_frozen_transfer():
-    campaign = load_campaign("configs/thesis.yaml")
+@pytest.mark.parametrize("path", ["configs/thesis.yaml", "configs/precomputed.yaml"])
+def test_default_campaign_is_source_training_plus_frozen_transfer(path):
+    campaign = load_campaign(path)
     plan = campaign.plan()
-    assert plan["source_cells"] == 25
-    assert plan["downstream_sparse_points"] == 140
-    assert plan["downstream_dense_points"] == 3
+    assert plan["source_cells"] == 18
+    assert plan["downstream_sparse_points"] == 36
+    assert plan["downstream_dense_points"] == 1
     assert campaign.downstream["mode"] == "frozen"
     assert campaign.execution["precomputed_only"] is True
     assert campaign.seeds == (1227,)
     assert campaign.target_backbones("sop") == ("ff2048",)
     assert campaign.backbones == ("ff2048", "vit_b16")
-    assert "flowers102" not in campaign.downstream["datasets"]
+    assert campaign.downstream["datasets"] == ["sop"]
+
+
+def test_retrieval_only_campaign_reuses_main_sources_without_imagenet_work(tmp_path):
+    from mpsae.embeddings_hub import campaign_selection
+
+    main = load_campaign("configs/thesis.yaml")
+    retrieval = load_campaign("configs/retrieval.yaml")
+    plan = retrieval.plan()
+    assert retrieval.source_cells() == main.downstream_cells("sop")
+    assert retrieval.backbones == ("ff2048",)
+    assert retrieval.downstream["datasets"] == ["sop"]
+    assert retrieval.evaluation_options("sop") == main.evaluation_options("sop")
+    assert retrieval.budgets("downstream", "eval_k", "ff2048") == (16, 32, 256)
+    assert all(retrieval.imagenet[key] is False
+               for key in ("enabled", "prepare", "e1", "e2", "linear_probe", "timing"))
+    assert retrieval.execution["train_missing"] is False
+    assert retrieval.execution["precomputed_only"] is True
+    assert retrieval.execution["continue_on_error"] is False
+    assert campaign_selection(retrieval) == (["sop"], ["ff2048"])
+    assert (plan["source_cells"], plan["downstream_sparse_points"],
+            plan["downstream_dense_points"]) == (12, 36, 1)
+    assert plan["storage_estimate"]["imagenet_features_bytes"] == {}
+    assert plan["storage_estimate"]["total_imagenet_features_bytes"] == 0
+    assert plan["storage_estimate"]["active_writer_upper_bytes"] == 0
+    assert campaign_paths(retrieval, tmp_path)["workspace"] == campaign_paths(main, tmp_path)["workspace"]
+    assert campaign_paths(retrieval, tmp_path)["reports"] != campaign_paths(main, tmp_path)["reports"]
 
 
 def test_dataset_backbone_selection_changes_plan_without_dropping_other_targets():
@@ -36,13 +63,13 @@ def test_dataset_backbone_selection_changes_plan_without_dropping_other_targets(
     assert campaign.target_backbones("eurosat") == ("rn18", "vit_b16")
     assert {cell.backbone for cell in campaign.downstream_cells("sop")} == {"rn18"}
     assert campaign.plan()["downstream_dense_points"] == 3
-    assert campaign.plan()["downstream_sparse_points"] == 10
+    assert campaign.plan()["downstream_sparse_points"] == 8
 
 
 @pytest.mark.parametrize("config", ["configs/thesis.yaml", "configs/precomputed.yaml"])
 @pytest.mark.parametrize("backbone,expected,training", [
     ("ff2048", (16, 32, 256), (8, 16, 32, 256)),
-    ("vit_b16", (3, 12, 48, 96), (8,)),
+    ("vit_b16", (12, 48), (12, 48)),
 ])
 def test_campaigns_restrict_training_e2_and_downstream_to_requested_budgets(config, backbone, expected, training):
     from mpsae.config import BACKBONES
@@ -59,7 +86,7 @@ def test_campaigns_restrict_training_e2_and_downstream_to_requested_budgets(conf
 
 @pytest.mark.parametrize("backbone,expected", [
     ("ff2048", (16, 32, 256)), ("rn18", (16, 32, 256)),
-    ("vit_b16", (3, 12, 48, 96)),
+    ("vit_b16", (12, 48)),
 ])
 def test_default_inference_selection_matches_all_evaluation_families(backbone, expected):
     from mpsae.config import inference_budgets
@@ -74,13 +101,13 @@ def test_new_source_models_are_evaluated_in_every_downstream_dataset():
     from mpsae.config import METHODS
     for method in METHODS:
         expected = {("ff2048", method, k, 1227) for k in (8, 16, 32, 256)}
-        for dataset in ("eurosat", "sop"):
+        for dataset in campaign.downstream["datasets"]:
             selected = {(c.backbone, c.method, c.k, c.seed)
                         for c in campaign.downstream_cells(dataset) if c.backbone == "ff2048"
                         and c.method == method}
             assert selected == expected
     assert sum(len(campaign.budgets("imagenet", "eval_k", c.backbone))
-               for c in campaign.source_cells()) == 80
+               for c in campaign.source_cells()) == 48
 
 
 @pytest.mark.parametrize("targets", [[], {"flowers102": ["rn18"]},

@@ -4,7 +4,8 @@ The campaign supplies the records: this module never searches a workspace for
 results. A table row is one dataset/protocol/backbone/mode/training-budget/
 inference-budget/method condition, averaged over training seeds. Dataset or
 feature revisions can be isolated with ``comparison_id`` (or ``protocol_id``).
-Metrics are fractions in JSON/CSV and percentages only on figure axes.
+Metrics are fractions in JSON/CSV and percentages only on figure axes. DINO
+kNN classification and ranked retrieval remain separate tasks throughout.
 
 Only the standard library is imported until figures are requested. The JSON
 and CSV artefacts remain available when matplotlib cannot be imported.
@@ -19,11 +20,11 @@ import re
 import statistics
 from typing import Any, Iterable, Mapping, Sequence
 
-from ..config import METHODS, SEEDS
+from ..config import IMPLEMENTED_METHODS, METHODS, SEEDS
 from ..io import atomic_json, canonical_hash
 from ..logs import get_logger
 
-FORMAT = "mpsae-frozen-transfer-report-v1"
+FORMAT = "mpsae-frozen-transfer-report-v2"
 ACCURACY_METRICS = (
     "recall_at_1", "recall_at_10", "recall_at_100", "precision_at_10", "map_at_r",
     "macro_recall_at_1", "macro_recall_at_10", "macro_recall_at_100",
@@ -32,15 +33,51 @@ ACCURACY_METRICS = (
 MEASUREMENT_METRICS = (
     "nnz_mean", "query_nnz_mean", "gallery_nnz_mean", "empty_queries",
     "query_count", "gallery_count", "search_seconds", "encode_seconds",
-    "code_bytes_per_image", "index_bytes", "search_ms_per_query",
+    "code_bytes_per_image", "index_bytes", "search_ms_per_query", "voting_seconds",
 )
 METRICS = ACCURACY_METRICS + MEASUREMENT_METRICS
-PAIRS = (("mpsae", "csr"), ("mpsaev2", "csrv2"), ("csr_multitopk", "csr"),
-         ("mpsaev2", "mpsae"))
-_SCOPE = ("dataset", "protocol", "comparison_id", "backbone", "mode", "train_k", "eval_k")
+PAIRS = (("mpsae", "csr"), ("mpsae", "csrv2"))
+_SCOPE = ("dataset", "protocol", "comparison_id", "backbone", "mode", "train_k", "eval_k",
+          "task", "classifier_signature")
 _ALIASES = {"queries": "query_count", "gallery_rows": "gallery_count",
             "seconds": "search_seconds"}
 _SAFE_NAME = re.compile(r"[^a-zA-Z0-9_.-]+")
+_KNN_METRIC = re.compile(r"knn_([1-9][0-9]*)_(top1|top5|balanced_accuracy|macro_f1)$")
+
+
+def _classification_metadata(record: dict[str, Any]) -> None:
+    """Make task and voting settings explicit before grouping any results."""
+    task = record.setdefault("task", "retrieval")
+    if task not in ("retrieval", "knn_classification"):
+        raise ValueError(f"unknown benchmark task {task!r}")
+    classifier = record.get("classifier")
+    if task == "retrieval":
+        if classifier:
+            raise ValueError("retrieval record must not carry a classifier")
+        record["classifier_signature"] = ""
+        return
+    if not isinstance(classifier, Mapping) or classifier.get("name") != "dino_weighted_knn":
+        raise ValueError("classification record needs a dino_weighted_knn classifier")
+    classifier = dict(classifier)
+    neighbours = classifier.get("n_neighbors")
+    if (not isinstance(neighbours, (tuple, list)) or not neighbours
+            or any(isinstance(n, bool) or not isinstance(n, int) or n < 1 for n in neighbours)
+            or len(set(neighbours)) != len(neighbours)):
+        raise ValueError("classifier.n_neighbors must contain distinct positive integers")
+    temperature = classifier.get("temperature")
+    if (isinstance(temperature, bool) or not isinstance(temperature, (int, float))
+            or not math.isfinite(temperature) or temperature <= 0):
+        raise ValueError("classifier.temperature must be finite and positive")
+    classifier.update(n_neighbors=sorted(neighbours), temperature=float(temperature))
+    record["classifier"] = classifier
+    # Never trust a caller's comparison_id to identify the voting protocol.
+    record["classifier_signature"] = canonical_hash(classifier)
+
+
+def _metric_names(records: Iterable[Mapping[str, Any]]) -> tuple[str, ...]:
+    dynamic = {name for record in records for name in record.get("metrics", {})
+               if _KNN_METRIC.fullmatch(name)}
+    return METRICS + tuple(sorted(dynamic))
 
 
 def _metric_values(record: Mapping[str, Any]) -> dict[str, float]:
@@ -52,7 +89,27 @@ def _metric_values(record: Mapping[str, Any]) -> dict[str, float]:
         if new not in values and old in values:
             values[new] = values[old]
     clean: dict[str, float] = {}
-    for name in METRICS:
+    classification = record.get("task") == "knn_classification"
+    neighbours = record.get("classifier", {}).get("n_neighbors", []) if classification else []
+    if classification:
+        classifier = record["classifier"]
+        for header_key, metric_key in (("n_neighbors", "n_neighbors"),
+                                       ("temperature", "temperature"),
+                                       ("metric_version", "protocol_version"),
+                                       ("vote_rule", "vote_rule"), ("tie_rule", "tie_rule"),
+                                       ("class_tie_rule", "class_tie_rule"),
+                                       ("empty_query_policy", "empty_query_policy")):
+            if (header_key in classifier and metric_key in values
+                    and classifier[header_key] != values[metric_key]):
+                raise ValueError(f"classifier.{header_key} disagrees with measured metric policy")
+    for name in values:
+        if name.startswith("knn_"):
+            match = _KNN_METRIC.fullmatch(name)
+            if not classification or match is None or int(match[1]) not in neighbours:
+                raise ValueError(f"metric {name!r} does not match the declared classification task")
+    if classification and any(name in values for name in ACCURACY_METRICS):
+        raise ValueError("classification results cannot contain retrieval accuracy metrics")
+    for name in _metric_names([{"metrics": values}]):
         value = values.get(name)
         if value is None:
             continue
@@ -61,10 +118,13 @@ def _metric_values(record: Mapping[str, Any]) -> dict[str, float]:
         value = float(value)
         if not math.isfinite(value) or value < 0:
             raise ValueError(f"{name} must be finite and nonnegative")
-        if name in ACCURACY_METRICS and value > 1:
+        if (name in ACCURACY_METRICS or _KNN_METRIC.fullmatch(name)) and value > 1:
             raise ValueError(f"{name} must be a fraction in [0, 1], not a percentage")
         clean[name] = value
-    if not any(name in clean for name in ACCURACY_METRICS):
+    if classification:
+        if any(f"knn_{n}_top1" not in clean for n in neighbours):
+            raise ValueError("classification result needs top1 for every declared neighbor count")
+    elif not any(name in clean for name in ACCURACY_METRICS):
         raise ValueError("benchmark record contains no supported retrieval accuracy metric")
     if ("search_ms_per_query" not in clean and "search_seconds" in clean
             and clean.get("query_count", 0) > 0):
@@ -85,6 +145,11 @@ def _normalise(records: Iterable[Mapping[str, Any]]) -> tuple[list[dict[str, Any
     incomplete: list[str] = []
     for item in records:
         record = dict(item)
+        # Historical experiments may remain in a mixed result collection.
+        # Exclude them before validating or reading their retired payloads.
+        method = record.get("method")
+        if method in IMPLEMENTED_METHODS and method not in METHODS:
+            continue
         evaluation_id = record.get("evaluation_id")
         if not isinstance(evaluation_id, str) or not evaluation_id:
             raise ValueError("each benchmark record needs an evaluation_id")
@@ -94,6 +159,8 @@ def _normalise(records: Iterable[Mapping[str, Any]]) -> tuple[list[dict[str, Any
         for name in ("dataset", "protocol", "backbone", "method"):
             if not isinstance(record.get(name), str) or not record[name]:
                 raise ValueError(f"benchmark record {evaluation_id} needs {name}")
+        if record["method"] not in (*METHODS, "dense"):
+            raise ValueError(f"unknown benchmark method {record['method']!r}")
         record["mode"] = record.get("mode", "frozen")
         if not isinstance(record["mode"], str) or not record["mode"]:
             raise ValueError("mode must be a nonempty protocol name")
@@ -101,6 +168,7 @@ def _normalise(records: Iterable[Mapping[str, Any]]) -> tuple[list[dict[str, Any
         if not isinstance(comparison_id, str):
             raise TypeError("comparison_id/protocol_id must be a string")
         record["comparison_id"] = comparison_id
+        _classification_metadata(record)
         dense = record["method"] == "dense"
         if dense:
             if any(record.get(name) is not None for name in ("seed", "train_k", "eval_k")):
@@ -144,6 +212,7 @@ def _sort_key(row: Mapping[str, Any]) -> tuple:
     method_order = {"dense": -1, **{method: index for index, method in enumerate(METHODS)}}
     return tuple(str(row.get(name, "")) for name in _SCOPE[:5]) + (
         int(row.get("train_k") or 0), int(row.get("eval_k") or 0),
+        str(row.get("task", "retrieval")), str(row.get("classifier_signature", "")),
         method_order.get(str(row.get("method")), 99), str(row.get("method", "")))
 
 
@@ -159,6 +228,8 @@ def aggregate_records(records: Sequence[Mapping[str, Any]], *,
     rows = []
     for key, members in groups.items():
         row = dict(zip(_SCOPE + ("method",), key))
+        if row["task"] == "knn_classification":
+            row["classifier"] = dict(members[0]["classifier"])
         dense = row["method"] == "dense"
         present = sorted(member["seed"] for member in members if member["seed"] is not None)
         missing = [] if dense else sorted(set(expected) - set(present))
@@ -168,7 +239,7 @@ def aggregate_records(records: Sequence[Mapping[str, Any]], *,
                    checkpoint_ids=sorted({str(member.get("checkpoint_id") or member.get("signature"))
                                           for member in members
                                           if member.get("checkpoint_id") or member.get("signature")}))
-        for name in METRICS:
+        for name in _metric_names(members):
             values = [member["metrics"][name] for member in members if name in member["metrics"]]
             if values:
                 mean, std, count = _stats(values)
@@ -196,13 +267,15 @@ def paired_differences(records: Sequence[Mapping[str, Any]], *,
             if not paired:
                 continue
             row = dict(zip(_SCOPE, scope))
+            if row["task"] == "knn_classification":
+                row["classifier"] = dict(lhs[paired[0]]["classifier"])
             row.update(treatment=treatment, control=control, seeds_paired=paired,
                        seeds_missing=sorted(expected - set(paired)),
                        seeds_unpaired=sorted(set(lhs) ^ set(rhs)), n=len(paired),
                        evaluation_pairs=[{"seed": seed,
                                           "treatment": lhs[seed]["evaluation_id"],
                                           "control": rhs[seed]["evaluation_id"]} for seed in paired])
-            for name in METRICS:
+            for name in _metric_names([*lhs.values(), *rhs.values()]):
                 values = [lhs[seed]["metrics"][name] - rhs[seed]["metrics"][name]
                           for seed in paired
                           if name in lhs[seed]["metrics"] and name in rhs[seed]["metrics"]]
@@ -230,9 +303,18 @@ def _write_table(rows: Sequence[Mapping[str, Any]], directory: Path, name: str) 
     return {"json": str(json_path), "csv": str(csv_path)}
 
 
-def _scope_label(scope: tuple[str, str, str]) -> str:
-    dataset, protocol, comparison = scope
+def _panel_scope(row: Mapping[str, Any]) -> tuple[str, ...]:
+    return (row["dataset"], row["protocol"], row["comparison_id"],
+            row.get("task", "retrieval"), row.get("classifier_signature", ""))
+
+
+def _scope_label(scope: tuple[str, ...]) -> str:
+    dataset = scope[0]
     return {"eurosat": "EuroSAT", "sop": "SOP", "flowers102": "Flowers102"}.get(dataset, dataset)
+
+
+def _scope_caption(scopes) -> str:
+    return "; ".join(f"{i + 1}: " + ", ".join(scope) for i, scope in enumerate(scopes))
 
 
 def _curve(ax, rows: Sequence[Mapping[str, Any]], method: str, metric: str, *,
@@ -268,7 +350,7 @@ def _draw_quality(rows: Sequence[Mapping[str, Any]], dense: Sequence[Mapping[str
     from ..report.style import PAGE_WIDTH, save_figure, seed_caption
     from ..report.figures import _dedup_legend
 
-    scopes = sorted({(row["dataset"], row["protocol"], row["comparison_id"]) for row in rows})
+    scopes = sorted({_panel_scope(row) for row in rows})
     if not scopes or not any(row.get(x if x == "eval_k" else f"{x}_mean") is not None
                              for row in rows):
         return []
@@ -276,8 +358,7 @@ def _draw_quality(rows: Sequence[Mapping[str, Any]], dense: Sequence[Mapping[str
                              squeeze=False, layout="constrained")
     try:
         for index, scope in enumerate(scopes):
-            subset = [row for row in rows if tuple(row[key] for key in
-                      ("dataset", "protocol", "comparison_id")) == scope]
+            subset = [row for row in rows if _panel_scope(row) == scope]
             for ax, metric, pretty in zip(axes[index], ("recall_at_1", "map_at_r"),
                                           ("R@1 (%)", "mAP@R (%)")):
                 for method in METHODS:
@@ -305,8 +386,7 @@ def _draw_quality(rows: Sequence[Mapping[str, Any]], dense: Sequence[Mapping[str
             "Per-point n is in the tables. R@1 is the share of queries with a relevant first "
             "neighbour; mAP@R ranks to each query's full relevant-image count. Accuracies are percentages. "
             "Every inference budget uses the same SAE checkpoint at the training K in the title. "
-            "CSR-MTK denotes CSR multi-TopK. Protocols/revisions in row order: "
-            + "; ".join(f"{i + 1}: {d}, {p}, {c}" for i, (d, p, c) in enumerate(scopes))
+            "Protocols/revisions in row order: " + _scope_caption(scopes)
         )
         return save_figure(fig, out_dir, name, caption=caption)
     finally:
@@ -319,15 +399,14 @@ def _draw_paired(rows: Sequence[Mapping[str, Any]], out_dir: Path,
     from ..report.style import PAGE_WIDTH, label_for, save_figure, seed_caption
     from ..report.figures import _dedup_legend
 
-    scopes = sorted({(row["dataset"], row["protocol"], row["comparison_id"]) for row in rows})
+    scopes = sorted({_panel_scope(row) for row in rows})
     if not scopes:
         return []
     fig, axes = plt.subplots(len(scopes), 2, figsize=(PAGE_WIDTH, 2.45 * len(scopes) + 0.5),
                              squeeze=False, layout="constrained")
     try:
         for index, scope in enumerate(scopes):
-            subset = [row for row in rows if tuple(row[key] for key in
-                      ("dataset", "protocol", "comparison_id")) == scope]
+            subset = [row for row in rows if _panel_scope(row) == scope]
             for ax, metric, pretty in zip(axes[index], ("recall_at_1", "map_at_r"),
                                           ("Δ R@1 (pp)", "Δ mAP@R (pp)")):
                 for treatment, control in PAIRS:
@@ -350,7 +429,7 @@ def _draw_paired(rows: Sequence[Mapping[str, Any]], out_dir: Path,
             "are in percentage points. "
             f"{seed_caption([seed for row in rows for seed in row['seeds_paired']])} Unmatched seeds are excluded "
             "and listed explicitly in the paired table. Protocols/revisions in row order: "
-            + "; ".join(f"{i + 1}: {d}, {p}, {c}" for i, (d, p, c) in enumerate(scopes))))
+            + _scope_caption(scopes)))
     finally:
         plt.close(fig)
 
@@ -361,7 +440,7 @@ def _draw_costs(rows, out_dir, name, title):
     from ..report.style import PAGE_WIDTH, COLUMN_WIDTH, save_figure, seed_caption
     from ..report.figures import _dedup_legend, _log2_k_axis
 
-    scopes = sorted({(r["dataset"], r["protocol"], r["comparison_id"]) for r in rows})
+    scopes = sorted({_panel_scope(row) for row in rows})
     fields = [(field, label, scale) for field, label, scale in
               (("search_ms_per_query", "Search (ms/query)", 1),
                ("code_bytes_per_image", "Code size (KiB/image)", 1 / 1024))
@@ -372,8 +451,7 @@ def _draw_costs(rows, out_dir, name, title):
                              figsize=(PAGE_WIDTH if len(fields) > 1 else COLUMN_WIDTH,
                                       2.45 * len(scopes) + 0.5), layout="constrained")
     for i, scope in enumerate(scopes):
-        subset = [r for r in rows if tuple(r[key] for key in
-                  ("dataset", "protocol", "comparison_id")) == scope]
+        subset = [r for r in rows if _panel_scope(r) == scope]
         for ax, (field, label, scale) in zip(axes[i], fields):
             for method in METHODS:
                 _curve(ax, [r for r in subset if r["method"] == method], method, field, scale=scale)
@@ -384,13 +462,97 @@ def _draw_costs(rows, out_dir, name, title):
     _dedup_legend(fig, list(axes.flat), ncol=6)
     fig.suptitle(title)
     return save_figure(fig, out_dir, name, caption=(
-        "Measured retrieval cost at each inference K; the SAE checkpoint is fixed. Search "
-        "ms/query is total retrieval wall time divided by query count, excluding encoding; "
+        "Measured neighbor-search cost at each inference K; the SAE checkpoint is fixed. Search "
+        "ms/query is the shared search wall time divided by query count, excluding encoding and voting; "
         "it is an amortised cost, not single-query latency. Code size includes the stored "
         "sparse representation per image. "
         f"{seed_caption([seed for r in rows for seed in r['seeds_present']])} "
-        "Protocols/revisions in row order: " + "; ".join(
-            f"{i + 1}: {d}, {p}, {c}" for i, (d, p, c) in enumerate(scopes))))
+        "Protocols/revisions in row order: " + _scope_caption(scopes)))
+
+
+def _draw_classification(rows, out_dir, name, title, *, kind="accuracy", x="eval_k"):
+    """DINO kNN panels keep neighbor counts separate from embedding budgets."""
+    import matplotlib.pyplot as plt
+    from ..report.style import PAGE_WIDTH, COLUMN_WIDTH, label_for, save_figure, seed_caption
+    from ..report.figures import _dedup_legend, _log2_k_axis
+
+    delta = kind == "paired"
+    fields = (("balanced_accuracy", "Balanced acc. (%)"), ("macro_f1", "Macro-F1 (%)")) \
+        if kind == "balance" else (("top1", "Accuracy (%)" if not delta else "Delta accuracy (pp)"),)
+    scopes = sorted({_panel_scope(row) for row in rows})
+    panels = []
+    for scope in scopes:
+        subset = [row for row in rows if _panel_scope(row) == scope]
+        classifier = subset[0]["classifier"]
+        for neighbours in classifier["n_neighbors"]:
+            if any(row.get(f"{'delta_' if delta else ''}knn_{neighbours}_{metric}_mean") is not None
+                   for row in subset for metric, _ in fields):
+                panels.append((scope, neighbours, classifier, subset))
+    if not panels:
+        return []
+    per_page = 4 // len(fields)
+    pages = [panels[start:start + per_page] for start in range(0, len(panels), per_page)]
+    paths = []
+    for page_index, page in enumerate(pages, start=1):
+        count = len(page) * len(fields)
+        columns = min(2, count)
+        height = (count + columns - 1) // columns
+        fig, axes = plt.subplots(height, columns, squeeze=False, layout="constrained",
+                                 figsize=(PAGE_WIDTH if columns == 2 else COLUMN_WIDTH,
+                                          2.45 * height + 0.5))
+        try:
+            axis_index = 0
+            for scope, neighbours, classifier, subset in page:
+                for field, label in fields:
+                    ax = axes.flat[axis_index]
+                    axis_index += 1
+                    metric = f"knn_{neighbours}_{field}"
+                    if delta:
+                        for treatment, control in PAIRS:
+                            _curve(ax, [row for row in subset if row["treatment"] == treatment
+                                       and row["control"] == control], treatment, metric, delta=True,
+                                   label=f"{label_for(treatment)} - {label_for(control)}")
+                        ax.axhline(0, color="#444444", linewidth=0.7)
+                    else:
+                        for method in METHODS:
+                            _curve(ax, [row for row in subset if row["method"] == method], method,
+                                   metric, x=x, xscale=1 / 1024 if x == "code_bytes_per_image" else 1)
+                    if x == "eval_k":
+                        _log2_k_axis(ax, [row["eval_k"] for row in subset], label="Inference $K$")
+                    elif x == "nnz_mean":
+                        ax.set_xscale("symlog", base=2, linthresh=1)
+                        ax.set_xlabel("Mean nonzeros (support)")
+                    else:
+                        ax.set_xscale("symlog", base=2, linthresh=1 / 1024)
+                        ax.set_xlabel("Code size (KiB/image)")
+                    ax.set_ylabel(label)
+                    ax.set_title(f"{_scope_label(scope)} · {neighbours}-NN · "
+                                 f"T={classifier['temperature']:g}", fontsize=9)
+            for ax in list(axes.flat)[axis_index:]:
+                ax.set_visible(False)
+            _dedup_legend(fig, list(axes.flat)[:axis_index], ncol=3)
+            fig.suptitle(title)
+            seeds_key = "seeds_paired" if delta else "seeds_present"
+            caption = (
+                (f"Part {page_index} of {len(pages)}. " if len(pages) > 1 else "")
+                + f"{title}. DINO weighted kNN classification on frozen sparse codes. "
+                "The neighbor count in each panel is independent of the embedding's inference K. "
+                "Votes sum exp(cosine similarity / temperature) by support class. "
+                "All inference budgets use the same checkpoint at the training K in the title. "
+                + ("Differences are paired within training seed and identical classifier settings. "
+                   if delta else "")
+                + seed_caption([seed for row in rows for seed in row[seeds_key]])
+                + " Per-point n and top-5 results are in the tables. Panel protocols: "
+                + "; ".join(f"{_scope_label(scope)}, {neighbours}-NN, "
+                            f"{json.dumps(classifier, sort_keys=True)}, protocol={scope[1]}, "
+                            f"comparison={scope[2]}"
+                            for scope, neighbours, classifier, _ in page)
+            )
+            page_name = name if page_index == 1 else f"{name}_part{page_index}"
+            paths.extend(save_figure(fig, out_dir, page_name, caption=caption))
+        finally:
+            plt.close(fig)
+    return paths
 
 
 def _render_figures(rows: Sequence[Mapping[str, Any]], paired: Sequence[Mapping[str, Any]],
@@ -404,7 +566,7 @@ def _render_figures(rows: Sequence[Mapping[str, Any]], paired: Sequence[Mapping[
     figures: dict[str, list[str]] = {}
     skipped: list[str] = []
     dense = [row for row in rows if row["method"] == "dense"]
-    sparse = [row for row in rows if row["method"] != "dense"]
+    sparse = [row for row in rows if row["method"] in METHODS]
     scopes = sorted({(row["backbone"], row["mode"], row["train_k"]) for row in sparse})
     for backbone, mode, train_k in scopes:
         subset = [row for row in sparse if (row["backbone"], row["mode"], row["train_k"])
@@ -414,19 +576,39 @@ def _render_figures(rows: Sequence[Mapping[str, Any]], paired: Sequence[Mapping[
                        == (backbone, mode, train_k)]
         suffix = _SAFE_NAME.sub("_", f"{backbone}_{mode}_train-k{train_k}")
         title = f"{backbone_label(backbone)} · Train $K$={train_k}"
-        jobs = [
-            (f"quality_{suffix}", lambda: _draw_quality(subset, references, out_dir,
-                                                       f"quality_{suffix}", title)),
-            (f"nonzeros_{suffix}", lambda: _draw_quality(subset, references, out_dir,
-                                                        f"nonzeros_{suffix}", title, x="nnz_mean")),
-            (f"storage_{suffix}", lambda: _draw_quality(subset, references, out_dir,
-                                                       f"storage_{suffix}", title,
-                                                       x="code_bytes_per_image")),
-            (f"paired_{suffix}", lambda: _draw_paired(differences, out_dir,
-                                                     f"paired_{suffix}", title)),
-        ]
-        jobs.append((f"cost_{suffix}", lambda: _draw_costs(
-            subset, out_dir, f"cost_{suffix}", title)))
+        retrieval = [row for row in subset if row.get("task", "retrieval") == "retrieval"]
+        retrieval_pairs = [row for row in differences if row.get("task", "retrieval") == "retrieval"]
+        classification = [row for row in subset if row.get("task") == "knn_classification"]
+        classification_pairs = [row for row in differences if row.get("task") == "knn_classification"]
+        jobs = []
+        if retrieval:
+            jobs.extend([
+                (f"quality_{suffix}", lambda: _draw_quality(retrieval, references, out_dir,
+                                                           f"quality_{suffix}", title)),
+                (f"nonzeros_{suffix}", lambda: _draw_quality(retrieval, references, out_dir,
+                                                            f"nonzeros_{suffix}", title, x="nnz_mean")),
+                (f"storage_{suffix}", lambda: _draw_quality(retrieval, references, out_dir,
+                                                           f"storage_{suffix}", title,
+                                                           x="code_bytes_per_image")),
+                (f"paired_{suffix}", lambda: _draw_paired(retrieval_pairs, out_dir,
+                                                         f"paired_{suffix}", title)),
+                (f"cost_{suffix}", lambda: _draw_costs(retrieval, out_dir, f"cost_{suffix}", title)),
+            ])
+        if classification:
+            jobs.extend([
+                (f"classification_{suffix}", lambda: _draw_classification(
+                    classification, out_dir, f"classification_{suffix}", title)),
+                (f"classification_balance_{suffix}", lambda: _draw_classification(
+                    classification, out_dir, f"classification_balance_{suffix}", title, kind="balance")),
+                (f"classification_nonzeros_{suffix}", lambda: _draw_classification(
+                    classification, out_dir, f"classification_nonzeros_{suffix}", title, x="nnz_mean")),
+                (f"classification_storage_{suffix}", lambda: _draw_classification(
+                    classification, out_dir, f"classification_storage_{suffix}", title, x="code_bytes_per_image")),
+                (f"classification_paired_{suffix}", lambda: _draw_classification(
+                    classification_pairs, out_dir, f"classification_paired_{suffix}", title, kind="paired")),
+                (f"classification_cost_{suffix}", lambda: _draw_costs(
+                    classification, out_dir, f"classification_cost_{suffix}", title)),
+            ])
         for name, draw in jobs:
             try:
                 paths = draw()
@@ -482,7 +664,10 @@ def build_report(records: Sequence[Mapping[str, Any]], out_dir: str | Path, *,
         "tables": {}, "figures": {}, "skipped": [], "fonts": None,
     }
     table_dir = out_dir / "tables"
-    for name, values in (("retrieval", rows), ("paired", paired), ("evaluations", clean)):
+    retrieval_rows = [row for row in rows if row["task"] == "retrieval"]
+    classification_rows = [row for row in rows if row["task"] == "knn_classification"]
+    for name, values in (("retrieval", retrieval_rows), ("classification", classification_rows),
+                         ("paired", paired), ("evaluations", clean)):
         manifest["tables"][name] = _write_table(values, table_dir, name)
     try:
         figures, skipped, fonts = _render_figures(rows, paired, out_dir / "figures")

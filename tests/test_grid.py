@@ -9,10 +9,10 @@ from mpsae.config import (BACKBONES, BRANCH1, BRANCH2, METHODS, SEEDS, effective
 
 def test_only_mpsaev2_gets_fifteen_epochs_without_other_preset_changes():
     from dataclasses import asdict
-    from mpsae.config import training_preset
+    from mpsae.config import IMPLEMENTED_METHODS, training_preset
     from mpsae.report.style import label_for
     for spec in BACKBONES.values():
-        for method in METHODS:
+        for method in IMPLEMENTED_METHODS:
             expected = asdict(spec.preset)
             if method in ("mpsae", "mpsaev2"):
                 expected["batch_size"] = 1024
@@ -50,9 +50,9 @@ def test_e2_anchors_are_trained_budgets():
 
 def test_grid_size_matches_the_plan():
     counts = effective_runs()
-    assert counts == {"ff2048": 55, "rn18": 45, "convnext_tiny": 25,
-                      "vit_b16": 30, "dinov2_vits14": 25, "total": 180}
-    assert len(grid()) == 180
+    assert counts == {"ff2048": 33, "rn18": 27, "convnext_tiny": 15,
+                      "vit_b16": 18, "dinov2_vits14": 15, "total": 108}
+    assert len(grid()) == 108
     assert {cell.seed for cell in grid()} == {1227}
 
 

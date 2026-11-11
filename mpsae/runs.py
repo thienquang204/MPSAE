@@ -24,7 +24,8 @@ import tempfile
 import time
 from typing import Any, Callable, Iterable, Iterator
 
-from .config import BACKBONES, Backbone, Cell, grid, inference_budgets
+from .config import (BACKBONES, Backbone, Cell, grid, inference_budgets,
+                     validate_experiment_methods, validate_checkpoint_ot_weight, MPSAE_OT_K_THRESHOLD)
 from .features import Bundle, load_bundle
 from .io import atomic_json, canonical_hash, read_json
 from .logs import Progress, banner, format_duration, get_logger
@@ -399,6 +400,7 @@ def _cached_e1_complete(record: dict[str, Any] | None, settings: RunSettings) ->
 def run_cell(cell: Cell, bundle: Bundle, settings: RunSettings, *, code_version: str
              ) -> dict[str, Any]:
     """Fit one cell, then run E1 and -- at an anchor budget -- E2."""
+    validate_experiment_methods((cell.method,))
     spec = BACKBONES[cell.backbone]
     out_dir = cell_dir(settings, cell)
     log = get_logger(cell.slug)
@@ -435,6 +437,11 @@ def run_cell(cell: Cell, bundle: Bundle, settings: RunSettings, *, code_version:
 def run_e2(cell: Cell, bundle: Bundle, settings: RunSettings, *, signature: str,
            e1: dict[str, Any]) -> dict[str, Any]:
     """Evaluate one anchor at the selected inference budgets, reusing cached points."""
+    validate_experiment_methods((cell.method,))
+    if cell.method == "mpsae" and cell.k > MPSAE_OT_K_THRESHOLD:
+        config = read_json(cell_dir(settings, cell) / "config.json") or {}
+        validate_checkpoint_ot_weight(cell.method, cell.k, config.get("identity") or {},
+                                      context=cell.slug)
     spec = BACKBONES[cell.backbone]
     budgets = inference_budgets(cell.backbone) if settings.e2_k_values is None else settings.e2_k_values
     if (not budgets or any(isinstance(k, bool) or not isinstance(k, int)
@@ -506,6 +513,7 @@ def run_grid(cells: Iterable[Cell], settings: RunSettings, *, code_version: str,
              dense_gate: bool = True) -> dict[str, Any]:
     """Work the grid backbone by backbone so each bundle is loaded once."""
     cells = list(cells)
+    validate_experiment_methods(cell.method for cell in cells)
     log = get_logger("grid")
     by_backbone: dict[str, list[Cell]] = {}
     for cell in cells:

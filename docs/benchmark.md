@@ -1,9 +1,11 @@
-# Frozen transfer and robustness campaign
+# Frozen transfer classification and retrieval
 
-The campaign adds downstream retrieval to the existing ImageNet E1/E2 and
-linear-probe experiments. Backbones and ImageNet-trained SAEs stay frozen on
-the target datasets. It measures transfer without target-dataset adaptation;
-no fine-tuning or test-set parameter fitting is performed.
+The main campaign adds product retrieval on SOP to the existing ImageNet E1/E2
+and linear-probe experiments. Backbones and ImageNet-trained SAEs stay frozen
+on the target dataset. EuroSAT classification is deferred from this campaign;
+its DINO weighted kNN implementation remains available for explicit custom
+campaigns and synthetic smoke tests. COCO image-text retrieval and CLIP are
+future work, not supported campaign selections.
 
 This measures cross-dataset transfer and sensitivity to the inference code
 budget K. It does not yet measure robustness to image corruptions or
@@ -25,7 +27,7 @@ up, including partial results after failure. Retry only remote synchronization
 with `bash all_in_one.sh --sync-only`. A synthetic rehearsal via
 `bash all_in_one.sh --smoke` does not write to either service.
 
-The default campaign downloads existing embeddings: ImageNet and EuroSAT for
+The default campaign downloads three existing embedding bundles: ImageNet for
 `ff2048`, `vit_b16`, and SOP for `ff2048`. Flowers102 has no
 published bundles and is excluded. `downstream.backbones` selects backbones
 per dataset; an omitted entry uses all campaign backbones. No raw image download
@@ -93,25 +95,29 @@ server. Its CUDA version is configured independently in `compose.yaml`.
 `configs/thesis.yaml` selects backbones, methods, training seeds, ImageNet
 experiments and downstream budgets. Training hyperparameters come from the
 existing presets, not a second set of benchmark defaults. The resolved campaign
-configuration records the settings actually requested.
+configuration records the settings actually requested. The only selectable
+methods are `csr`, `csrv2` and `mpsae`; CSR multi-TopK and MPSAEv2 are excluded
+from every experiment and newly generated report, even if their old results
+remain on disk. Old configurations naming either excluded method must be
+updated before running.
 
 ```yaml
-# Main campaign: ResNet-50 train K=8/16/32/256; ViT train K=8. Previous 20-fit setup: ../large_scale_abblation.md.
+# Main campaign: CSR, CSRv2, MPSAE. Previous settings: ../large_scale_abblation.md.
 # Published embeddings only. Training presets remain in mpsae/config.py.
-# Selected published bundles: ImageNet/EuroSAT for both; SOP for ResNet-50.
+# Selected published bundles: ImageNet for both; SOP for ResNet-50.
 name: thesis
 backbones: [ff2048, vit_b16]
-methods: [csr, csrv2, mpsae, mpsaev2, csr_multitopk]
+methods: [csr, csrv2, mpsae]
 seeds: [1227]
 imagenet:
   enabled: true
   prepare: false
   train_k:
     ff2048: [8, 16, 32, 256]
-    vit_b16: [8]
+    vit_b16: [12, 48]
   eval_k:                       # E2 inference budgets; E1 evaluates at train_k
     ff2048: [16, 32, 256]
-    vit_b16: [3, 12, 48, 96]
+    vit_b16: [12, 48]
   e1: true
   e2: true
   linear_probe: true
@@ -124,15 +130,17 @@ imagenet:
   timing_retry_skipped: false
 downstream:
   enabled: true
-  datasets: [eurosat, sop]
+  datasets: [sop]
+  tasks:
+    sop: retrieval
   backbones:
     sop: [ff2048]
   train_k:                      # evaluate every selected ImageNet checkpoint
     ff2048: [8, 16, 32, 256]
-    vit_b16: [8]
+    vit_b16: [12, 48]
   eval_k:
     ff2048: [16, 32, 256]
-    vit_b16: [3, 12, 48, 96]
+    vit_b16: [12, 48]
   mode: frozen
   revisions: {}                  # main is resolved once to an immutable commit
 execution:
@@ -160,14 +168,19 @@ only when `train_missing` is enabled. Existing compatible completed fits are
 reused. `max_steps: 0` uses the full source training schedule; a positive cap is
 part of fit identity and does not turn a capped fit into a full-fit checkpoint.
 
-The shipped campaigns select ResNet-50 training K = **8, 16, 32, 256** and
-ViT-B/16 training K = **8**. All selected ResNet checkpoints use inference
-K = **16, 32, 256**, while ViT uses **3, 12, 48, 96**. These grids apply to
-ImageNet E2 and every downstream retrieval dataset/method. With five methods
-and seed 1227 this is **25 source fits**, **80 E2 points** (15 reused from E1),
-and **140 sparse + 3 dense** downstream evaluations. The new ResNet cells are
-independent source fits, not sequential fine-tuning. Existing K=8 fits and HF
-embedding bundles remain reusable. ResNet-18 shares the ResNet fallback
+The full `thesis.yaml` and `precomputed.yaml` campaigns select ResNet-50 training
+K = **8, 16, 32, 256** and ViT-B/16 training K = **12, 48**. All selected ResNet checkpoints use inference
+K = **16, 32, 256**, while each ViT checkpoint uses **12, 48**. These grids apply to
+ImageNet E2 and selected downstream conditions; downstream now selects SOP and
+ResNet-50 only. With CSR, CSRv2 and MPSAE and seed 1227 this is **18 source fits**,
+**48 E2 points** (15 reused from E1),
+and **36 sparse + 1 dense** SOP evaluation records. EuroSAT kNN is not selected.
+All selected training budgets use independent source fits, not sequential fine-tuning.
+ViT K=8 is no longer selected; compatible ResNet fits and selected ViT K=12/48 fits
+remain reusable. HF embedding bundles are shared across all these budgets.
+ViT has 6 fits and 12 E2 points; its 6 matched-K points are reused from E1.
+MPSAE uses OT weight 2.0 at both ViT training budgets.
+The evaluation-only `configs/retrieval.yaml` still selects SOP/ResNet-50 only. ResNet-18 shares the ResNet fallback
 inference grid when explicitly selected; the active backbones remain ResNet-50
 and ViT-B/16. The smoke config uses the same ResNet inference grid.
 E2 honors `imagenet.linear_probe` and `imagenet.timing` at every inference K.
@@ -189,6 +202,45 @@ points to run; it does not make a failed campaign complete. Missing/failing
 points remain visible in the final report. `retain_codes: false` limits disk
 growth by discarding regenerable sparse-code caches when their work is done;
 metrics and checkpoint provenance remain.
+
+## SOP evaluation only
+
+Use `configs/retrieval.yaml` to prioritize retrieval results from existing fits:
+
+```bash
+python -m mpsae --config configs/retrieval.yaml plan
+bash all_in_one.sh --config configs/retrieval.yaml --skip-setup
+```
+
+This selects ResNet-50, CSR/CSRv2/MPSAE and seed 1227. It requires **12 completed
+source checkpoints** at training K=8/16/32/256 and evaluates each at inference
+K=16/32/256, giving **36 sparse SOP records plus one dense diagnostic**.
+Backbones and SAEs remain frozen. `imagenet.enabled`, `e1`, `e2`, `linear_probe`
+and `timing` are false; `train_missing: false` prevents new fits. Thus the
+ImageNet linear probes and 2,000-round timing benchmark do not run.
+
+`precomputed_only: true` and `storage_mode: direct_v1` reuse the existing SOP
+embedding bundle. The Hub download selection contains SOP/ResNet-50 only;
+ImageNet feature arrays, raw images and new backbone extraction are unnecessary.
+Use the same workspace as the source fits. Retain each fit's `config.json`,
+`summary.json`, `checkpoint.pt` and original pinned backbone
+weights/preprocessing provenance. The provenance may already be in the config;
+otherwise retain the original ImageNet `.npz.json` sidecars. Do not infer it
+from the architecture name.
+
+`continue_on_error: false` stops on a missing or incompatible checkpoint or
+feature bundle. The runner validates the saved training recipe even for
+evaluation-only imports. In particular, an MPSAE training-K=256 checkpoint must
+use MMPOT loss weight **0.5**. An older weight-2.0 checkpoint needs separate
+fresh training before it can enter this evaluation campaign; this config will
+not train or overwrite it.
+
+Compatible SOP evaluations are shared across campaigns by checkpoint, features,
+inference budget and protocol identity. A new report selection does not force
+reranking completed compatible points. The report is written under
+`work/direct-v1/reports/retrieval/<plan_id>/`, with the newest plan referenced by
+`work/direct-v1/reports/retrieval/latest.json`. This config does not select
+EuroSAT, COCO or CLIP. The full main campaign remains available separately.
 
 ## Where a campaign writes its information
 
@@ -218,34 +270,79 @@ under the existing `runs/<backbone>/<method>/k<K>/seed<S>/` paths; a catalog
 references them rather than copying them into each dataset. Report rebuilding
 uses only records selected by the current campaign, including for ImageNet.
 
-## The three retrieval protocols
+## Dataset tasks and splits
 
-| Dataset source | Gallery | Final queries | Relevance |
-|---|---|---|---|
-| [`mteb/eurosat-rgb`](https://huggingface.co/datasets/mteb/eurosat-rgb) | 16,200 train images | 5,400 test images | same land-use class |
-| [`pufanyi/flowers102`](https://huggingface.co/datasets/pufanyi/flowers102) | 6,551 train images | 819 test images | same flower class |
-| [`nyris/stanford-online-products-v1`](https://huggingface.co/datasets/nyris/stanford-online-products-v1) | test images | same test images, excluding the query itself | same `item_id`, not broad `category` |
+| Dataset source | Default task | Support/gallery | Final queries | Labels |
+|---|---|---|---|---|
+| [`mteb/eurosat-rgb`](https://huggingface.co/datasets/mteb/eurosat-rgb) | DINO weighted kNN classification when explicitly enabled | 16,200 train images | 5,400 test images | 10 land-use classes |
+| [`pufanyi/flowers102`](https://huggingface.co/datasets/pufanyi/flowers102) | DINO weighted kNN classification when explicitly enabled | 6,551 train images | 819 test images | flower class |
+| [`nyris/stanford-online-products-v1`](https://huggingface.co/datasets/nyris/stanford-online-products-v1) | product retrieval | test images | same test images, excluding the query itself | `item_id`, not broad `category` |
 
-EuroSAT's 5,400 validation images and Flowers' 819 validation images are kept as
-separate splits. The term *train gallery* describes an image collection used
-for search; it does not imply backbone or SAE fitting on those target images.
+`downstream.tasks` selects a task per dataset. Omitted entries use the defaults
+above. The main campaigns and `retrieval.yaml` select only SOP; EuroSAT and
+Flowers102 remain optional. Flowers102 is excluded from the main campaigns
+because its precomputed bundles are not available in the selected collection.
+The Flowers mirror uses a custom HF 80/10/10 split, not the Oxford official split.
 
-The Flowers mirror explicitly uses a custom 80/10/10 split. Its results must
-be labelled as that protocol, not the Oxford official-split benchmark. The
-SOP mirror exposes image paths and product IDs but has an empty README; the
-adapter audits its actual split counts and product identity separation before
-accepting the mirror. This checks the protocol's counts and identity rules;
-parity with the official `Ebay_test.txt` file list is not independently
-certified. Original SOP has
-59,551 training images/11,318 products and 60,502 test images/11,316 products.
-Its [reference evaluation](https://github.com/rksltnl/Deep-Metric-Learning-CVPR16/blob/master/code/evaluation/evaluate_recall.m)
-searches test against test and excludes the diagonal self-match.
+EuroSAT's 5,400 validation images and Flowers' 819 validation images remain
+separate raw splits. Current feature exporters save only the support/gallery and
+query splits, so a validation embedding bundle must not be assumed available.
+The fixed neighbour counts and temperature require no validation embeddings.
+If tuning is introduced later, choose hyperparameters on validation or a
+documented holdout of training support, never on final test labels.
+
+SOP's training and test product IDs are disjoint. A classifier storing training
+product labels cannot predict the unseen test product IDs; the campaign therefore
+keeps SOP as retrieval. Its [reference evaluation](https://github.com/rksltnl/Deep-Metric-Learning-CVPR16/blob/master/code/evaluation/evaluate_recall.m)
+searches test against test and excludes the diagonal self-match. The adapter
+checks 59,551 training images/11,318 products and 60,502 test images/11,316 products,
+and checks the identity partition. Parity of the HF mirror with the official
+`Ebay_test.txt` file list is not independently certified.
 
 Datasets are pinned to immutable Hub revisions. Manifests retain repository,
 revision, split mapping, row counts and label/ID information. `sample_id`
-identifies an individual image and drives self-exclusion; it is distinct from
-the relevance label shared by related images. No rows are dropped merely
-because the last extraction batch is incomplete.
+identifies an individual image and drives overlap checks or self-exclusion;
+it is distinct from the class/product label. No rows are dropped merely
+because the final extraction batch is incomplete.
+
+## Optional DINO weighted kNN classification
+
+The classifier follows the weighted vote in the
+[official DINO `eval_knn.py`](https://github.com/facebookresearch/dino/blob/main/eval_knn.py).
+For L2-normalized query code z and its n nearest support codes, class c receives
+
+```text
+score(c) = sum_i exp(cosine(z, z_i) / temperature) * [label_i == c]
+prediction = argmax_c score(c)
+```
+
+The default `n_neighbors: [1, 20]` evaluates a 1-NN control and a weighted 20-NN
+classifier; `temperature: 0.07` is fixed for all active methods, backbones and
+sparse budgets. These are classifier parameters, independent of `eval_k`, which
+controls the maximum number of nonzero coordinates in each SAE code. The input
+to classification is the sparse code itself, never its decoder reconstruction.
+
+Support labels determine the votes. Test labels only score the predictions;
+the classifier does not learn weights, update the SAE, or select hyperparameters
+from test outcomes. Every query label must occur in the support set, and support
+and query sample IDs must be disjoint. A requested neighbour count larger than
+the support set is an error rather than an undocumented smaller classifier.
+
+Search retrieves the maximum requested neighbour count once. Voting for smaller
+counts reuses the leading neighbours, avoiding repeated encoding and search.
+The DINO vote is reproduced on nonzero examples without ties. Two explicit
+extensions retain the sparse-evaluation contract: equal neighbour similarities
+use gallery-position order and equal class scores use sorted label order; an
+all-zero query code abstains and counts as a miss rather than receiving credit
+from arbitrary neighbours. DINO's original script uses native `topk`/sorting
+ties and does not implement this zero-code abstention. These policies are
+recorded in evaluation metadata and apply equally to every method.
+
+With these policies held fixed, 1-NN top-1 equals the previous class-relevance
+Recall@1. For n greater than one, classification accuracy is not Recall@n:
+the former scores a single voted label; the latter only asks whether any of the
+n neighbours has the correct label. Historical retrieval metrics cannot be
+renamed to obtain the new classification measurements.
 
 ## Shared frozen features and exact ranking
 
@@ -256,23 +353,33 @@ FF2048 uses its BlurPool ResNet-50 weights; timm backbones keep their pinned
 model tags. Manifests record the actual transform and precision.
 
 Features enter the SAE at the scaling used by source training. Dense baseline
-features and output sparse codes are L2-normalized for cosine retrieval. CUDA
+features and output sparse codes are L2-normalized for cosine search. CUDA
 encoding uses float16 autocast with float32 storage; ranking uses float32 and
 TF32 disabled. CPU smoke runs are identified as tests, not GPU reproductions.
 
-Ranked retrieval is exhaustive and blocked: it keeps only the needed top-r
+Neighbour search is exhaustive and blocked: it keeps only the needed top-r
 candidates rather than materializing the full query-by-gallery score matrix.
-Self-matches are excluded by image ID before ranking. Equal scores have a
+SOP self-matches are excluded by image ID before ranking; classification
+rejects overlapping support/query IDs. Equal scores have a
 deterministic gallery-position tie rule. Empty query codes are counted and
-scored as misses. The campaign's default no-positive policy is `error`: it
+scored as misses. For retrieval, the default no-positive policy is `error`: it
 refuses an invalid protocol with queries that have no relevant gallery image,
 rather than silently excluding them from the denominator.
 
 ## Metrics and plots
 
-Code budget **K** and retrieval rank **r** are different quantities. For example,
-`eval_k: 8` with Recall@10 means an at-most-eight-active-coordinate code is used
-to return ten nearest images.
+Code budget **K**, classifier neighbour count **n**, and retrieval rank **r**
+are different quantities. `eval_k: 8` with `n_neighbors: [20]` means a code with
+at most eight active coordinates is used in a classifier with twenty neighbours.
+
+Classification records contain `knn_<n>_top1`, `knn_<n>_top5`,
+`knn_<n>_balanced_accuracy` and `knn_<n>_macro_f1` for every requested n.
+Balanced accuracy is mean recall over query classes; macro-F1 averages each
+class's F1. Empty-query abstentions remain in the denominator and count as
+false negatives. As in DINO, the top-5 field uses an effective class rank of
+`min(5, n, number_of_classes)`, so for 1-NN it is identical to top-1.
+
+SOP and explicitly selected retrieval tasks retain the following metrics:
 
 * **Recall@1/10/100** uses the metric-learning convention: the fraction of
   eligible queries with at least one relevant image within the first r results.
@@ -280,8 +387,8 @@ to return ten nearest images.
   relevant; small smoke galleries record the actual available depth.
 * **mAP@R** averages each query's AP at R, where R is its full number of
   relevant gallery images after self-exclusion. Ranking must reach R; top-100
-  alone is insufficient when R is larger. EuroSAT's ten classes make high-rank
-  Recall saturate easily, so mAP@R and Precision@10 add information.
+  alone is insufficient when R is larger. This extra ranking depth is unnecessary
+  for kNN classification, which only needs the requested neighbours.
 * **Macro metrics** average class-level query results so frequent classes do
   not hide weak performance on less frequent ones.
 
@@ -295,27 +402,47 @@ reference curve or storage marker is drawn in any plot.
 
 | Figure | Exact interpretation |
 |---|---|
-| `quality_<backbone>_<mode>_train-k<K>` | Rows are dataset/protocols; columns are R@1 and mAP@R; x is inference code budget. All points in a curve reuse the stated training-budget checkpoint. |
+| Optional `classification_<backbone>_<mode>_train-k<K>` | Separate 1-NN/20-NN accuracy panels against inference K, keeping the training-budget checkpoint fixed. |
+| `classification_balance_*` | Balanced accuracy and macro-F1, separately for each neighbour count. |
+| `classification_nonzeros_*`, `classification_storage_*` | Classifier accuracy against measured nonzeros or stored KiB/image. |
+| `classification_paired_*` | Paired top-1 differences for MPSAE versus CSR and CSRv2 within the same classifier setup. |
+| Retrieval `quality_*` | SOP R@1 and mAP@R against inference code budget, with datasets/protocols kept separate. |
 | `nonzeros_...` | The same accuracies against measured mean gallery nonzeros. Zero-nonzero collapsed codes remain representable on the axis. |
 | `storage_...` | Accuracy against stored KiB per image (float32 values plus int32 indices). Only sparse methods are plotted; compact code storage is distinct from GPU CSR index bytes. |
-| `cost_...` | Search wall time per query (ms) and stored KiB/image against inference K. This is amortised cost, not single-query latency. |
-| `paired_...` | MPSAE−CSR, MPSAEv2−CSRv2 and multi-TopK−CSR differences formed within seed before averaging, in percentage points. |
+| `classification_cost_*`, retrieval `cost_*` | Shared search wall time per query (ms) and stored KiB/image against inference K. Classification voting time is recorded separately. Search cost is not multiplied by the number of neighbour settings or described as full classifier latency. |
+| `paired_...` | MPSAE−CSR and MPSAE−CSRv2 differences formed within seed before averaging, in percentage points. |
 
 Lines are seed means and bands sample standard deviations (`ddof=1`), not
 confidence intervals. Captions describe the selected seeds; tables report per-point n; tables list missing and unpaired
 seeds. Datasets, revisions/comparison IDs, protocols, training budgets and modes
-remain distinct. Two different checkpoint evaluations for the same condition
+remain distinct. Classification neighbour counts, temperature and edge-case
+policies also identify the protocol and cannot be averaged with another setup.
+Two different checkpoint evaluations for the same condition
 and seed are rejected rather than averaged as extra repetitions. A fixed-training-K sweep also rejects different checkpoint IDs across inference K for the same seed and protocol.
 
-Every figure exports PNG, PDF and a caption. CSV/JSON tables retain full
+When their task is selected, classification and retrieval metrics have separate `classification.{json,csv}`
+and `retrieval.{json,csv}` tables; `evaluations.{json,csv}` retains the original
+records and task metadata. Classification figures with more than four axes
+continue in `_partN` files. Top-5 values remain in tables. Every figure exports PNG,
+PDF and a caption. CSV/JSON tables retain full
 precision and the evaluation/checkpoint IDs used by each row. The manifest lists
 expected/completed points, failures, incomplete records, tables, figures and
 skipped plots. Tables still write when matplotlib is unavailable.
 
-ImageNet `inference_summary` and `e2_generalisation_*` show per-K linear-probe and 1-NN accuracy from fixed SAE checkpoints. All figures omit published references and Dense/Full-representation overlays. Measured dense diagnostics remain numerical table entries. Downstream retrieval
-does not train a classifier; target-dataset linear probing is a separate
-experiment. Search speedup should only be claimed from appropriately paired
-timings; quality plots do not imply sparse-serving speedup by themselves.
+ImageNet `inference_summary` and `e2_generalisation_*` show per-K linear-probe
+and 1-NN accuracy from fixed SAE checkpoints. Downstream DINO kNN stores labelled
+support but does not fit a linear head; target-dataset linear probing remains a
+separate experiment. All figures omit published and Dense/Full-representation
+overlays. Dense measurements remain numerical diagnostics. Search speedup should
+only be claimed from appropriately paired timings; quality plots do not imply
+sparse-serving speedup by themselves.
+
+Classification has a distinct evaluation identity containing its task,
+neighbour counts, temperature and voting/edge-case rules, in addition to feature
+provenance, checkpoint and sparse budget. Existing HF features and source
+checkpoints are reused. The new vote requires reranking; old retrieval aggregate
+files do not contain the neighbour list. `report` alone cannot compute these
+missing measurements.
 
 Changing these selections creates a new plan ID. Use the newly generated
 `reports/<name>/<plan_id>/` directory (or its updated `latest.json` pointer).

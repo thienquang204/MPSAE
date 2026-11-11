@@ -7,16 +7,21 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 import json
+import math
 from pathlib import Path
 import re
 from typing import Any
 
 from ..config import (BACKBONES, INFERENCE_BUDGETS, METHODS, METHOD_VARIANTS, SEEDS,
-                      Cell, grid, inference_budgets, training_preset)
+                      Cell, grid, inference_budgets, training_preset,
+                      validate_experiment_methods, cell_objective_overrides)
 from ..io import canonical_hash
 from ..timing_config import timing_config
 
 DATASET_NAMES = ("eurosat", "flowers102", "sop")
+DEFAULT_TASKS = {"eurosat": "knn_classification", "flowers102": "knn_classification",
+                 "sop": "retrieval"}
+KNN_DEFAULTS = {"n_neighbors": [1, 20], "temperature": 0.07}
 IMAGENET_DEFAULTS = {"enabled": True, "prepare": True, "train_k": None, "eval_k": None,
                      "e1": True, "e2": True, "linear_probe": True, "timing": True,
                      "timing_query_batch": 512, "timing_warmup": 100, "timing_rounds": 2000,
@@ -24,7 +29,7 @@ IMAGENET_DEFAULTS = {"enabled": True, "prepare": True, "train_k": None, "eval_k"
                      "timing_retry_skipped": False}
 DOWNSTREAM_DEFAULTS = {"enabled": True, "datasets": ["eurosat", "sop"],
                       "train_k": None, "eval_k": None, "mode": "frozen", "revisions": {},
-                      "backbones": {}}
+                      "backbones": {}, "tasks": {}, "knn": KNN_DEFAULTS}
 EXECUTION_DEFAULTS = {"train_missing": True, "continue_on_error": True,
                      "retain_codes": False, "max_steps": 0,
                      "storage_mode": "legacy", "cleanup_raw": False, "precomputed_only": False,
@@ -62,6 +67,18 @@ def _integers(value, name, *, minimum=1):
     return tuple(value)
 
 
+def knn_settings(value=None) -> dict[str, Any]:
+    """Classifier choices are independent of the SAE sparsity budget."""
+    result = _section({} if value is None else value, KNN_DEFAULTS, "downstream.knn")
+    result["n_neighbors"] = sorted(_integers(result["n_neighbors"], "downstream.knn.n_neighbors"))
+    temperature = result["temperature"]
+    if (isinstance(temperature, bool) or not isinstance(temperature, (int, float))
+            or not math.isfinite(temperature) or temperature <= 0):
+        raise ValueError("downstream.knn.temperature must be finite and positive")
+    result["temperature"] = float(temperature)
+    return result
+
+
 @dataclass(frozen=True)
 class Campaign:
     name: str = "thesis"
@@ -71,6 +88,9 @@ class Campaign:
     imagenet: dict[str, Any] = field(default_factory=lambda: dict(IMAGENET_DEFAULTS))
     downstream: dict[str, Any] = field(default_factory=lambda: dict(DOWNSTREAM_DEFAULTS))
     execution: dict[str, Any] = field(default_factory=lambda: dict(EXECUTION_DEFAULTS))
+
+    def __post_init__(self) -> None:
+        validate_experiment_methods(self.methods)
 
     @classmethod
     def from_mapping(cls, payload: dict[str, Any]) -> "Campaign":
@@ -102,6 +122,12 @@ class Campaign:
         if not result.imagenet["enabled"] and not result.downstream["enabled"]:
             raise ValueError("enable at least one experiment family")
         _names(result.downstream["datasets"], DATASET_NAMES, "downstream.datasets")
+        tasks = result.downstream["tasks"]
+        if not isinstance(tasks, dict) or set(tasks) - set(result.downstream["datasets"]):
+            raise ValueError("downstream.tasks must map selected datasets to tasks")
+        for dataset in result.downstream["datasets"]:
+            result.task_for(dataset)
+        result.downstream["knn"] = knn_settings(result.downstream["knn"])
         targets = result.downstream["backbones"]
         if not isinstance(targets, dict) or set(targets) - set(result.downstream["datasets"]):
             raise ValueError("downstream.backbones must map selected datasets to backbone lists")
@@ -129,6 +155,19 @@ class Campaign:
             result.budgets("downstream", "train_k", backbone)
             result.budgets("downstream", "eval_k", backbone)
         return result
+
+    def task_for(self, dataset: str) -> str:
+        task = self.downstream.get("tasks", {}).get(dataset, DEFAULT_TASKS[dataset])
+        if task not in ("retrieval", "knn_classification"):
+            raise ValueError(f"invalid downstream task {task!r} for {dataset}")
+        if dataset == "sop" and task != "retrieval":
+            raise ValueError("SOP uses disjoint train/test product IDs; keep its retrieval protocol")
+        return task
+
+    def evaluation_options(self, dataset: str) -> dict[str, Any]:
+        task = self.task_for(dataset)
+        return {"task": task, "knn": knn_settings(self.downstream.get("knn"))
+                if task == "knn_classification" else None}
 
     def budgets(self, section: str, key: str, backbone: str) -> tuple[int, ...]:
         spec = BACKBONES[backbone]
@@ -180,6 +219,9 @@ class Campaign:
         from dataclasses import asdict
 
         payload = asdict(self)
+        payload["downstream"]["tasks"] = {
+            name: self.task_for(name) for name in self.downstream["datasets"]}
+        payload["downstream"]["knn"] = knn_settings(self.downstream.get("knn"))
         variants = {method: METHOD_VARIANTS[method] for method in self.methods
                     if method in METHOD_VARIANTS}
         if variants:
@@ -197,6 +239,9 @@ class Campaign:
             name: {method: asdict(training_preset(method, BACKBONES[name].preset))
                    for method in self.methods}
             for name in self.backbones}
+        overrides = cell_objective_overrides(self.source_cells())
+        if overrides:
+            payload["cell_objective_overrides"] = overrides
         payload["resolved_budgets"] = {name: {
             "imagenet_train_k": self.budgets("imagenet", "train_k", name),
             "imagenet_eval_k": self.budgets("imagenet", "eval_k", name),
@@ -214,13 +259,14 @@ class Campaign:
                 "downstream_dense_points": dense, "config": self.resolved()}
         if self.execution.get("storage_mode") == "direct_v1":
             rows = 1_281_167 + 50_000
-            feature_bytes = {n: rows * (BACKBONES[n].dim * 4 + 8) for n in self.backbones}
+            feature_bytes = ({n: rows * (BACKBONES[n].dim * 4 + 8) for n in self.backbones}
+                             if self.imagenet["enabled"] else {})
             checkpoints = sum((BACKBONES[c.backbone].dim * BACKBONES[c.backbone].preset.hidden_dim
                                + BACKBONES[c.backbone].dim + BACKBONES[c.backbone].preset.hidden_dim) * 12
                               for c in self.source_cells())
             plan["storage_estimate"] = {"imagenet_features_bytes": feature_bytes,
                 "total_imagenet_features_bytes": sum(feature_bytes.values()),
-                "active_writer_upper_bytes": max(feature_bytes.values()),
+                "active_writer_upper_bytes": max(feature_bytes.values(), default=0),
                 "model_and_adam_tensor_bytes": checkpoints, "reserve_bytes": 10 << 30,
                 "excluded": "raw images, download/Arrow caches, model weights, environment, "
                             "downstream features, sparse evaluation cache, checkpoint overhead"}

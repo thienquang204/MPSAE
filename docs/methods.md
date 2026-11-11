@@ -1,6 +1,6 @@
 # Methods
 
-What each of the five trainable configurations optimises, where the baselines
+What each of the three active configurations optimises, where the baselines
 come from, and which parts are ours. Formulas here match `mpsae/model.py`,
 `mpsae/losses.py`, `mpsae/ot.py` and `mpsae/methods.py`; where the published
 code and the published paper disagree, both are given and the code wins.
@@ -69,27 +69,29 @@ L    = B(k) + method-specific weighted regulariser(s) + extra reconstruction
   `+inf` to the float32 maximum rather than to zero. We reproduce that rather
   than improve on it; with real embeddings the denominator is never zero.
 * The table below specifies the regulariser(s) and extra reconstruction for
-  each method. MPSAEv2 includes both OT and instance contrastive terms.
+  each active method.
 
-## The five methods
+## The three active methods
 
-`mpsae` and `mpsaev2` use training batches of **1024** on every backbone and
-the original constant learning rate of **4e-5**. `csr`, `csrv2` and
-`csr_multitopk` retain their backbone batch-size presets. OT solver limits
+All experiments select only `csr`, `csrv2` and `mpsae`. CSR multi-TopK and
+MPSAEv2 are excluded from training, evaluation, timing and reports; explicit
+CLI or YAML selections of them are rejected. Their earlier definitions are
+preserved in [the historical note](notes/excluded_methods.md).
+
+`mpsae` uses training batches of **1024** on every backbone and the original
+constant learning rate of **4e-5**. `csr` and `csrv2` retain their backbone
+batch-size presets. All three methods train for **10 epochs**. OT solver limits
 remain **400** initial iterations and **8000** refinement iterations;
-convergence can stop a solve earlier. MPSAEv2 trains for **15 epochs**; the
-other methods retain **10 epochs**. OT groups of 32, loss weights and tolerances
-retain their configured values. Update counts and CSRv2's annealing
-schedule are computed from the effective batch size. Run identities and campaign metadata
-record the effective recipe; checkpoints with different settings cannot resume.
+convergence can stop a solve earlier. OT groups of 32, loss weights and
+tolerances retain their configured values. Update counts and CSRv2's annealing
+schedule are computed from the effective batch size. Run identities and
+campaign metadata record the effective recipe.
 
 | method | K during training | gates per step | regulariser | extra reconstruction |
 |---|---|---|---|---|
 | `csr` | fixed K | K, 4K, K | γ·`inbatch_cl` | — |
 | `csrv2` | annealed `k(t)` | k, 4k, k | γ·`label_based_cl` | — |
-| `mpsae` | fixed K | K, 4K, 2K | 2·OT gap | — |
-| `mpsaev2` | fixed K | K, 4K, 2K | 2·OT gap + γ·`inbatch_cl` | — |
-| `csr_multitopk` | fixed K | K, 4K, 2K | γ·`inbatch_cl` | `L(2K)/8` |
+| `mpsae` | fixed K | K, 4K, 2K | λ(K)·OT gap | — |
 
 γ is 0.1 for ResNet-50 (`ff2048`), ConvNeXt and ViT, and 1.0 for ResNet-18
 and DINO. These are the existing FF2048-style and Table 9 presets, respectively.
@@ -135,6 +137,14 @@ Two changes over `csr`, both from the released `image/main_visual.py`:
    copies, excluding only the diagonal self-comparison.
 
 ### mpsae — the contribution
+
+The objective is `B(K) + λ(K)·gap(z_K, z_2K, z_4K)`, with λ=2.0 for target
+training K ≤ 64 and λ=0.5 for target training K > 64. Neither the wider views
+nor the inference budget changes this coefficient. This rule applies to the
+active MPSAE method; archived MPSAEv2 definitions retain their historical weights.
+Transport mass, entropy coefficient, solver settings and reconstruction weights
+remain unchanged. A high-K checkpoint trained with the old weight 2.0 is a
+different objective and must be trained afresh after archiving that fit.
 
 CSR's regulariser compares different examples at one budget. MPSAE contrasts
 the same-example matching across budgets against alternative cross-example
@@ -192,79 +202,6 @@ Prior art, credited: the matching-gap formulation follows Piran et al.
 (ICML'24); multi-marginal partial OT is standard. The combination with a nested
 Top-K autoencoder, and the use of budget-consistency as the regulariser, is
 ours.
-
-### mpsaev2 — fixed-budget OT plus instance contrastive
-
-The current MPSAEv2 keeps the main budget at K for every training step and adds
-CSR's instance contrastive loss to the MPSAE objective:
-
-```
-L_mpsaev2 = L(K) + L(4K)/8 + NMSE_aux/32
-            + 2·gap(z_K, z_2K, z_4K) + γ·C_instance(z_K)
-```
-
-The instance contrastive term uses the normalized K code and its identical
-duplicate at temperature 0.2, with the backbone's existing γ above. It does not
-read class labels. OT retains mass 0.9, entropy coefficient 0.2 and independent
-groups of 32; the contrastive term compares the full 1024-row training batch.
-There is no additional 2K reconstruction loss. The K code is reused for the
-contrastive term, leaving the three activity-counter updates at K, 4K and 2K.
-
-Against MPSAE, the added instance contrastive term is the objective change:
-architecture, fixed K, batch size and reconstruction terms match. MPSAEv2
-now receives 15 epochs versus MPSAE's 10, so the measured comparison includes
-this training-duration difference as well. Against
-CSR-multitopK, both the OT term and the presence of `L(2K)/8` differ, and batch
-sizes differ on the 4096-row baseline presets. The hybrid is an ablation to
-measure whether retaining full-batch discrimination helps; no performance gain
-is established by choosing this objective.
-
-MPSAEv2 is displayed as `MPSAEv2`; its internal key and objective variant
-remain `mpsaev2` and `fixed_ot_cl_v1`. An otherwise identical 10-epoch
-checkpoint continues through epoch 15 with its weights, Adam state, RNG
-and activity counters preserved. Only the stopping point changes; the
-constant learning rate and fixed-K loss are unchanged. A different loss,
-optimizer, seed or dataset still prevents continuation. The completed
-15-epoch fit receives a new signature, so E1/E2 and downstream results
-are recomputed for the final weights. Interrupted extensions resume.
-
-This replaces the formerly implemented **variant B**, whose main budget
-annealed and whose regularizer was OT only. Old variant-B checkpoints cannot
-resume as the current MPSAEv2 because their objectives differ. Only CSRv2 uses
-annealing in the current method set. Variant A (fixed main budget, annealed OT
-views) and the retired variant B remain documented in
-[`notes/mpsaev2_legacy_A.md`](notes/mpsaev2_legacy_A.md).
-
-The new objective records `variant: fixed_ot_cl_v1` and writes fits under
-`runs/<backbone>/mpsaev2__fixed_ot_cl_v1/k<K>/seed<SEED>/`. The logical method
-name remains `mpsaev2`. Old unversioned directories are preserved and excluded
-from current-method reports; they are neither resumed nor relabeled as hybrid
-results. Campaign plans record the method-variant mapping, which separates
-new reports from those produced for the retired objective.
-
-### csr_multitopk — the control
-
-MPSAE differs from CSR in two ways at once: it looks at a 2K view, and it
-couples the views with OT. Without a control, a gain could be explained by
-either. `csr_multitopk` keeps CSR's contrastive term and K/4K reconstruction,
-adds `L(2K)/8`, and replaces the third duplicate-K activity update with a 2K
-update, so:
-
-* **MPSAE > csr_multitopk** compares OT coupling with supervising a 2K view,
-  including batch-size and update-count differences where applicable;
-* **csr_multitopk > csr** measures the extra 2K reconstruction and its activity
-  update under the same backbone batch preset;
-* **MPSAEv2 versus MPSAE** compares instance contrastive plus 15 epochs
-  against MPSAE at 10 epochs, with the same fixed K, OT, reconstruction and
-  batch settings. It is no longer an equal-duration loss-only ablation.
-
-The report explicitly includes this last comparison: ImageNet writes
-`paired_mpsaev2_vs_mpsae`, and downstream `paired` tables include rows with
-`treatment: mpsaev2` and `control: mpsae`. Differences are computed within
-matching seeds and evaluation scopes; existing baseline comparisons remain.
-
-CSR-multitopK follows CSRv2 App. G's "Diverse Multi-TopK" ablation in spirit, which found
-extra reconstruction terms help a little but cost more than annealing.
 
 ## Findings about the released baselines
 
@@ -341,7 +278,8 @@ Multiple seeds can still be explicitly selected in a separate campaign.
 `tests/test_against_release.py` checks our model, both contrastive losses, the
 AuxK gradient, the dead-latent counter, the full objective, the gradients and
 three Adam steps against it. `tests/test_schedules.py` checks the annealing at
-every step of several schedules. `tests/test_methods.py` checks that the five
-methods differ only as designed. `tests/test_ot.py` checks feasibility,
+every step of several schedules. `tests/test_methods.py` checks the active
+objectives and retained historical implementations. Experiment-selection tests
+ensure excluded methods cannot enter current runs or reports. `tests/test_ot.py` checks feasibility,
 nonnegativity, the envelope gradient and group independence, plus the pinned
 legacy numerics once `capture_golden.py` has been run on a GPU box.

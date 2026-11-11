@@ -289,7 +289,8 @@ def run_targets(campaign, root, catalog, *, device, workers, batch_size, observe
             atomic_json(directory / "lifecycle.json", {"state": "raw_deleted", "backup": backup})
         for backbone, bundle in bundles.items():
             spec = BACKBONES[backbone]
-            dense = task(f"dense/{backbone}/{name}", lambda: evaluate_point(bundle, spec, root, device=device))
+            dense = task(f"dense/{backbone}/{name}", lambda: evaluate_point(
+                bundle, spec, root, device=device, **campaign.evaluation_options(name)))
             if dense:
                 catalog["evaluations"].append(dense)
             for cell in (c for c in campaign.downstream_cells(name) if c.backbone == backbone):
@@ -299,10 +300,11 @@ def run_targets(campaign, root, catalog, *, device, workers, batch_size, observe
                 model.eval().requires_grad_(False)
                 try:
                     for budget in campaign.budgets("downstream", "eval_k", backbone):
-                        record = task(f"retrieval/{name}/{cell.slug}/eval-k{budget}", lambda k=budget:
+                        record = task(f"{campaign.task_for(name)}/{name}/{cell.slug}/eval-k{budget}", lambda k=budget:
                             evaluate_point(bundle, spec, root, cell=cell, checkpoint=checkpoint,
                                            model=model, k=k, device=device,
-                                           retain_codes=campaign.execution["retain_codes"]))
+                                           retain_codes=campaign.execution["retain_codes"],
+                                           **campaign.evaluation_options(name)))
                         if record:
                             catalog["evaluations"].append(record)
                 finally:

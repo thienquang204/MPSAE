@@ -16,10 +16,11 @@ import sys
 from typing import Any
 
 from .. import __version__
-from ..config import BACKBONES, METHOD_EPOCHS, METHOD_VARIANTS, Cell, training_preset
+from ..config import (BACKBONES, METHOD_EPOCHS, METHOD_VARIANTS, Cell, training_preset,
+                      validate_checkpoint_ot_weight)
 from ..io import atomic_json, canonical_hash, exclusive_lock, read_json, sha256_file
 from ..logs import get_logger, setup_logging
-from .config import Campaign
+from .config import Campaign, DEFAULT_TASKS, knn_settings
 
 EVALUATION_VERSION = "frozen-transfer-ranking-v1"
 
@@ -110,6 +111,7 @@ def checkpoint_record(cell: Cell, root: Path, *, smoke=False,
     actual = tuple(identity.get(key) for key in ("backbone", "method", "target_k", "seed"))
     if expected != actual or summary.get("cell") != cell.__dict__:
         raise RuntimeError(f"{directory}: checkpoint does not identify the selected source cell")
+    validate_checkpoint_ot_weight(cell.method, cell.k, identity, context=str(directory))
     variant = METHOD_VARIANTS.get(cell.method)
     if variant and (identity.get("objective") or {}).get("variant") != variant:
         raise RuntimeError(f"{directory}: checkpoint uses a different {cell.method} objective variant; "
@@ -160,11 +162,34 @@ def verify_feature_provenance(features, checkpoint: dict, *, smoke=False) -> Non
         raise RuntimeError("source and downstream normalization/input size disagree or are undocumented")
 
 
+def classifier_protocol(features, knn=None) -> dict[str, Any]:
+    """Pinned voting policy; the saved source split remains a separate identity."""
+    from ..evaluate.classification import (PROTOCOL_VERSION, VOTE_RULE, CLASS_TIE_RULE,
+                                           EMPTY_QUERY_POLICY, REFERENCE)
+    from ..evaluate.ranking import TIE_RULE
+
+    if (features.exclude_self or features.gallery.name != "train"
+            or features.query.name == features.gallery.name or features.name == "sop"):
+        raise ValueError("kNN classification requires train support and a separate query split; "
+                         "SOP keeps its product retrieval protocol")
+    return {"name": "dino_weighted_knn", **knn_settings(knn),
+            "metric_version": PROTOCOL_VERSION, "vote_rule": VOTE_RULE,
+            "tie_rule": TIE_RULE, "class_tie_rule": CLASS_TIE_RULE,
+            "empty_query_policy": EMPTY_QUERY_POLICY, "normalization": "l2", "reference": REFERENCE}
+
+
+def _split_identity(split) -> dict[str, Any]:
+    labels = split.labels.tolist() if hasattr(split.labels, "tolist") else list(split.labels)
+    return {"split": split.name, "ids_sha256": canonical_hash(list(split.ids)),
+            "labels_sha256": canonical_hash(labels)}
+
+
 def evaluation_identity(features, checkpoint: dict | None, *, k: int | None,
-                        device: str, gallery_chunk: int, query_block: int) -> dict[str, Any]:
+                        device: str, gallery_chunk: int, query_block: int,
+                        task: str = "retrieval", knn=None) -> dict[str, Any]:
     from ..evaluate.ranking import PROTOCOL_VERSION
 
-    return {"version": EVALUATION_VERSION, "metric_version": PROTOCOL_VERSION,
+    identity = {"version": EVALUATION_VERSION, "metric_version": PROTOCOL_VERSION,
             "mode": "frozen", "features": features.identity,
             "checkpoint": checkpoint["checkpoint_id"] if checkpoint else "dense",
             "train_signature": checkpoint["signature"] if checkpoint else None,
@@ -173,18 +198,31 @@ def evaluation_identity(features, checkpoint: dict | None, *, k: int | None,
             "ranks": [1, 10, 100], "exclude_self": features.exclude_self,
             "no_positive_policy": "error", "gallery_chunk": gallery_chunk,
             "query_block": query_block}
+    if task == "knn_classification":
+        classifier = classifier_protocol(features, knn)
+        identity.update(task=task, classifier=classifier,
+                        metric_version=classifier["metric_version"],
+                        support=_split_identity(features.gallery), query=_split_identity(features.query))
+        identity.pop("ranks")
+        identity.pop("no_positive_policy")
+    elif task != "retrieval":
+        raise ValueError(f"unknown downstream task {task!r}")
+    # Leave the existing retrieval identity intact so SOP results can be reused.
+    return identity
 
 
 def evaluate_point(features, spec, root: Path, *, cell: Cell | None = None,
                    checkpoint: dict | None = None, model=None, k: int | None = None,
                    device="cuda:0", retain_codes=False, gallery_chunk=4096,
-                   query_block=512, smoke=False) -> dict[str, Any]:
+                   query_block=512, smoke=False, task=None, knn=None) -> dict[str, Any]:
     """Cache a single immutable evaluation; it cannot train a target model."""
     from ..evaluate.ranking import evaluate_retrieval
     from ..runs import _close_code_arrays, _close_failed_cache_maps
 
+    task = task or DEFAULT_TASKS.get(features.name, "retrieval")
     identity = evaluation_identity(features, checkpoint, k=k, device=device,
-                                   gallery_chunk=gallery_chunk, query_block=query_block)
+                                   gallery_chunk=gallery_chunk, query_block=query_block,
+                                   task=task, knn=knn)
     evaluation_id = canonical_hash(identity)
     out = root / "evaluations" / evaluation_id / "result.json"
     with exclusive_lock(out.with_suffix(".lock")):
@@ -196,13 +234,22 @@ def evaluate_point(features, spec, root: Path, *, cell: Cell | None = None,
         codes_root = root / "cache" / "benchmark_codes" / evaluation_id
         gallery = queries = None
         try:
+            def score(gallery, queries, dim, *, normalize=False):
+                arguments = {"dim": dim, "device": device,
+                             "gallery_ids": features.gallery.ids, "query_ids": features.query.ids,
+                             "gallery_chunk": gallery_chunk, "query_block": query_block,
+                             "normalize": normalize}
+                if task == "knn_classification":
+                    from ..evaluate.classification import evaluate_knn
+
+                    return evaluate_knn(gallery, features.gallery.labels, queries, features.query.labels,
+                                        **arguments, **knn_settings(knn))
+                return evaluate_retrieval(gallery, features.gallery.labels, queries, features.query.labels,
+                                          exclude_self=features.exclude_self, **arguments)
+
             if cell is None:
                 gallery, queries = features.gallery.features, features.query.features
-                metrics = evaluate_retrieval(
-                    gallery, features.gallery.labels, queries, features.query.labels,
-                    dim=spec.dim, device=device, gallery_ids=features.gallery.ids,
-                    query_ids=features.query.ids, exclude_self=features.exclude_self,
-                    normalize=True, gallery_chunk=gallery_chunk, query_block=query_block)
+                metrics = score(gallery, queries, spec.dim, normalize=True)
                 import numpy as np
 
                 metrics.update(nnz_mean=float(np.count_nonzero(gallery, axis=1).mean()),
@@ -219,21 +266,19 @@ def evaluate_point(features, spec, root: Path, *, cell: Cell | None = None,
                 queries = gallery if features.query is features.gallery else encode_split(
                     model, features.query.features, None, k, device=device, cache_dir=codes_root,
                     identity={"evaluation": evaluation_id, "split": features.query.name})
-                metrics = evaluate_retrieval(
-                    gallery, features.gallery.labels, queries, features.query.labels,
-                    dim=spec.preset.hidden_dim, device=device,
-                    gallery_ids=features.gallery.ids, query_ids=features.query.ids,
-                    exclude_self=features.exclude_self, gallery_chunk=gallery_chunk,
-                    query_block=query_block)
+                metrics = score(gallery, queries, spec.preset.hidden_dim)
                 metrics.update(nnz_mean=gallery["stats"]["nnz_mean"],
                                query_nnz_mean=queries["stats"]["nnz_mean"],
                                code_bytes_per_image=k * 8,
                                encode_seconds=gallery["stats"]["seconds"]
                                + (0 if queries is gallery else queries["stats"]["seconds"]))
+            comparison = {"features": features.identity, "ranking": EVALUATION_VERSION,
+                          "precision": identity["encode_precision"]}
+            if task == "knn_classification":
+                comparison.update(task=task, classifier=identity["classifier"],
+                                  support=identity["support"], query=identity["query"])
             record = {"evaluation_id": evaluation_id, "identity": identity,
-                      "comparison_id": canonical_hash({"features": features.identity,
-                                                        "ranking": EVALUATION_VERSION,
-                                                        "precision": identity["encode_precision"]}),
+                      "comparison_id": canonical_hash(comparison), "task": task,
                       "dataset": features.name, "protocol": features.protocol,
                       "backbone": spec.name, "mode": "frozen", "training_on_target": False,
                       "method": cell.method if cell else "dense", "train_k": cell.k if cell else None,
@@ -242,6 +287,9 @@ def evaluate_point(features, spec, root: Path, *, cell: Cell | None = None,
                       "signature": checkpoint["signature"] if checkpoint else None,
                       "complete": True, "scientific": not smoke,
                       "feature_manifest": features.manifest, "metrics": metrics}
+            if task == "knn_classification":
+                record.update(classifier=identity["classifier"],
+                              uses_target_support_labels=True, parameter_updates_on_target=False)
             atomic_json(out, record)
             return record
         except BaseException as error:
@@ -517,7 +565,7 @@ def run_campaign(campaign: Campaign, workspace: str | Path, *, device="cuda:0",
 
                         saved_identity = record["training_identity"]
                         rows = saved_identity["data"]["train"]["rows"]
-                        preset = training_preset(c.method, spec.preset)
+                        preset = training_preset(c.method, spec.preset, k=c.k)
                         per_epoch = -(-rows // preset.batch_size)
                         total = per_epoch * preset.epochs
                         if maximum:
@@ -570,7 +618,8 @@ def run_campaign(campaign: Campaign, workspace: str | Path, *, device="cuda:0",
                             features = feature_bundles[dataset_name]
                             if features is not None:
                                 dense = task(f"dense/{name}/{dataset_name}", lambda f=features:
-                                    evaluate_point(f, spec, root, device=device, smoke=smoke))
+                                    evaluate_point(f, spec, root, device=device, smoke=smoke,
+                                                   **campaign.evaluation_options(dataset_name)))
                                 if dense:
                                     catalog["evaluations"].append(dense)
                         features = feature_bundles.get(dataset_name)
@@ -580,10 +629,11 @@ def run_campaign(campaign: Campaign, workspace: str | Path, *, device="cuda:0",
                                 (verify_feature_provenance(f, checkpoint, smoke=smoke), True)[1]) is None:
                             continue
                         for budget in campaign.budgets("downstream", "eval_k", name):
-                            record = task(f"retrieval/{dataset_name}/{cell.slug}/eval-k{budget}",
+                            record = task(f"{campaign.task_for(dataset_name)}/{dataset_name}/{cell.slug}/eval-k{budget}",
                                 lambda k=budget, f=features: evaluate_point(
                                     f, spec, root, cell=cell, checkpoint=checkpoint, model=model, k=k,
-                                    device=device, retain_codes=campaign.execution["retain_codes"], smoke=smoke))
+                                    device=device, retain_codes=campaign.execution["retain_codes"], smoke=smoke,
+                                    **campaign.evaluation_options(dataset_name)))
                             if record:
                                 catalog["evaluations"].append(record)
                                 persist()

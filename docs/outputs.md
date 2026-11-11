@@ -32,10 +32,11 @@ leave behind, and a file that exists is complete.
 
 ## `runs/<backbone>/<method>/k<K>/seed<S>/`
 
-The directory segment normally matches the logical method name. Current
-MPSAEv2 instead uses `mpsaev2__fixed_ot_cl_v1` to separate its fixed-K hybrid
-objective from the retired annealed OT-only fits; metadata still records
-`method: mpsaev2` and `objective.variant: fixed_ot_cl_v1`.
+The directory segment matches the active logical method name: `csr`, `csrv2`
+or `mpsae`. Existing CSR multi-TopK and MPSAEv2 directories remain historical
+artefacts; they are excluded from experiment selection and new reports.
+Their old identities and training-duration rules are documented in
+[the historical note](notes/excluded_methods.md).
 
 Six possible files. `config.json`, `train.jsonl`, `checkpoint.pt` and
 `summary.json` come from the fit; `eval_e1.json` from the per-K measurement;
@@ -63,7 +64,7 @@ never finished. It is the authoritative record of what was asked for.
 | `format` | `mpsae-fit-v2`, the checkpoint layout |
 | `code_version` | `mpsae.__version__` at fit time |
 | `backbone`, `method`, `target_k`, `seed` | the cell |
-| `objective` | `methods.describe(...)`: loss composition, gate budgets, regularisers and their weights, and OT settings where applicable (`weight`, `cost`, `mass`, `eta`, `microbatch`, `max_iters`, `tol`, `views`). Current MPSAEv2 also records `variant: fixed_ot_cl_v1`, with both `contrastive` and `ot` settings and no `annealing` field |
+| `objective` | `methods.describe(...)`: loss composition, gate budgets, regularisers and their weights, and OT settings where applicable (`weight`, `cost`, `mass`, `eta`, `microbatch`, `max_iters`, `tol`, `views`) |
 | `optimizer` | `{name: Adam, lr, betas, eps, weight_decay, schedule: constant, grad_clip: null, decay_applies_to}`. The last field records that decay is coupled L2 over *all* parameters including biases, as the release does — not AdamW's decoupled form |
 | `schedule` | `{epochs, batch_size, batches_per_epoch, total_steps, drop_last: false}` |
 | `precision` | `{params: float32, autocast: false, tf32: false}` |
@@ -162,8 +163,8 @@ was attempted and did not produce a number. The report counts it as incomplete.
 
 The frozen backbone measured on its own, with no autoencoder: CSR Table 4's
 "Full Rep." row. Written by `runs.dense_reference`, cached on the bundle
-identity, and used both as the pipeline's correctness gate and as the dashed
-upper reference in the figures.
+identity, and used both as the pipeline's correctness gate and as a numerical
+diagnostic in tables; it is not drawn in the figures.
 
 | field | meaning |
 |---|---|
@@ -286,7 +287,7 @@ Always present:
 | `lr` | the preset learning rate. Constant by construction: the release builds `StepLR(step_size=10, gamma=1)`, which never changes it |
 | `rows` | rows in that batch. The final batch of an epoch is short — `drop_last=False`, as released |
 | `elapsed` | **cumulative** wall-clock since the fit began, including time from earlier resumptions |
-| `training_k` | the budget actually used at this step. Equal to K for `csr`, `mpsae`, current `mpsaev2`, and `csr_multitopk`; annealed only for `csrv2` |
+| `training_k` | the budget actually used at this step. Equal to K for `csr` and `mpsae`; annealed only for `csrv2` |
 | `view_2k`, `view_4k` | the other two gate budgets, `min(2k, h)` and `min(4k, h)` |
 | `loss_mse_k`, `loss_mse_4k`, `loss_aux` | the three shared terms, **unweighted** — the weights (`0.125`, `1/32`) are applied in the total, not in these diagnostics |
 | `loss_total` | the weighted sum actually backpropagated |
@@ -299,18 +300,10 @@ Method-dependent:
 
 | field | present for |
 |---|---|
-| `loss_mse_2k` | `csr_multitopk` — the extra `L(2K)/8` reconstruction, unweighted |
-| `loss_contrastive` | `csr`, `csrv2`, `csr_multitopk`, current `mpsaev2` — unweighted contrastive term; label-based only for `csrv2`, instance-based otherwise |
-| `loss_ot` | `mpsae`, `mpsaev2` — the unweighted matching gap |
-| `ot_*` | the same two methods: solver diagnostics averaged over the OT groups in the batch — `ot_mass`, `ot_mass_error`, `ot_cap_violation`, `ot_constraint_error`, `ot_iterations`, `ot_refinement_iterations`, `ot_objective_refinement`, `ot_negative_gap`, `ot_diagonal_plan_mass`, `ot_cost_mean`, `ot_cost_std_over_eta`, `ot_groups`, plus the worst case across groups in `ot_cost_min`, `ot_cost_max`, `ot_mass_error_max`, `ot_cap_violation_max` |
-
-Current MPSAEv2 records both `loss_contrastive` and `loss_ot`, with fixed
-`training_k`. Its objective identity includes `variant: fixed_ot_cl_v1`, and
-its fit directory is `runs/<backbone>/mpsaev2__fixed_ot_cl_v1/k<K>/seed<SEED>/`.
-Reports still label the method `mpsaev2`; older unversioned MPSAEv2 directories
-are retained but excluded from current-method reports. The resolved campaign's
-`method_variants` mapping distinguishes the current report plan from the old
-annealed OT-only plan.
+| `loss_contrastive` | `csr`, `csrv2` — unweighted contrastive term; label-based only for `csrv2`, instance-based otherwise |
+| `loss_ot` | `mpsae` — the unweighted matching gap |
+| `ot_weight` | `mpsae` — multiplier of `loss_ot` in the total loss: 2.0 at training K ≤ 64; 0.5 above 64 |
+| `ot_*` | `mpsae`: solver diagnostics averaged over the OT groups in the batch — `ot_mass`, `ot_mass_error`, `ot_cap_violation`, `ot_constraint_error`, `ot_iterations`, `ot_refinement_iterations`, `ot_objective_refinement`, `ot_negative_gap`, `ot_diagonal_plan_mass`, `ot_cost_mean`, `ot_cost_std_over_eta`, `ot_groups`, plus the worst case across groups in `ot_cost_min`, `ot_cost_max`, `ot_mass_error_max`, `ot_cap_violation_max` |
 
 **`elapsed` is cumulative, not per-record.** Summing it across a file multiplies
 the true total by the number of records. The total wall-clock of a fit is
@@ -335,19 +328,16 @@ about what `±` means.
 | `e1_accuracy` | (backbone, method, K) | `top1`, `probe_top1`, `probe_top5`, `nnz`, `empty_queries`, `search_seconds`, `train_seconds`, `gpu_hours`, `index_bytes`, each as `_mean`/`_std`/`_n`, plus `seeds_present`, `seeds_missing`, `complete`, `code_versions` |
 | `e2_generalisation` | (backbone, method, anchor K, inference K) | `top1`, `nnz`, `empty_queries`, `search_seconds` as above, plus `at_anchor`, `seeds_present`, `seeds_missing`, `complete` |
 | `training_summary` | one fit | `logged_records`, `last_step`, `total_steps`, `finished`, `train_seconds`, `gpu_hours`, `step_seconds_mean`, `residency`, `final_*` for each loss and sparsity field, and `k_schedule` — realised budgets as `step:k` change points; only `csrv2` should anneal in current runs |
-| `paired_<treatment>_vs_<control>` | (backbone, K) | per-seed differences for every treatment in `mpsae`, `mpsaev2`, `csr_multitopk` against each control in `csr`, `csrv2`, plus the direct `mpsaev2` versus `mpsae` comparison: `delta_top1`, `delta_probe_top1`, `delta_nnz` as mean/std/n, plus `treatment_top1`, `control_top1` as context, and `seeds_paired`, `seeds_missing`, `seeds_unpaired` |
-| `dense_reference` | backbone | our measured dense 1-NN beside the published value, kept in separate columns so the two can never be conflated |
+| `paired_<treatment>_vs_<control>` | (backbone, K) | per-seed differences for `mpsae` against each control in `csr`, `csrv2`: `delta_top1`, `delta_probe_top1`, `delta_nnz` as mean/std/n, plus `treatment_top1`, `control_top1` as context, and `seeds_paired`, `seeds_missing`, `seeds_unpaired` |
+| `dense_reference` | backbone | our measured dense 1-NN as a numerical diagnostic, excluded from plots |
 
 A metric nobody measured is dropped as a column rather than rendered as a column
 of em-dashes — `probe_top5` with `--no-probe`, or `probe_top1` in the E2 table,
-where the sweep deliberately runs no probes.
+when probes are disabled for the sweep.
 
-`paired_mpsaev2_vs_mpsae` reports the added-instance-contrastive ablation on
-ImageNet. The downstream report likewise includes this pair in
-`downstream/tables/paired.{json,csv,md}`, with `treatment: mpsaev2` and
-`control: mpsae`, alongside its existing pairs. Each downstream difference
-matches the dataset/protocol, backbone, training K, inference K and seed and
-records the two evaluation IDs; it is not a subtraction of unrelated averages.
+The downstream paired table compares MPSAE against CSR and CSRv2. Each
+difference matches dataset/protocol, backbone, training K, inference K and seed,
+and records both evaluation IDs. It is not a subtraction of unrelated averages.
 
 ### `reports/figures/`
 
@@ -357,10 +347,10 @@ panel supports travels with the image instead of being re-invented in LaTeX.
 
 | figure | supports |
 |---|---|
-| `backbone_summary` | the headline overview: accuracy vs K for every method, one panel per backbone, with our own dense 1-NN as the rule in each panel |
-| `e1_curves_<backbone>` | does our objective beat CSR/CSRv2 at matched K. Published curves are overlaid only on `ff2048`, in grey dashes, labelled published |
+| `backbone_summary` | the headline overview: accuracy vs K for every method, one panel per backbone, using only measured active sparse methods |
+| `e1_curves_<backbone>` | compares MPSAE with CSR/CSRv2 at matched K; no published or dense reference curves |
 | `e1_delta_<backbone>_vs_csr`, `e1_delta_<backbone>_vs_csrv2` | the same claim, paired per seed. This is the figure the headline sentence points at |
-| `e2_generalisation_<backbone>` | the claim CSRv2 §3 makes and neither paper tests: one checkpoint trained at K\*, evaluated at every budget, with the per-K E1 curve drawn faintly behind as a matched-K reference, not a guaranteed upper bound |
+| `e2_generalisation_<backbone>` | linear-probe and 1-NN accuracy as inference K varies for each fixed training-K checkpoint |
 | `e2_nnz_<backbone>` | where a larger nominal K stops buying real sparsity, plotted against measured nnz rather than the budget |
 | `efficiency_<backbone>` | the trade-off CSR argues for, in the two units a deployment pays in: query wall-clock and index bytes. No band on the cost axes, because wall-clock spread is a property of the hardware, not the method |
 | `training_<backbone>_k<K>` | internal diagnostic, not a paper figure: total loss, loss components, realised k-annealing and dead latents, one line per method per seed with no averaging, at the median trained K |
@@ -395,14 +385,10 @@ methods is a matched pair and the difference cancels that nuisance variation. A
 seed present for only one of the two methods is excluded from the pair, named in
 `seeds_unpaired`, and logged — never silently dropped.
 
-**Published numbers stay published.** `report.reference` holds values
-transcribed from the papers and nothing else. They are drawn in grey dashes,
-every label contains the word "published", every payload is tagged
-`published=True`, and they are never mixed into an aggregate of ours. They exist
-on `ff2048` only; the other four backbones have no comparable published
-counterpart, and asking for one returns `None` rather than a plausible line.
-Our own dense measurement lives in `dense_reference.json` and is loaded by a
-separate function from the published one, so a figure cannot confuse them.
+**Figures use measured active sparse methods only.** Published curves and
+Dense/Full-representation overlays are disabled. `report.reference` is an
+empty compatibility API. Our measured dense diagnostics remain available in
+tables, separate from the CSR, CSRv2 and MPSAE curves.
 
 ### Nominal `k` versus measured `nnz_mean`
 
@@ -480,15 +466,25 @@ A few things that are easy to get wrong when reading this tree directly:
   `row["curve"]`. The `curve` key is excluded from every table; it exists so the
   diagnostic figure and the table are backed by the same numbers.
 
-### MPSAEv2 training duration
+## Downstream DINO kNN result records
 
-MPSAEv2 uses 15 epochs (other methods keep 10). A compatible 10-epoch
-fit is extended in the same directory with model, optimizer and RNG state
-retained. During extension, `summary.json` is marked incomplete. At the
-end, `checkpoint.pt` and `summary.json` agree on the new signature,
-`schedule.epochs: 15`, and `next_step == steps == schedule.total_steps`.
-For an uncapped run this is `15 * ceil(train_rows / 1024)`. Checkpoints
-are still saved periodically; only the final checkpoint is a completed
-15-epoch result. Synthetic smoke tests may remain capped; real campaign
-checkpoint imports require all 15 epochs. Evaluation caches use the new
-signature/checkpoint hash. Existing archived settings remain historical.
+The campaign's downstream records are distinct from ImageNet `eval_e1.json` and
+`eval_e2.json`. EuroSAT records use `task: knn_classification`, store the DINO
+weighted-vote classifier settings, and include `knn_<n>_top1`, `knn_<n>_top5`,
+`knn_<n>_balanced_accuracy` and `knn_<n>_macro_f1` for each configured neighbour
+count. Defaults are n = 1 and 20 with temperature 0.07. `eval_k` remains the sparse
+embedding budget; it is not the number of neighbours.
+
+One record represents one dataset/backbone/checkpoint/inference-K condition and
+contains both classifier results. The search is shared across neighbour counts;
+search seconds and voting seconds describe separate work. Classification tables
+and figures show the voted class metrics, while SOP retrieval records retain
+their Recall/Precision/mAP fields. No retired methods or dense/published reference
+curves are drawn. Dense diagnostic values remain available numerically.
+
+The evaluation identity includes the task and classifier recipe, so changing
+temperature, neighbour counts or edge-case policy cannot reuse old metrics.
+Changing only the downstream classifier does not change the source checkpoint
+identity or require another SAE fit. See [the benchmark protocol](benchmark.md)
+for support/query splitting, exact vote semantics, deterministic ties and
+zero-code abstention.

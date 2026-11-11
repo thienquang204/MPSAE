@@ -109,7 +109,7 @@ first, and values already present in the environment win over the file.
 | `--workspace` | `MPSAE_WORKSPACE` | `work` | the fast local disk is not under the repo — on Vast, `/workspace/mpsae` |
 | `--device` | `MPSAE_DEVICE` | `cuda:0` | a second GPU, or two runs on one box |
 | `--backbones` | `MPSAE_BACKBONES` | all five, branch 1 first | FFCV will not build (`ff2048` alone), or you want the paper-comparable branch finished first |
-| `--methods` | `MPSAE_METHODS` | all five | isolating a comparison, e.g. `csr,mpsae` |
+| `--methods` | `MPSAE_METHODS` | `csr,csrv2,mpsae` | isolating a comparison, e.g. `csr,mpsae` |
 | `--seeds` | `MPSAE_SEEDS` | `1227` | one training seed by default; sample standard deviation requires at least two seeds |
 | `--k` | `MPSAE_K` | each backbone's full `k_list` | a spot check, or finishing the E2 anchors first |
 | `--workers` | `MPSAE_WORKERS` | `16` | the box has a different core count; this is the JPEG-decode worker count for both the FFCV writer and the extraction loaders |
@@ -187,14 +187,18 @@ produced it.
 ## Running a subset
 
 The grid is `backbone × K × method × seed`; any of the four can be narrowed, and
-the narrowing composes.
+the narrowing composes. Only `csr`, `csrv2` and `mpsae` are selectable;
+`mpsaev2` and `csr_multitopk` are rejected, including through an old
+`MPSAE_METHODS` environment setting. Current campaigns also use only the three
+active methods. Existing checkpoints for excluded methods remain on disk and
+are omitted from new reports.
 
 ```bash
 # one backbone, and the only one that needs no FFCV
 python -m mpsae --backbones ff2048 run
 
-# the OT claim and its control against one baseline
-python -m mpsae --methods csr,mpsae,csr_multitopk run
+# the OT method against both active baselines
+python -m mpsae --methods csr,csrv2,mpsae run
 
 # the E2 anchors first, so the generalisation figure fills in early
 python -m mpsae --backbones ff2048 --k 8,16,32,64,128,256 run
@@ -203,7 +207,7 @@ python -m mpsae --backbones ff2048 --k 8,16,32,64,128,256 run
 python -m mpsae --seeds 1227 --no-e2 --no-probe run
 
 # a single cell, end to end
-python -m mpsae --backbones rn18 --methods mpsaev2 --k 64 --seeds 2026 run
+python -m mpsae --backbones rn18 --methods mpsae --k 64 --seeds 2026 run
 ```
 
 Two things to keep in mind. `--k` is intersected with each backbone's own
@@ -220,19 +224,19 @@ through the run machinery. You can plan and monitor from a laptop.
 
 ```
 $ python -m mpsae plan
-MPSAE 2.0.0: 175 training cells
+MPSAE 2.0.0: 108 training cells
 
 backbone             d K budgets                                    E2 anchors              cells
 -------------------------------------------------------------------------------------------------
-ff2048            2048 2,4,8,16,32,64,128,256,512,1024,2048         8,16,32,64,128,256         55
-rn18               512 2,4,8,16,32,64,128,256,512                   8,16,32,64,128,256         45
-convnext_tiny      768 12,48,96,192,384                             12,48,96,192,384           25
-vit_b16            768 12,48,96,192,384                             12,48,96,192,384           25
-dinov2_vits14      384 12,48,96,192,384                             12,48,96,192,384           25
+ff2048            2048 2,4,8,16,32,64,128,256,512,1024,2048         8,16,32,64,128,256         33
+rn18               512 2,4,8,16,32,64,128,256,512                   8,16,32,64,128,256         27
+convnext_tiny      768 12,48,96,192,384                             12,48,96,192,384           15
+vit_b16            768 8,12,48,96,192,384                           8,12,48,96,192,384         18
+dinov2_vits14      384 12,48,96,192,384                             12,48,96,192,384           15
 -------------------------------------------------------------------------------------------------
-total                                                                                         175
+total                                                                                         108
 
-methods: csr, csrv2, mpsae, mpsaev2, csr_multitopk
+methods: csr, csrv2, mpsae
 seeds:   1227
 ```
 
@@ -244,13 +248,12 @@ $ python -m mpsae status
 {
   "stages": {"env": true, "imagenet": true, "ffcv": true, "embed": true,
              "publish": false, "train": false, "report": false},
-  "cells": 175,
-  "outstanding": 120,
-  "done": 55,
-  "by_backbone": {"ff2048": 0, "rn18": 45, "convnext_tiny": 25,
-                  "vit_b16": 25, "dinov2_vits14": 25},
-  "by_method": {"csr": 24, "csrv2": 24, "mpsae": 24,
-                "mpsaev2": 24, "csr_multitopk": 24}
+  "cells": 108,
+  "outstanding": 75,
+  "done": 33,
+  "by_backbone": {"ff2048": 0, "rn18": 27, "convnext_tiny": 15,
+                  "vit_b16": 18, "dinov2_vits14": 15},
+  "by_method": {"csr": 25, "csrv2": 25, "mpsae": 25}
 }
 ```
 

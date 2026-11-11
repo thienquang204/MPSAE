@@ -28,7 +28,8 @@ import re
 import statistics
 from typing import Any, Iterable, Mapping, Sequence
 
-from ..config import BACKBONES, METHODS, METHOD_VARIANTS, SEEDS, Cell, grid, method_from_directory
+from ..config import (BACKBONES, IMPLEMENTED_METHODS, METHODS, METHOD_VARIANTS,
+                      SEEDS, Cell, grid, method_from_directory, validate_checkpoint_ot_weight)
 from ..io import read_json, read_jsonl
 from ..logs import get_logger
 
@@ -150,8 +151,6 @@ def validate_result_variant(record: Mapping[str, Any]) -> None:
     variant, including when records were supplied directly to the report API.
     """
     expected = METHOD_VARIANTS.get(record.get("method"))
-    if not expected:
-        return
     e2 = record.get("e2")
     has_results = (record.get("e1") is not None
                    or isinstance(e2, Mapping) and bool(e2.get("points")))
@@ -159,7 +158,11 @@ def validate_result_variant(record: Mapping[str, Any]) -> None:
         return
     config = record.get("config") or {}
     identity = config.get("identity") or {}
+    validate_checkpoint_ot_weight(record.get("method"), record.get("k", 0), identity,
+                                  context=str(record.get("path", "report record")))
     objective = identity.get("objective") or {}
+    if not expected:
+        return
     if objective.get("variant") != expected:
         location = record.get("path", (record.get("backbone"), record.get("k"),
                                        record.get("seed")))
@@ -238,7 +241,7 @@ def aggregate_e1(records: Iterable[Mapping[str, Any]], *,
     """
     groups: dict[tuple[str, str, int], list[Mapping[str, Any]]] = {}
     for record in records:
-        if record.get("e1") is None:
+        if record.get("method") not in METHODS or record.get("e1") is None:
             continue
         groups.setdefault((record["backbone"], record["method"], record["k"]), []).append(record)
 
@@ -273,7 +276,7 @@ def paired_difference(records: Iterable[Mapping[str, Any]], *, treatment: str,
     log = get_logger("report")
     index: dict[tuple[str, str, int, int], Mapping[str, Any]] = {}
     for record in records:
-        if record.get("e1") is not None:
+        if record.get("method") in METHODS and record.get("e1") is not None:
             key = (record["backbone"], record["method"], record["k"], record["seed"])
             index[key] = record["e1"]
 
@@ -335,6 +338,8 @@ def aggregate_e2(records: Iterable[Mapping[str, Any]], *,
     """
     groups: dict[tuple[str, str, int, int], list[dict[str, Any]]] = {}
     for record in records:
+        if record.get("method") not in METHODS:
+            continue
         payload = record.get("e2")
         if not isinstance(payload, Mapping):
             continue
@@ -388,12 +393,12 @@ def training_summary(root: str | Path, *, max_curve_points: int = 400,
     else:
         cells = set(selected_cells)
         for backbone, method, k, seed in cells:
-            if (backbone not in BACKBONES or method not in METHODS
+            if (backbone not in BACKBONES or method not in IMPLEMENTED_METHODS
                     or isinstance(k, bool) or not isinstance(k, int) or k < 1
                     or isinstance(seed, bool) or not isinstance(seed, int) or seed < 0):
                 raise ValueError(f"invalid selected training cell: {(backbone, method, k, seed)}")
         paths = sorted(base / Cell(backbone, method, k, seed).slug / "train.jsonl"
-                       for backbone, method, k, seed in cells)
+                       for backbone, method, k, seed in cells if method in METHODS)
 
     for path in paths:
         if not path.is_file():

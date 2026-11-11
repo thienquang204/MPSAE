@@ -22,7 +22,8 @@ import shutil
 from typing import Any
 
 from . import __version__
-from .config import BACKBONES, BACKBONE_ORDER, METHODS, METHOD_EPOCHS, METHOD_VARIANTS, Backbone
+from .config import (BACKBONES, BACKBONE_ORDER, METHODS, METHOD_EPOCHS, METHOD_VARIANTS,
+                     SEEDS, Backbone, validate_experiment_methods, cell_objective_overrides, grid)
 from .io import atomic_json, human_bytes, read_json
 from .logs import banner, get_logger, log_environment, setup_logging, stage
 
@@ -116,6 +117,9 @@ class PipelineOptions:
     max_steps: int = 0
     run_e2: bool = True
     linear_probe: bool = True
+
+    def __post_init__(self) -> None:
+        validate_experiment_methods(self.methods or METHODS)
 
     def forced(self, name: str) -> bool:
         return name in self.force or "all" in self.force
@@ -421,6 +425,7 @@ def needed_stages(options: PipelineOptions) -> tuple[str, ...]:
 
 def run_all(options: PipelineOptions, *, only: str | None = None) -> dict[str, Any]:
     """Run the pipeline, or a single stage when ``only`` is given."""
+    validate_experiment_methods(options.methods or METHODS)
     options.paths.create()
     setup_logging(options.paths.logs, name=only or "pipeline")
     banner(f"MPSAE {__version__} | workspace {options.paths.workspace}"
@@ -442,6 +447,10 @@ def run_all(options: PipelineOptions, *, only: str | None = None) -> dict[str, A
     for name in chosen:
         identity = {"version": __version__, "options": asdict(options)}
         if name in ("train", "report"):
+            overrides = cell_objective_overrides(grid(options.backbones, options.methods or METHODS,
+                                                     options.seeds or SEEDS, options.k_values))
+            if overrides:
+                identity["cell_objective_overrides"] = overrides
             variants = {method: METHOD_VARIANTS[method] for method in (options.methods or METHODS)
                         if method in METHOD_VARIANTS}
             if variants:

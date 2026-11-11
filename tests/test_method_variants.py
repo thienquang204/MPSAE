@@ -1,4 +1,4 @@
-"""The hybrid MPSAEv2 objective must never inherit an annealed run's artifacts.
+"""Historical MPSAEv2 artifacts stay identifiable and excluded from experiments.
 
 These tests exercise storage, report, checkpoint and stage-receipt boundaries;
 the loss and gradient equivalence tests live in test_methods.py.
@@ -17,33 +17,29 @@ from mpsae.report import aggregate
 
 
 def test_only_hybrid_fit_directory_changes():
-    for method in config.METHODS:
+    for method in config.IMPLEMENTED_METHODS:
         cell = config.Cell("rn18", method, 8, 1227)
         if method == "mpsaev2":
             assert cell.slug == "rn18/mpsaev2__fixed_ot_cl_v1/k8/seed1227"
         else:
             assert cell.slug == f"rn18/{method}/k8/seed1227"
-        assert config.method_from_directory(config.method_directory(method)) == method
+        decoded = config.method_from_directory(config.method_directory(method))
+        assert decoded == (method if method in config.METHODS else None)
     assert config.method_from_directory("mpsaev2") is None
     assert config.method_from_directory("mpsaev2__retired_variant") is None
 
 
-def test_variant_changes_only_plans_that_select_it(monkeypatch):
-    def campaign(method):
-        return Campaign.from_mapping({"backbones": ["rn18"], "methods": [method],
-            "seeds": [1227], "imagenet": {"train_k": [8]},
-            "downstream": {"enabled": False}})
-
-    hybrid, baseline = campaign("mpsaev2"), campaign("csr")
-    assert hybrid.resolved()["method_variants"] == {"mpsaev2": "fixed_ot_cl_v1"}
-    assert "method_variants" not in baseline.resolved()
-    before = hybrid.plan()["plan_id"], baseline.plan()["plan_id"]
+def test_historical_variant_changes_do_not_change_active_plans(monkeypatch):
+    campaign = Campaign.from_mapping({"backbones": ["rn18"],
+        "seeds": [1227], "imagenet": {"train_k": [8]},
+        "downstream": {"enabled": False}})
+    assert "method_variants" not in campaign.resolved()
+    before = campaign.plan()["plan_id"]
     monkeypatch.setitem(config.METHOD_VARIANTS, "mpsaev2", "future_objective")
-    assert hybrid.plan()["plan_id"] != before[0]
-    assert baseline.plan()["plan_id"] == before[1]
+    assert campaign.plan()["plan_id"] == before
 
 
-def test_report_discovery_and_selected_logs_ignore_legacy_hybrid_directory(tmp_path):
+def test_report_discovery_and_selected_logs_ignore_all_retired_hybrid_directories(tmp_path):
     root = tmp_path / "runs"
     cell = config.Cell("ff2048", "mpsaev2", 8, 1227)
     current = root / cell.slug
@@ -60,44 +56,45 @@ def test_report_discovery_and_selected_logs_ignore_legacy_hybrid_directory(tmp_p
         "loss_total": 0.25, "training_k": 8}) + "\n", encoding="utf-8")
 
     records = aggregate.load_runs(root)
-    assert len(records) == 1
-    assert records[0]["method"] == "mpsaev2"
-    assert records[0]["path"] == str(current)
-    assert records[0]["e1"]["top1"] == 65.0
+    assert records == []
     for selection in (None, [("ff2048", "mpsaev2", 8, 1227)]):
         rows = aggregate.training_summary(root, selected_cells=selection)
-        assert len(rows) == 1 and rows[0]["method"] == "mpsaev2"
-        assert rows[0]["final_loss_total"] == 0.25
+        assert rows == []
     assert (legacy / "train.jsonl").read_text() == "invalid historical log"
+    assert read_json(current / "eval_e1.json")["top1"] == 65.0
 
 
 @pytest.mark.parametrize("saved_variant", [None, "retired_annealing"])
 @pytest.mark.parametrize("payload", ["e1", "e2"])
-def test_explicit_results_cannot_relabel_historical_objective(tmp_path, saved_variant, payload):
+def test_explicit_retired_results_are_excluded_regardless_of_objective(tmp_path, monkeypatch,
+                                                                    saved_variant, payload):
     from mpsae.report.figures import build_all
+    monkeypatch.setattr("mpsae.report.figures.apply_style", lambda: {})
 
     record = {"backbone": "ff2048", "method": "mpsaev2", "k": 8, "seed": 1227,
               "config": {"identity": {"objective": {"variant": saved_variant}}}}
     record[payload] = ({"top1": 99.0} if payload == "e1"
                        else {"points": [{"k": 8, "top1": 99.0}]})
+    # Historical objective validation remains available for checkpoint audits,
+    # but retired results cannot enter an active report in either variant.
     with pytest.raises(ValueError, match="objective variant"):
-        build_all(tmp_path, tmp_path / "report", records=[record])
-    assert not (tmp_path / "report").exists()
+        aggregate.validate_result_variant(record)
+    manifest = build_all(tmp_path, tmp_path / "report", records=[record])
+    assert manifest["counts"]["runs"] == manifest["counts"]["training_logs"] == 0
     record["config"]["identity"]["objective"]["variant"] = config.METHOD_VARIANTS["mpsaev2"]
+    aggregate.validate_result_variant(record)
     actual = (aggregate.aggregate_e1 if payload == "e1" else aggregate.aggregate_e2)([record])
-    assert actual[0]["top1_mean"] == 99.0
+    assert actual == []
 
 
-def test_result_discovery_checks_objective_even_in_current_directory(tmp_path):
+def test_result_discovery_ignores_retired_partial_and_complete_directories(tmp_path):
     directory = tmp_path / "runs" / config.Cell("ff2048", "mpsaev2", 8, 1227).slug
     directory.mkdir(parents=True)
-    # A just-created run with neither config nor results is still reportable.
     partial = aggregate.load_runs(tmp_path)
-    assert len(partial) == 1 and not partial[0]["complete"]
+    assert partial == []
     assert aggregate.aggregate_e1(partial) == aggregate.aggregate_e2(partial) == []
     atomic_json(directory / "eval_e1.json", {"top1": 99.0})
-    with pytest.raises(ValueError, match="objective variant"):
-        aggregate.load_runs(tmp_path)
+    assert aggregate.load_runs(tmp_path) == []
 
 
 def test_real_hybrid_fit_logs_both_regularizers_at_fixed_k(tmp_path, tiny_hybrid):
@@ -204,18 +201,17 @@ def test_profiler_rejects_retired_checkpoint_before_writing_output(tmp_path, tin
     directory = tmp_path / "old"
     before = _checkpoint(directory, tiny_hybrid, retired=True)
     output = tmp_path / "profile.json"
-    args = profile_train.build_parser().parse_args([
-        "--device", "cpu", "--backbone", "ff2048", "--method", "mpsaev2", "--k", "2",
-        "--warmup", "0", "--steps", "1", "--checkpoint", str(directory / "checkpoint.pt"),
-        "--out", str(output)])
-    with pytest.raises((ValueError, RuntimeError), match="variant|objective|recipe"):
-        profile_train.run_profile(args)
+    with pytest.raises(SystemExit):
+        profile_train.build_parser().parse_args([
+            "--device", "cpu", "--backbone", "ff2048", "--method", "mpsaev2", "--k", "2",
+            "--warmup", "0", "--steps", "1", "--checkpoint", str(directory / "checkpoint.pt"),
+            "--out", str(output)])
     assert not output.exists()
     assert {p.name: p.read_bytes() for p in directory.iterdir()} == before
 
 
-@pytest.mark.parametrize("method,expected", [("mpsaev2", ["train", "report"]), ("csr", [])])
-def test_legacy_receipts_refresh_only_changed_method_stages(tmp_path, monkeypatch, method, expected):
+@pytest.mark.parametrize("method", ["csr", "csrv2", "mpsae"])
+def test_active_method_legacy_receipts_remain_reusable(tmp_path, monkeypatch, method):
     options = pipeline.PipelineOptions(paths=pipeline.Paths(tmp_path), backbones=("ff2048",),
         methods=(method,), seeds=(1227,), k_values=(8,),
         skip=tuple(name for name in pipeline.STAGES if name not in ("env", "train", "report")))
@@ -232,17 +228,17 @@ def test_legacy_receipts_refresh_only_changed_method_stages(tmp_path, monkeypatc
             return {}
         monkeypatch.setitem(pipeline.HANDLERS, name, handler)
     pipeline.run_all(options)
-    assert calls == expected
+    assert calls == []
     calls.clear()
     pipeline.run_all(options)
     assert calls == []
 
 
-def test_legacy_status_does_not_count_annealed_result_as_current(tmp_path):
-    cell = config.Cell("ff2048", "mpsaev2", 8, 1227)
+def test_legacy_status_does_not_count_removed_methods(tmp_path):
+    cell = config.Cell("ff2048", "mpsae", 8, 1227)
     options = pipeline.PipelineOptions(paths=pipeline.Paths(tmp_path), backbones=(cell.backbone,),
                                         methods=(cell.method,), seeds=(cell.seed,), k_values=(cell.k,))
-    legacy = options.paths.runs / cell.backbone / cell.method / "k8" / "seed1227" / "eval_e1.json"
+    legacy = options.paths.runs / cell.backbone / "mpsaev2" / "k8" / "seed1227" / "eval_e1.json"
     atomic_json(legacy, {"top1": 99})
     assert pipeline.status(options)["done"] == 0
     atomic_json(options.paths.runs / cell.slug / "eval_e1.json", {"top1": 65})
