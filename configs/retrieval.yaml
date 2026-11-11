@@ -21,7 +21,7 @@ downstream:
   backbones:
     sop: [ff2048]
   train_k: [8, 16, 32, 256]
-  eval_k: [16, 32, 256]
+  eval_k: [2, 16, 32, 256]
   mode: frozen
   revisions: {}
 execution:

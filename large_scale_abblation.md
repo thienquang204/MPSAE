@@ -3973,3 +3973,168 @@ execution:
   checkpoint_every: 100
   feature_residency: auto
 ```
+
+## Archived campaign before ResNet-50 inference K=2 (2026-11-11)
+
+ResNet-50 inference expands from 16/32/256 to 2/16/32/256.
+Training budgets, ViT settings, checkpoint identities and loss weights are unchanged.
+Previously: 18 source fits, 48 ImageNet E2 points and 36 sparse SOP points.
+Now: 18 source fits, 60 ImageNet E2 points and 48 sparse SOP points.
+
+### `configs/thesis.yaml`
+
+```yaml
+# Main campaign: CSR, CSRv2, MPSAE. Previous settings: ../large_scale_abblation.md.
+# Published embeddings only. Training presets remain in mpsae/config.py.
+# Selected bundles: ImageNet for both; SOP retrieval for ResNet-50.
+# EuroSAT kNN and COCO/CLIP are deferred. Retrieval-only: configs/retrieval.yaml.
+name: thesis
+backbones: [ff2048, vit_b16]
+methods: [csr, csrv2, mpsae]
+seeds: [1227]
+imagenet:
+  enabled: true
+  prepare: false
+  train_k:
+    ff2048: [8, 16, 32, 256]
+    vit_b16: [12, 48]
+  eval_k:                       # E2 inference budgets; E1 evaluates at train_k
+    ff2048: [16, 32, 256]
+    vit_b16: [12, 48]
+  e1: true
+  e2: true
+  linear_probe: true
+  timing: true
+  timing_query_batch: 512
+  timing_warmup: 100
+  timing_rounds: 2000
+  timing_gallery_chunk: 32768
+  timing_build_entry_cap: 4194304
+  timing_retry_skipped: false
+downstream:
+  enabled: true
+  datasets: [sop]
+  tasks:
+    sop: retrieval
+  backbones:
+    sop: [ff2048]
+  train_k:                      # evaluate every selected ImageNet checkpoint
+    ff2048: [8, 16, 32, 256]
+    vit_b16: [12, 48]
+  eval_k:
+    ff2048: [16, 32, 256]
+    vit_b16: [12, 48]
+  mode: frozen
+  revisions: {}                  # main is resolved once to an immutable commit
+execution:
+  storage_mode: direct_v1        # isolated work/direct-v1; no FFCV image copy
+  precomputed_only: true        # missing/incompatible bundles fail without extracting images
+  cleanup_raw: false
+  train_missing: true
+  continue_on_error: true
+  retain_codes: false            # metrics persist; avoid accumulating TB of codes
+  max_steps: 0
+  train_log_every: 10
+  checkpoint_every: 100
+  feature_residency: auto
+```
+
+### `configs/precomputed.yaml`
+
+```yaml
+# Main campaign: CSR, CSRv2, MPSAE. Previous settings: ../large_scale_abblation.md.
+# Selected published embeddings: ImageNet for ff2048/vit_b16; SOP for ff2048.
+# EuroSAT kNN and COCO/CLIP are deferred. Retrieval-only: configs/retrieval.yaml.
+# Same fitting/evaluation and target coverage as thesis.yaml.
+name: precomputed
+backbones: [ff2048, vit_b16]
+methods: [csr, csrv2, mpsae]
+seeds: [1227]
+imagenet:
+  enabled: true
+  prepare: false
+  train_k:
+    ff2048: [8, 16, 32, 256]
+    vit_b16: [12, 48]
+  eval_k:                       # E2 inference budgets; E1 evaluates at train_k
+    ff2048: [16, 32, 256]
+    vit_b16: [12, 48]
+  e1: true
+  e2: true
+  linear_probe: true
+  timing: true
+  timing_query_batch: 512
+  timing_warmup: 100
+  timing_rounds: 2000
+  timing_gallery_chunk: 32768
+  timing_build_entry_cap: 4194304
+  timing_retry_skipped: false
+downstream:
+  enabled: true
+  datasets: [sop]
+  tasks:
+    sop: retrieval
+  backbones:
+    sop: [ff2048]
+  train_k:
+    ff2048: [8, 16, 32, 256]
+    vit_b16: [12, 48]
+  eval_k:
+    ff2048: [16, 32, 256]
+    vit_b16: [12, 48]
+  mode: frozen
+  revisions: {}
+execution:
+  storage_mode: direct_v1
+  precomputed_only: true
+  cleanup_raw: false
+  train_missing: true
+  continue_on_error: true
+  retain_codes: false
+  max_steps: 0
+  train_log_every: 10
+  checkpoint_every: 100
+  feature_residency: auto
+```
+
+### `configs/retrieval.yaml`
+
+```yaml
+# Evaluate existing ImageNet-trained checkpoints on SOP; no new source fitting.
+# Run from the same workspace as thesis.yaml so compatible checkpoints/cache are reused.
+# Preserve source config/summary/checkpoint and backbone-provenance sidecars.
+# MPSAE train K=256 requires the current OT weight 0.5 checkpoint.
+name: retrieval
+backbones: [ff2048]
+methods: [csr, csrv2, mpsae]
+seeds: [1227]
+imagenet:
+  enabled: false
+  prepare: false
+  e1: false
+  e2: false
+  linear_probe: false
+  timing: false
+downstream:
+  enabled: true
+  datasets: [sop]
+  tasks:
+    sop: retrieval
+  backbones:
+    sop: [ff2048]
+  train_k: [8, 16, 32, 256]
+  eval_k: [16, 32, 256]
+  mode: frozen
+  revisions: {}
+execution:
+  storage_mode: direct_v1
+  precomputed_only: true
+  cleanup_raw: false
+  train_missing: false
+  continue_on_error: false
+  retain_codes: false
+  max_steps: 0
+  train_log_every: 10
+  checkpoint_every: 100
+  feature_residency: auto
+```

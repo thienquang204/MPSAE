@@ -77,7 +77,7 @@ two ImageNet bundles and one SOP bundle.
 Flowers102 is excluded from these campaigns because no bundles are published;
 this does not establish a dataset defect. SOP remains enabled for the selected
 ResNet-50 through `downstream.backbones.sop`. Plans, downloads and
-reports use this same selection (36 sparse and 1 dense downstream evaluations).
+reports use this same selection (48 sparse and 1 dense downstream evaluations).
 Unexpected missing or incompatible bundles fail explicitly rather than being
 silently dropped. Building new bundles requires a separate config with
 `precomputed_only: false`, `--build-missing-embeddings`, and a writable private
@@ -91,7 +91,7 @@ bash all_in_one.sh --config configs/retrieval.yaml --skip-setup
 ```
 
 This selects ResNet-50, CSR/CSRv2/MPSAE, seed 1227, training checkpoints
-K=8/16/32/256 and inference K=16/32/256: **12 existing checkpoints, 36 sparse
+K=8/16/32/256 and inference K=2/16/32/256: **12 existing checkpoints, 48 sparse
 evaluations and one dense diagnostic**. It downloads only the SOP feature bundle
 and performs no source fitting, ImageNet evaluation, linear probing or repeated
 ImageNet timing. Use the same workspace as the source fits. Each fit needs its
@@ -158,10 +158,10 @@ has its own independent fit; the old ViT K=8 checkpoint is not a starting point.
 Compatible checkpoints at the selected budgets are reused.
 
 **E2 — fixed checkpoint, inference sweep.** Every selected ResNet checkpoint is
-evaluated at **K=16, 32, 256**. Each ViT checkpoint is evaluated at **K=12 and K=48**.
+evaluated at **K=2, 16, 32, 256**. Each ViT checkpoint is evaluated at **K=12 and K=48**.
 These same inference grids apply to every selected downstream checkpoint; the
 main downstream selection is SOP with ResNet-50 only. The campaign has **18 SAE
-fits**, **48 ImageNet E2 points** (15 shared with E1), and **36 sparse + 1 dense**
+fits**, **60 ImageNet E2 points** (15 shared with E1), and **48 sparse + 1 dense**
 downstream evaluations.
 HF backbone embeddings are reused. SAE weights remain fixed within each inference
 sweep. The shared fallback inference grid also uses 16/32/256 for ResNet-18 when

@@ -13,7 +13,7 @@ imagenet:
     ff2048: [8, 16, 32, 256]
     vit_b16: [12, 48]
   eval_k:                       # E2 inference budgets; E1 evaluates at train_k
-    ff2048: [16, 32, 256]
+    ff2048: [2, 16, 32, 256]
     vit_b16: [12, 48]
   e1: true
   e2: true
@@ -36,7 +36,7 @@ downstream:
     ff2048: [8, 16, 32, 256]
     vit_b16: [12, 48]
   eval_k:
-    ff2048: [16, 32, 256]
+    ff2048: [2, 16, 32, 256]
     vit_b16: [12, 48]
   mode: frozen
   revisions: {}

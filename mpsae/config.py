@@ -247,7 +247,7 @@ BACKBONE_ORDER = BRANCH1 + BRANCH2
 # Keep this shared by E2 and downstream defaults so legacy entry points do not
 # silently evaluate a different grid from the configured campaigns.
 INFERENCE_BUDGETS: Mapping[str, tuple[int, ...]] = {
-    "ff2048": (16, 32, 256),
+    "ff2048": (2, 16, 32, 256),
     "rn18": (16, 32, 256),
     "vit_b16": (12, 48),
 }

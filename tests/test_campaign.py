@@ -20,7 +20,7 @@ def test_default_campaign_is_source_training_plus_frozen_transfer(path):
     campaign = load_campaign(path)
     plan = campaign.plan()
     assert plan["source_cells"] == 18
-    assert plan["downstream_sparse_points"] == 36
+    assert plan["downstream_sparse_points"] == 48
     assert plan["downstream_dense_points"] == 1
     assert campaign.downstream["mode"] == "frozen"
     assert campaign.execution["precomputed_only"] is True
@@ -40,7 +40,7 @@ def test_retrieval_only_campaign_reuses_main_sources_without_imagenet_work(tmp_p
     assert retrieval.backbones == ("ff2048",)
     assert retrieval.downstream["datasets"] == ["sop"]
     assert retrieval.evaluation_options("sop") == main.evaluation_options("sop")
-    assert retrieval.budgets("downstream", "eval_k", "ff2048") == (16, 32, 256)
+    assert retrieval.budgets("downstream", "eval_k", "ff2048") == (2, 16, 32, 256)
     assert all(retrieval.imagenet[key] is False
                for key in ("enabled", "prepare", "e1", "e2", "linear_probe", "timing"))
     assert retrieval.execution["train_missing"] is False
@@ -48,7 +48,7 @@ def test_retrieval_only_campaign_reuses_main_sources_without_imagenet_work(tmp_p
     assert retrieval.execution["continue_on_error"] is False
     assert campaign_selection(retrieval) == (["sop"], ["ff2048"])
     assert (plan["source_cells"], plan["downstream_sparse_points"],
-            plan["downstream_dense_points"]) == (12, 36, 1)
+            plan["downstream_dense_points"]) == (12, 48, 1)
     assert plan["storage_estimate"]["imagenet_features_bytes"] == {}
     assert plan["storage_estimate"]["total_imagenet_features_bytes"] == 0
     assert plan["storage_estimate"]["active_writer_upper_bytes"] == 0
@@ -68,7 +68,7 @@ def test_dataset_backbone_selection_changes_plan_without_dropping_other_targets(
 
 @pytest.mark.parametrize("config", ["configs/thesis.yaml", "configs/precomputed.yaml"])
 @pytest.mark.parametrize("backbone,expected,training", [
-    ("ff2048", (16, 32, 256), (8, 16, 32, 256)),
+    ("ff2048", (2, 16, 32, 256), (8, 16, 32, 256)),
     ("vit_b16", (12, 48), (12, 48)),
 ])
 def test_campaigns_restrict_training_e2_and_downstream_to_requested_budgets(config, backbone, expected, training):
@@ -85,7 +85,7 @@ def test_campaigns_restrict_training_e2_and_downstream_to_requested_budgets(conf
 
 
 @pytest.mark.parametrize("backbone,expected", [
-    ("ff2048", (16, 32, 256)), ("rn18", (16, 32, 256)),
+    ("ff2048", (2, 16, 32, 256)), ("rn18", (16, 32, 256)),
     ("vit_b16", (12, 48)),
 ])
 def test_default_inference_selection_matches_all_evaluation_families(backbone, expected):
@@ -107,7 +107,7 @@ def test_new_source_models_are_evaluated_in_every_downstream_dataset():
                         and c.method == method}
             assert selected == expected
     assert sum(len(campaign.budgets("imagenet", "eval_k", c.backbone))
-               for c in campaign.source_cells()) == 48
+               for c in campaign.source_cells()) == 60
 
 
 @pytest.mark.parametrize("targets", [[], {"flowers102": ["rn18"]},

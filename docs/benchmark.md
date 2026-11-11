@@ -116,7 +116,7 @@ imagenet:
     ff2048: [8, 16, 32, 256]
     vit_b16: [12, 48]
   eval_k:                       # E2 inference budgets; E1 evaluates at train_k
-    ff2048: [16, 32, 256]
+    ff2048: [2, 16, 32, 256]
     vit_b16: [12, 48]
   e1: true
   e2: true
@@ -139,7 +139,7 @@ downstream:
     ff2048: [8, 16, 32, 256]
     vit_b16: [12, 48]
   eval_k:
-    ff2048: [16, 32, 256]
+    ff2048: [2, 16, 32, 256]
     vit_b16: [12, 48]
   mode: frozen
   revisions: {}                  # main is resolved once to an immutable commit
@@ -158,8 +158,8 @@ execution:
 
 `imagenet.train_k: null` means the selected backbones' registered training
 grids. A list restricts the source fits. `imagenet.eval_k` selects E2 inference
-budgets; `null` uses the shared ResNet grid (16/32/256) or ViT grid
-(3/12/48/96), falling back to the registered grid for other backbones. Both fields also accept
+budgets; `null` uses ResNet-50 (2/16/32/256), ResNet-18 (16/32/256), or ViT
+(12/48), falling back to the registered grid for other backbones. Both fields also accept
 a mapping from every selected backbone to its budgets. E1 uses its training K.
 `downstream.train_k` selects which
 ImageNet checkpoints are evaluated; `eval_k` changes their inference budget
@@ -170,11 +170,11 @@ part of fit identity and does not turn a capped fit into a full-fit checkpoint.
 
 The full `thesis.yaml` and `precomputed.yaml` campaigns select ResNet-50 training
 K = **8, 16, 32, 256** and ViT-B/16 training K = **12, 48**. All selected ResNet checkpoints use inference
-K = **16, 32, 256**, while each ViT checkpoint uses **12, 48**. These grids apply to
+K = **2, 16, 32, 256**, while each ViT checkpoint uses **12, 48**. These grids apply to
 ImageNet E2 and selected downstream conditions; downstream now selects SOP and
 ResNet-50 only. With CSR, CSRv2 and MPSAE and seed 1227 this is **18 source fits**,
-**48 E2 points** (15 reused from E1),
-and **36 sparse + 1 dense** SOP evaluation records. EuroSAT kNN is not selected.
+**60 E2 points** (15 reused from E1),
+and **48 sparse + 1 dense** SOP evaluation records. EuroSAT kNN is not selected.
 All selected training budgets use independent source fits, not sequential fine-tuning.
 ViT K=8 is no longer selected; compatible ResNet fits and selected ViT K=12/48 fits
 remain reusable. HF embedding bundles are shared across all these budgets.
@@ -214,7 +214,7 @@ bash all_in_one.sh --config configs/retrieval.yaml --skip-setup
 
 This selects ResNet-50, CSR/CSRv2/MPSAE and seed 1227. It requires **12 completed
 source checkpoints** at training K=8/16/32/256 and evaluates each at inference
-K=16/32/256, giving **36 sparse SOP records plus one dense diagnostic**.
+K=2/16/32/256, giving **48 sparse SOP records plus one dense diagnostic**.
 Backbones and SAEs remain frozen. `imagenet.enabled`, `e1`, `e2`, `linear_probe`
 and `timing` are false; `train_missing: false` prevents new fits. Thus the
 ImageNet linear probes and 2,000-round timing benchmark do not run.

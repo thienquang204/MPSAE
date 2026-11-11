@@ -46,7 +46,7 @@ def test_classifier_changes_do_not_change_training_cells_or_presets():
     assert original.source_cells() == changed.source_cells()
     assert original.resolved()["method_presets"] == changed.resolved()["method_presets"]
     assert original.plan()["source_cells"] == 18
-    assert original.plan()["downstream_sparse_points"] == 84
+    assert original.plan()["downstream_sparse_points"] == 108
 
 
 def _features():
