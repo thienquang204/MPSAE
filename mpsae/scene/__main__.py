@@ -16,7 +16,8 @@ def restore(config, *, repo, revision, prefix, cache_dir):
     commit = info.sha
     patterns = [f'{prefix}/runs/{cell.slug}/{name}' for cell in config.cells()
                 for name in ('checkpoint.pt', 'summary.json', 'config.json')]
-    patterns += [f'{prefix}/embeddings/{config.backbone}/*.json', f'{prefix}/embeddings/*.json']
+    patterns += [f'{prefix}/embeddings/{b}/*.json' for b in sorted({c.backbone for c in config.cells()})]
+    patterns += [f'{prefix}/embeddings/*.json']
     available = {entry.rfilename for entry in info.siblings}
     missing = [name for name in patterns if '*' not in name and name not in available]
     if missing:
@@ -79,6 +80,9 @@ def main():
         elif args.command == 'restore':
             result = restore(config, repo=args.repo, revision=args.revision, prefix=args.prefix,
                              cache_dir=str(Path(args.workspace) / 'hf_checkpoints'))
+        elif hasattr(config, 'groups'):
+            from .suite import run_suite
+            result = run_suite(config, args)
         elif args.command == 'bootstrap':
             from .server import bootstrap
             from ..io import exclusive_lock

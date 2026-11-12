@@ -21,7 +21,7 @@ def test_plan_no_training_and_expected_memory():
     assert SceneConfig(inference_k=(2, 8, 16)).plan()['evaluations'] == 10
 
 
-@pytest.mark.parametrize('kwargs', [dict(backbone='vit_b16'), dict(image_size=500),
+@pytest.mark.parametrize('kwargs', [dict(backbone='unsupported'), dict(image_size=500),
     dict(inference_k=(0,)), dict(inference_k=(8, 8)), dict(temperature=0),
     dict(memory_patches=12), dict(methods=('mpsaev2',)), dict(workers=-1)])
 def test_invalid_protocol(kwargs):

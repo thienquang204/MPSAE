@@ -31,7 +31,7 @@ experiments (including SOP) and repeated retrieval timing are disabled for now.
 
 Optional **spatial SAE evaluation** is available separately through
 `python -m mpsae.scene plan` and `python -m mpsae.scene run`. It loads existing
-ResNet-50 SAEs, uses Hugging Face PASCAL VOC masks, and compares dense and sparse
+ResNet-50/ViT/DINOv2/ConvNeXt SAEs, uses Hugging Face PASCAL VOC masks, and compares dense and sparse
 patch retrieval without training. See [the protocol and commands](docs/scene_evaluation.md)
 and `configs/scene_voc.yaml`. This is an adapted Hummingbird-style decoder,
 testing pooled-to-local feature transfer; it is not part of the main campaign.
@@ -44,7 +44,8 @@ bash scene_only.sh --setup-only
 bash scene_only.sh --workspace /workspace/scene-v1
 ```
 
-This restores the selected pretrained checkpoints and VOC automatically. Rerun
+The default runs 82 evaluations over four backbones using 12 pretrained SAEs,
+with zero new training. It restores the selected checkpoints and VOC automatically. Rerun
 the last command to resume; add `--publish` to back up completed reports to HF.
 No old server files or ImageNet download are required. See the scene guide for
 driver/Python requirements and alternate repository/revision options.

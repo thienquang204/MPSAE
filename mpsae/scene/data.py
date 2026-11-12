@@ -12,7 +12,8 @@ from ..benchmark.data import open_rgb
 from ..benchmark.extract import _network
 from ..config import BACKBONES
 from ..io import atomic_json, canonical_hash, read_json, sha256_file
-from .config import VERSION
+from .config import VERSION, STRIDES
+from .spatial import spatial_features, normalization, RECIPES, loading_spec
 from .core import label_distributions, resnet_spatial, sample_patches
 
 
@@ -83,8 +84,8 @@ def prepare(config, workspace, weights, *, device):
                 'memory_patches': config.memory_patches, 'seed': config.seed,
                 'precision': 'cuda_fp16_to_float32' if str(device).startswith('cuda') else 'cpu_float32',
                 'extraction_batch': config.extraction_batch,
-                'layer': 'layer4_pre_avgpool', 'stride': 32,
-                'normalize': [list(x) for x in BACKBONES[config.backbone].normalize],
+                'layer': RECIPES[config.backbone], 'stride': STRIDES[config.backbone],
+                'normalize': [list(x) for x in normalization(BACKBONES[config.backbone])],
                 'library_versions': library_versions(),
                 'geometry': 'square_bilinear_image_nearest_mask_no_crop', 'augmentation': 'none'}
     directory = workspace / 'features' / canonical_hash(identity)[:20]
@@ -112,10 +113,10 @@ def prepare(config, workspace, weights, *, device):
     if set(ids['train']) & set(ids['validation']):
         raise ValueError('support/query image IDs overlap')
 
-    spec = BACKBONES[config.backbone]
+    spec = loading_spec(config)
     network, _, observed = _network(spec, workspace / 'backbone_cache', torch.device(device), None, weights)
     network.eval().requires_grad_(False)
-    grid = (config.image_size//32,)*2
+    grid = (config.image_size//STRIDES[config.backbone],)*2
     files = []
     old_tf32 = torch.backends.cudnn.allow_tf32
     torch.backends.cudnn.allow_tf32 = False
@@ -123,17 +124,17 @@ def prepare(config, workspace, weights, *, device):
         for split, count in expected.items():
             folder = directory / split
             pending = [i for i in range(count) if not (folder / f'{i:05d}.npz').is_file()]
-            loader = DataLoader(ImageRows(data[split], pending, config.image_size, spec.normalize),
+            loader = DataLoader(ImageRows(data[split], pending, config.image_size, normalization(spec)),
                                 batch_size=config.extraction_batch, num_workers=config.workers,
                                 collate_fn=collate, shuffle=False, pin_memory=str(device).startswith('cuda'))
             amp = torch.autocast('cuda', dtype=torch.float16) if str(device).startswith('cuda') else nullcontext()
             with torch.inference_mode(), amp:
                 for positions, images, truths, scaled in loader:
-                    features = resnet_spatial(network, images.to(device)).float().cpu().numpy()
-                    if features.shape[1:] != (*grid, 2048) or not np.isfinite(features).all():
+                    features = spatial_features(network, images.to(device), config.backbone).float().cpu().numpy()
+                    if features.shape[1:] != (*grid, spec.dim) or not np.isfinite(features).all():
                         raise ValueError('unexpected/nonfinite spatial features')
                     for index, feature, truth, mask in zip(positions, features, truths, scaled):
-                        feature = feature.reshape(-1, 2048)
+                        feature = feature.reshape(-1, spec.dim)
                         if split == 'train':
                             labels = label_distributions(mask, grid)
                             chosen = sample_patches(labels, config.plan()['patches_per_support_image'],

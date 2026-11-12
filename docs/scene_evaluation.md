@@ -1,7 +1,7 @@
 # Frozen spatial SAE evaluation
 
-This opt-in module applies existing FF2048 ResNet-50 SAEs to local layer4
-features. It does not fit a backbone, an SAE, or a segmentation head. The main
+This opt-in module applies existing ResNet-50, ViT-B/16, DINOv2-S/14 and
+ConvNeXt-Tiny SAEs to local features. It does not fit a backbone, an SAE, or a segmentation head. The main
 ImageNet campaign and disabled fine-tuning campaign are unchanged.
 
 ## Plan and scientific interpretation
@@ -9,7 +9,7 @@ ImageNet campaign and disabled fine-tuning campaign are unchanged.
 1. Validate completed source fits and their original backbone weight provenance.
 2. Load VOC images/masks from a pinned Hugging Face revision. Extract the exact
    frozen backbone's spatial feature map before average pooling, once.
-3. Sample the same annotated support patches for every method. Reuse one bank
+3. Within each backbone, sample the same annotated support patches for every method. Reuse one bank
    and all query features across dense, CSR, CSRv2 and MPSAE evaluation.
 4. Apply each SAE directly to raw local features. Normalize only retrieval keys
    and queries. Sweep inference K without fitting another checkpoint.
@@ -24,7 +24,7 @@ temperature-weighted aggregation, and bilinear upsampling. Defaults use 30
 neighbors and temperature 0.02. SAE sparsity K and neighbor count are independent.
 
 This is an **adapted protocol**, not reproduction of the Hummingbird tables:
-native ResNet stride is 32, the bank is smaller, search is exact rather than
+spatial stride depends on the backbone, the bank is smaller, search is exact rather than
 ScaNN, and preprocessing uses a deterministic square resize without augmentation.
 The default standard VOC split also differs from augmented VOC training.
 Most importantly, the SAE was trained on pooled image features, not local
@@ -40,8 +40,8 @@ The default [shijli/voc2012](https://huggingface.co/datasets/shijli/voc2012)
 and disjoint across support/query splits. Validation labels are used only for
 scoring. Train masks construct the memory, not gradient updates.
 
-Images are bilinearly resized to 512x512; masks use nearest interpolation. The
-unmodified ResNet produces 16x16 spatial cells with 2,048 channels. Mask values
+Images are bilinearly resized to the configured resolution; masks use nearest
+interpolation. The spatial grid and feature width depend on the backbone. Mask values
 0..20 are classes (including background); 255 is ignored. Average one-hot class
 labels within each cell, excluding void pixels, then renormalize. Never average
 numeric class IDs. Sampling uses the paper's per-image class-frequency heuristic,
@@ -87,12 +87,12 @@ evaluation can be started together:
 bash scene_only.sh --setup --workspace /workspace/scene-v1
 ```
 
-The launcher calls `python -m mpsae.scene bootstrap`. It restores the three
+The launcher calls `python -m mpsae.scene bootstrap`. It restores the twelve
 selected completed fits from `quangnguyenopt/MPSAE`, validates their backbone
 provenance, downloads the backbone weights and VOC, extracts features, evaluates,
 and writes plots. You do not need the old workspace or any ImageNet downloads.
-All nine required source artifacts were confirmed in the Hub at revision
-`c22461f0585d60f2c4efc908a9c7230fb15ee1a6` during implementation. Use
+All 36 required source artifacts were confirmed in the Hub at revision
+`22aa69e63d565c238bf334a79fdf89ad3db7428d` during implementation. Use
 `--revision <commit>` to request that revision explicitly.
 
 Rerun the same command without `--setup` to resume. Source receipts pin the
@@ -115,7 +115,7 @@ It does not upload dataset caches, credentials, or images.
 `status.json` records the current/failed stage; `latest.json` points to the latest
 completed report. Project progress logs are in `logs/scene.log`. For long runs,
 use `tmux` so disconnecting SSH does not terminate the process. Allow roughly
-25 GiB free disk for environment installation, download caches and evaluation
+40 GiB free disk for environment installation, download caches and evaluation
 artifacts; actual peak depends on pip caching and source checkpoint sizes.
 
 ### Existing environment / manual stages
@@ -127,11 +127,32 @@ python -m mpsae.scene plan --config configs/scene_voc.yaml
 python -m mpsae.scene run --config configs/scene_voc.yaml --source-root work/direct-v1 --workspace work/scene-v1 --device cuda:0
 ```
 
-The default evaluates dense plus three K=8 source fits at inference K=8: four
-evaluations, zero training runs. Change `inference_k` to `[2, 8, 16, 32, 256]`
-for a larger sweep; `train_k` identifies which existing checkpoint is loaded.
-Only FF2048 is supported in this first adapter; ViT needs a separate validated
-patch-token adapter, including positional embeddings and token normalization.
+The default suite has 12 existing SAE checkpoints, 82 evaluations and zero new
+training runs. Each backbone runs sequentially and has its own dense baseline.
+
+| Backbone | Train K | Inference K | Image size | Grid |
+|---|---:|---|---:|---|
+| ResNet-50 | 8 | 2, 4, 8, 16, 32, 64, 128, 256 | 512 | 16x16 |
+| ViT-B/16 | 12 | 3, 12, 48, 96, 192, 384 | 448 | 28x28 |
+| DINOv2-S/14 | 12 | 3, 12, 48, 96, 192, 384 | 448 | 32x32 |
+| ConvNeXt-Tiny | 12 | 3, 12, 48, 96, 192, 384 | 448 | 14x14 |
+
+Edit the `experiments` list in `configs/scene_voc.yaml` to select groups or budgets.
+The original one-backbone K=8 configuration is preserved at
+`configs/archive/scene_voc_resnet50_k8.yaml`; the flat config format still works.
+`latest_suite.json` lists the report directories for a completed suite.
+
+ViT/DINOv2 use final normalized patch tokens with CLS/register tokens excluded.
+Their positional embeddings are interpolated by timm when loading at the scene
+resolution. ConvNeXt runs its original pre-logit head on each one-cell feature
+map so the local representation retains head normalization. This is a local
+adaptation of an image-level head; averaging these local vectors need not equal
+the original pooled vector. SAE checkpoints remain unchanged. DINO refers here
+specifically to the existing DINOv2-S/14 backbone, not original DINO.
+
+These are image-level SAE-to-spatial transfer tests. Different native grids and
+head semantics mean cross-backbone mIoU is not a controlled sparsification-only
+comparison: compare each SAE with its own dense spatial baseline first.
 
 To restore existing source fits from HF on another machine:
 
@@ -166,9 +187,9 @@ mIoU versus inference K (bars for a single K), and mIoU versus key storage, with
 no published reference curves. Key storage excludes label values and runtime
 buffers; search time is not end-to-end latency or a throughput benchmark.
 
-The default uses at most 44 patches per support image: 64,416 total before
+Each default backbone uses at most 44 patches per support image: 64,416 total before
 all-void exclusions. Dense keys occupy about 503 MiB; K=8 sparse keys about
-3.9 MiB (int32 indices + float32 values). Raw spatial caches total about 3.3 GiB
+3.9 MiB (int32 indices + float32 values). The ResNet raw spatial cache totals about 3.3 GiB
 plus labels/masks. Search expands only chunks of compact codes; it does not
 allocate a full bank-by-8,192 dense latent matrix or all-query similarity matrix.
 Extraction batch size is independent of SAE training batch size. Reduce

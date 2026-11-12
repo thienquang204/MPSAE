@@ -15,6 +15,8 @@ from .data import prepare, support_bank
 
 
 def source_records(config, source_root):
+    if hasattr(config, 'groups'):
+        return [record for group in config.groups for record in source_records(group, source_root)]
     records = [checkpoint_record(cell, Path(source_root)) for cell in config.cells()]
     if any(r['backbone_weights'] != records[0]['backbone_weights'] for r in records):
         raise ValueError('all compared methods must use the exact same backbone weights')
