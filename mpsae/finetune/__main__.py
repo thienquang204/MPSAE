@@ -1,4 +1,4 @@
-"""python -m mpsae.finetune --config configs/finetune.yaml plan|run|report"""
+"""Joint training, reports, and evaluation-only transfer of saved checkpoints."""
 import argparse
 import json
 from pathlib import Path
@@ -8,7 +8,7 @@ from .config import load_config
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Additional supervised backbone + SAE fine-tuning")
-    parser.add_argument("command", choices=("plan", "run", "report"))
+    parser.add_argument("command", choices=("plan", "run", "report", "transfer", "transfer-report"))
     parser.add_argument("--config", default="configs/finetune.yaml")
     parser.add_argument("--workspace", default="work")
     parser.add_argument("--source-root", help="Completed frozen fits and provenance; default work/direct-v1")
@@ -28,6 +28,25 @@ def main(argv=None):
     from ..io import read_json
     from .run import output_root, run, write_report
     load_dotenv(Path(".env"))
+    if args.command in ("transfer", "transfer-report"):
+        from .transfer import run_transfer, report
+        if args.backup:
+            parser.error("--backup is supported by run; transfer commands write local results only")
+        if args.command == "transfer":
+            result = run_transfer(config, args.workspace, device=args.device, workers=args.workers,
+                extract_batch=args.extract_batch, smoke=args.smoke)
+        else:
+            root = output_root(config, args.workspace, args.smoke)
+            path = root / "campaigns" / config.name / config.plan()["plan_id"] / "transfer.json"
+            catalog = read_json(path)
+            if catalog is None:
+                raise FileNotFoundError("no transfer results for this plan; run transfer first")
+            result = report(config, root, catalog["records"], smoke=args.smoke)
+        print(json.dumps({"complete": result["complete"], "scientific": result["scientific"],
+                          "reports": result["out_dir"], "counts": result["counts"]}, indent=2))
+        if not result["complete"]:
+            raise RuntimeError("transfer evaluation/report is incomplete; inspect its manifest")
+        return
     if args.command == "report":
         root = output_root(config, args.workspace, args.smoke)
         catalog = read_json(root / "campaigns" / config.name / config.plan()["plan_id"] / "catalog.json")

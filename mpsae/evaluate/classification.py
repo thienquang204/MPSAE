@@ -44,14 +44,16 @@ def evaluate_knn(gallery: Any, gallery_labels: Any, queries: Any, query_labels: 
                  dim: int, device, gallery_ids=None, query_ids=None,
                  n_neighbors: Sequence[int] = (1, 20), temperature: float = 0.07,
                  gallery_chunk: int = 4096, query_block: int = 512,
-                 normalize: bool = False) -> dict[str, Any]:
-    """Classify queries using a disjoint, labelled support set.
+                 normalize: bool = False, exclude_self: bool = False) -> dict[str, Any]:
+    """Classify queries using labelled support, optionally leaving each query out.
 
     ``normalize=False`` expects already L2-normalized codes, as returned by
     ``encode_split``. Dense backbone embeddings use ``normalize=True``.
     Labels are used only for voting/scoring, never representation fitting.
     Metrics are fractions; top5 follows DINO's min(5, n_neighbors) convention,
     additionally capped by the available class vocabulary.
+    ``exclude_self=True`` requires sample IDs and masks matching gallery IDs;
+    otherwise support and query IDs must be disjoint.
     """
     import numpy as np
     import torch
@@ -67,13 +69,15 @@ def evaluate_knn(gallery: Any, gallery_labels: Any, queries: Any, query_labels: 
     lookup = {label: index for index, label in enumerate(classes)}
     if not set(truth) <= set(classes):
         raise ValueError("query labels must be covered by support classes")
-    if neighbors[-1] > len(labels):
+    if neighbors[-1] > len(labels) - int(exclude_self):
         raise ValueError("n_neighbors exceeds the number of support samples")
     gids = _ids(gallery_ids, len(labels), name="gallery_ids")
     qids = _ids(query_ids, len(truth), name="query_ids")
     if (gids is None) != (qids is None):
         raise ValueError("supply both support and query IDs, or neither")
-    if gids is not None and set(gids) & set(qids):
+    if exclude_self and (gids is None or qids is None):
+        raise ValueError("leave-one-out kNN requires support and query IDs")
+    if not exclude_self and gids is not None and set(gids) & set(qids):
         raise ValueError("support and query sample IDs overlap; classification needs disjoint splits")
     device = torch.device(device)
     gs = CodeSource(gallery, dim=dim, device=device, normalize=normalize)
@@ -87,7 +91,7 @@ def evaluate_knn(gallery: Any, gallery_labels: Any, queries: Any, query_labels: 
     scores, positions, seconds = exact_topk(
         gallery, queries, dim=dim, device=device, depth=neighbors[-1],
         gallery_ids=gids, query_ids=qids, gallery_chunk=gallery_chunk,
-        query_block=query_block, normalize=normalize, progress_stage="DINO kNN")
+        query_block=query_block, normalize=normalize, exclude_self=exclude_self, progress_stage="DINO kNN")
     if np.any(positions < 0):
         raise RuntimeError("kNN search returned fewer support neighbours than requested")
 
@@ -144,6 +148,7 @@ def evaluate_knn(gallery: Any, gallery_labels: Any, queries: Any, query_labels: 
                        f"knn_{n}_balanced_accuracy": float((tp[observed] / true_counts[observed]).mean()),
                        f"knn_{n}_macro_f1": float((2 * tp[f1_classes] / f1_denominator[f1_classes]).mean())})
     result.update(units="fraction", protocol_version=PROTOCOL_VERSION, backend=BACKEND,
+                  exclude_self=bool(exclude_self),
                   reference=REFERENCE, n_neighbors=list(neighbors), temperature=temperature,
                   vote_rule=VOTE_RULE, tie_rule=TIE_RULE, class_tie_rule=CLASS_TIE_RULE,
                   empty_query_policy=EMPTY_QUERY_POLICY, empty_queries=int(empty_count),

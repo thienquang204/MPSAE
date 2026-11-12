@@ -110,6 +110,10 @@ def write_report(config, root, catalog, failures):
     for regime, key in (("joint", "imagenet"), ("frozen", "frozen")):
         reports[regime] = build_all(root / ("baseline" if regime == "frozen" else "") / "runs",
             output / regime, records=catalog[key], seeds=config.campaign.seeds, dense_references={})
+    if config.transfer["enabled"]:
+        from .transfer import report as transfer_report
+        reports["transfer"] = transfer_report(config, root, catalog.get("evaluations", []),
+            smoke=not catalog["scientific"], failures=failures)
     def points(records):
         result = {}
         for record in records:
@@ -129,7 +133,8 @@ def write_report(config, root, catalog, failures):
                    if "Error:" in reason or reason.startswith(("figures:", "all figures:"))]
     manifest = {"regime": "supervised_joint_finetune", "plan": config.plan(),
         "complete": not failures and not plot_errors and len(catalog["imagenet"]) == expected
-                    and len(catalog["frozen"]) == expected,
+                    and len(catalog["frozen"]) == expected
+                    and (not config.transfer["enabled"] or reports["transfer"]["complete"]),
         "scientific": catalog["scientific"], "failures": failures, "plot_errors": plot_errors,
         "reports": reports, "comparison": str(output / "paired_1nn.csv")}
     atomic_json(output / "manifest.json", manifest)
@@ -170,6 +175,7 @@ def run(config, workspace, *, source_root=None, image_root=None, device="cuda:0"
         catalog = {"plan_id": config.plan()["plan_id"], "imagenet": [], "frozen": [], "evaluations": [],
                    "scientific": not smoke}
         failures = []
+        transfer_datasets = {}
         session = None
         if backup and not smoke:
             from ..remote import RemoteSession
@@ -262,10 +268,20 @@ def run(config, workspace, *, source_root=None, image_root=None, device="cuda:0"
                                 "stage": "joint", "checkpoint_sha256": checkpoint_id},
                             batch_size=extract_batch, workers=workers, device=target,
                             precision=options["precision"])
-                        # Search and probes consume cached features plus the SAE.
-                        # The image backbone is no longer needed on the device.
-                        del student
                         try:
+                            if config.transfer["enabled"]:
+                                from .transfer import evaluate_cell
+                                def persist_transfer(record):
+                                    catalog["evaluations"].append(record)
+                                    atomic_json(catalog_path, catalog)
+                                    atomic_json(catalog_path.parent / "transfer.json",
+                                        {"records": catalog["evaluations"], "scientific": not smoke})
+                                evaluate_cell(config, root, cell, spec, student, sae, eval_transform,
+                                    preprocessing, summary, device=device, workers=workers,
+                                    extract_batch=extract_batch, data_cache=transfer_datasets,
+                                    smoke=smoke, on_result=persist_transfer)
+                            # Search and probes consume cached features plus the SAE.
+                            del student
                             signature = canonical_hash({"checkpoint": checkpoint_id, "features": bundle.identity})
                             record = evaluate_model(cell, spec, sae, bundle, root, config, signature=signature,
                                 summary=summary, device=device, smoke=smoke)

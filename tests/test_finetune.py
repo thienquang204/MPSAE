@@ -20,6 +20,8 @@ def test_pilot_is_nine_additional_fits_with_existing_probe_selection():
     assert plan["imagenet_unique_points"] == plan["frozen_control_1nn_points"] == 51
     assert plan["imagenet_probe_points"] == 24
     assert plan["downstream_sparse_points"] == 0
+    assert plan["transfer_knn_points"] == plan["transfer_retrieval_points"] == 102
+    assert plan["transfer_records"] == 204
     assert not config.campaign.imagenet["timing"]
     from mpsae.config import training_preset
     for cell in config.cells():
@@ -215,12 +217,19 @@ def test_all_nine_smoke_cells_are_sparse_and_resume_without_training(tmp_path, m
     torch = pytest.importorskip("torch")
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA required")
+    # Evaluation caches contain two full hashes; keep Windows fixture paths short.
+    tmp_path = tmp_path.parent / f"j_{device}"
+    tmp_path.mkdir()
     from mpsae.finetune import run as runner, train
     from mpsae.report import figures
     from mpsae.benchmark import extract
     # Plot rendering is exercised by the standalone smoke command; this test
     # checks actual neural updates/extraction/search and disk cache reuse.
     monkeypatch.setattr(figures, "build_all", lambda *args, **kwargs: {"skipped": []})
+    from mpsae.benchmark import report as transfer_report
+    monkeypatch.setattr(transfer_report, "_render_figures", lambda *args, **kwargs: ({}, [], {}))
+    from mpsae.finetune import transfer
+    monkeypatch.setattr(transfer, "plot_overview", lambda *args, **kwargs: {})
     monkeypatch.setattr(extract, "_network", lambda *args, **kwargs: pytest.fail("smoke downloaded weights"))
     config = load_config("configs/finetune.yaml")
     result = runner.run(config, tmp_path, device=device, workers=0, smoke=True)
@@ -228,6 +237,11 @@ def test_all_nine_smoke_cells_are_sparse_and_resume_without_training(tmp_path, m
     root = runner.output_root(config, tmp_path, True)
     catalog = read_json(root / "campaigns" / config.name / config.plan()["plan_id"] / "catalog.json")
     assert len(catalog["imagenet"]) == len(catalog["frozen"]) == 9
+    assert len(catalog["evaluations"]) == 72
+    for record in catalog["evaluations"]:
+        assert record["mode"] == "joint_finetuned" and not record["training_on_target"]
+        if record["dataset"] == "sop":
+            assert record["metrics"]["exclude_self"]
     for record in catalog["imagenet"]:
         for point in record["e2"]["points"]:
             assert 0 <= point["nnz_mean"] <= point["k"]
@@ -238,6 +252,19 @@ def test_all_nine_smoke_cells_are_sparse_and_resume_without_training(tmp_path, m
     from mpsae import runs
     monkeypatch.setattr(runs, "evaluate_at", lambda *args, **kwargs: pytest.fail("resume recomputed metrics"))
     assert runner.run(config, tmp_path, device=device, workers=0, smoke=True)["complete"]
+    assert sha256_file(checkpoint) == before
+    from mpsae.finetune.transfer import run_transfer
+    monkeypatch.setattr(train, "fit_joint", lambda *args, **kwargs: pytest.fail("transfer attempted training"))
+    # A different extraction batch bypasses feature caches, exercising restored
+    # checkpoint tensors rather than masking an incorrect load with cached results.
+    assert run_transfer(config, tmp_path, device=device, workers=0, extract_batch=7, smoke=True)["complete"]
+    fresh = read_json(root / "campaigns" / config.name / config.plan()["plan_id"] / "transfer.json")
+    def scores(records):
+        return {(r["dataset"], r["backbone"], r["method"], r["eval_k"], r["task"]):
+                {k: v for k, v in r["metrics"].items()
+                 if k in ("knn_1_top1", "knn_20_top1", "recall_at_1", "map_at_r")}
+                for r in records}
+    assert scores(fresh["records"]) == scores(catalog["evaluations"])
     assert sha256_file(checkpoint) == before
     assert not (tmp_path / "direct-v1").exists()
 

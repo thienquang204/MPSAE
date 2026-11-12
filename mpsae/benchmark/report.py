@@ -310,6 +310,8 @@ def _panel_scope(row: Mapping[str, Any]) -> tuple[str, ...]:
 
 def _scope_label(scope: tuple[str, ...]) -> str:
     dataset = scope[0]
+    if dataset == "sop" and len(scope) > 3 and scope[3] == "knn_classification":
+        return "SOP (LOO)"
     return {"eurosat": "EuroSAT", "sop": "SOP", "flowers102": "Flowers102"}.get(dataset, dataset)
 
 
@@ -538,6 +540,8 @@ def _draw_classification(rows, out_dir, name, title, *, kind="accuracy", x="eval
                 + f"{title}. DINO weighted kNN classification on frozen sparse codes. "
                 "The neighbor count in each panel is independent of the embedding's inference K. "
                 "Votes sum exp(cosine similarity / temperature) by support class. "
+                "SOP (LOO) uses test-product voting with each query image excluded; "
+                "this is not train-to-test product classification. "
                 "All inference budgets use the same checkpoint at the training K in the title. "
                 + ("Differences are paired within training seed and identical classifier settings. "
                    if delta else "")

@@ -94,8 +94,81 @@ are extracted once per backbone and shared across its three methods. This
 avoids attributing a preprocessing change in older cached features to training.
 `paired_1nn.csv` compares these matched controls against the fine-tuned models.
 Frozen-control probes are not added by this pilot; the paired comparison is
-1-NN only. Downstream, SOP and repeated retrieval timing remain disabled.
+1-NN only. Repeated retrieval timing remains disabled. The frozen-backbone
+main campaign still omits downstream tasks; the nine joint fits now also get
+the EuroSAT/SOP transfer evaluation below.
 Reports contain experiment results without published reference curves.
+
+## EuroSAT and SOP transfer on the nine joint models
+
+`transfer` in `configs/finetune.yaml` enables both datasets for **all nine
+fine-tuned backbone + SAE pairs**, with the same inference-K sweeps in the
+table above. No new model is trained on EuroSAT or SOP. The ImageNet classifier
+head is discarded; both voting and retrieval use the L2-normalized sparse
+code with at most inference K nonzero entries.
+
+| Dataset | Support/gallery | Queries | Weighted kNN | Retrieval relevance |
+| --- | --- | --- | --- | --- |
+| EuroSAT (`mteb/eurosat-rgb`) | Train: 16,200 | Test: 5,400 | Train-label support to test queries | Same land-use class |
+| SOP (`nyris/stanford-online-products-v1`) | Test: 60,502 | Same test images | Leave-one-out product-ID voting | Same product, excluding query image |
+
+SOP train/test product IDs are disjoint. Its weighted kNN score is explicitly
+labelled **SOP (LOO)**, a within-test-gallery neighbourhood diagnostic, not
+train-to-test product classification. Each query's own image is excluded by
+sample ID in both SOP tasks. Standard SOP retrieval remains a separate result.
+EuroSAT retrieval is same-class image retrieval, not instance retrieval.
+
+The DINO vote is `sum(exp(cosine(z_query, z_neighbor) / T))` per class, with
+**1 and 20 neighbours, T=0.07**. Neighbour count is independent of sparsity K.
+One neighbour search supplies both vote counts. Tables include top-1, top-5,
+balanced accuracy and macro-F1. Retrieval reports Recall@1/10/100 and mAP@R.
+Empty sparse queries count as misses; ties follow the documented deterministic
+ranking and class order. Neither task updates model parameters using target labels.
+
+There are **102 weighted-kNN evaluation points + 102 retrieval points = 204
+records**: 30 points per task for ResNet-50, 36 for ConvNeXt-Tiny and 36 for
+ViT-B/16. Each classification record includes both neighbour counts. This adds
+zero training fits and preserves the existing ImageNet evaluation selection.
+
+Completed joint checkpoints can be evaluated independently, without reloading
+ImageNet images or standalone source SAE files:
+
+```bash
+python -m mpsae.finetune transfer --config configs/finetune.yaml \
+  --workspace work --device cuda:0 --workers 8 --extract-batch 64
+```
+
+All nine completed joint checkpoint manifests are checked before dataset
+downloads. The saved fine-tuned backbone and SAE weights are restored together.
+The backbone architecture still needs its pinned pretrained metadata/weights
+in cache (downloaded if absent), then the checkpoint's backbone state is loaded.
+The existing Hugging Face loader pins dataset revisions and reuses its cache.
+Each joint checkpoint gets its own resumable memory-mapped target features;
+original frozen-backbone embeddings cannot stand in for a changed backbone.
+Features are shared across inference K and both evaluation tasks. The backbone
+is offloaded to CPU during sparse search. Completed metrics are reused on rerun;
+changing K or classifier settings changes evaluation identities without retraining.
+Sparse encoding/search currently run separately for classification and retrieval.
+
+New `run` executions perform these transfer evaluations automatically after
+each joint fit. Existing completed fits need only the `transfer` command above.
+Transfer-only commands write local results; `run --backup` retains the existing
+optional private backup behavior.
+
+Results are in `reports/<plan_id>/transfer/`, with classification, retrieval,
+paired-method and raw evaluation CSV/JSON tables. `figures/transfer_*` places
+weighted 20-NN accuracy, Recall@1 and mAP@R side by side for EuroSAT and SOP,
+with one fixed train-K checkpoint per curve. Additional figures show quality
+against inference K, measured nonzeros and code storage, plus method differences.
+Figures are PDF and PNG with short labels; no published reference curves are
+added. A single seed is not a statistical significance test. Search-time plots
+show measured evaluation search time, not a repeated inference-latency benchmark.
+
+To regenerate these plots without model loading or dataset access:
+
+```bash
+python -m mpsae.finetune transfer-report --config configs/finetune.yaml --workspace work
+```
 
 ## Run on the server
 

@@ -168,11 +168,15 @@ def classifier_protocol(features, knn=None) -> dict[str, Any]:
                                            EMPTY_QUERY_POLICY, REFERENCE)
     from ..evaluate.ranking import TIE_RULE
 
-    if (features.exclude_self or features.gallery.name != "train"
+    sop_leave_one_out = (features.name == "sop" and features.exclude_self
+                        and features.gallery.name == features.query.name == "test"
+                        and list(features.gallery.ids) == list(features.query.ids))
+    if not sop_leave_one_out and (features.exclude_self or features.gallery.name != "train"
             or features.query.name == features.gallery.name or features.name == "sop"):
         raise ValueError("kNN classification requires train support and a separate query split; "
                          "SOP keeps its product retrieval protocol")
     return {"name": "dino_weighted_knn", **knn_settings(knn),
+            **({"evaluation": "sop_test_product_leave_one_out", "exclude_self": True} if sop_leave_one_out else {}),
             "metric_version": PROTOCOL_VERSION, "vote_rule": VOTE_RULE,
             "tie_rule": TIE_RULE, "class_tie_rule": CLASS_TIE_RULE,
             "empty_query_policy": EMPTY_QUERY_POLICY, "normalization": "l2", "reference": REFERENCE}
@@ -243,7 +247,7 @@ def evaluate_point(features, spec, root: Path, *, cell: Cell | None = None,
                     from ..evaluate.classification import evaluate_knn
 
                     return evaluate_knn(gallery, features.gallery.labels, queries, features.query.labels,
-                                        **arguments, **knn_settings(knn))
+                                        **arguments, **knn_settings(knn), exclude_self=features.exclude_self)
                 return evaluate_retrieval(gallery, features.gallery.labels, queries, features.query.labels,
                                           exclude_self=features.exclude_self, **arguments)
 

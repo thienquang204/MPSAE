@@ -13,12 +13,15 @@ DEFAULTS = dict(epochs="source", batch_size="source", backbone_lr="source", sae_
                 adam_eps="source", adam_betas="source", drop_last=False, ce_weight=1.0,
                 method_weight=1.0, grad_clip=1.0, precision="bf16",
                 freeze_bn_stats=True, checkpoint_every=100, log_every=10)
+TRANSFER_DEFAULTS = dict(enabled=False, datasets=["eurosat", "sop"],
+                        knn={"n_neighbors": [1, 20], "temperature": 0.07}, revisions={})
 
 
 @dataclass(frozen=True)
 class FineTuneCampaign:
     campaign: Campaign
     training: dict = field(default_factory=lambda: dict(DEFAULTS))
+    transfer: dict = field(default_factory=lambda: dict(TRANSFER_DEFAULTS))
 
     @property
     def name(self):
@@ -44,6 +47,7 @@ class FineTuneCampaign:
     def resolved(self):
         return {"format": VERSION, "campaign": self.campaign.resolved(),
                 "finetune": self.training,
+                "transfer": self.transfer,
                 "resolved_training": {c.slug: self.training_options(c) for c in self.cells()},
                 "objective": {"classification": "CE(head(L2_normalize(z_K)), y)",
                     "reconstruction_target": "frozen original backbone, same augmented image",
@@ -56,9 +60,14 @@ class FineTuneCampaign:
 
     def plan(self):
         base = self.campaign.plan()
+        transfer_points = (sum(len(self.campaign.budgets("imagenet", "eval_k", c.backbone))
+                               for c in self.cells()) * len(self.transfer["datasets"])
+                           if self.transfer["enabled"] else 0)
         return {**base, "plan_id": canonical_hash(self.resolved()), "config": self.resolved(),
                 "mode": "supervised_joint_finetune", "regime": "supervised_joint_finetune",
                 "additional_fits": len(self.cells()),
+                "transfer_knn_points": transfer_points, "transfer_retrieval_points": transfer_points,
+                "transfer_records": 2 * transfer_points,
                 "frozen_control_1nn_points": base["imagenet_unique_points"],
                 "source_checkpoints_required": [c.slug for c in self.cells()]}
 
@@ -70,6 +79,18 @@ def load_config(path):
         raise ValueError("fine-tuning config must be a mapping")
     payload = dict(payload)
     training = _section(payload.pop("finetune", {}), DEFAULTS, "finetune")
+    transfer = _section(payload.pop("transfer", {}), TRANSFER_DEFAULTS, "transfer")
+    from ..benchmark.config import knn_settings
+    transfer["knn"] = knn_settings(transfer["knn"])
+    if (not isinstance(transfer["datasets"], list) or not transfer["datasets"]
+            or any(not isinstance(name, str) for name in transfer["datasets"])
+            or len(set(transfer["datasets"])) != len(transfer["datasets"])
+            or set(transfer["datasets"]) - {"eurosat", "sop"}):
+        raise ValueError("transfer.datasets must select eurosat and/or sop")
+    if (not isinstance(transfer["revisions"], dict)
+            or set(transfer["revisions"]) - set(transfer["datasets"])
+            or any(not isinstance(v, str) or not v.strip() for v in transfer["revisions"].values())):
+        raise ValueError("invalid transfer.revisions")
     campaign = Campaign.from_mapping(payload)
     if (campaign.downstream["enabled"] or not campaign.imagenet["enabled"]
             or not campaign.imagenet["e1"] or not campaign.imagenet["e2"]):
@@ -99,4 +120,4 @@ def load_config(path):
         raise ValueError("finetune.precision must be bf16 or float32")
     if campaign.execution["max_steps"]:
         raise ValueError("use --smoke for capped synthetic work; scientific fine-tuning uses full epochs")
-    return FineTuneCampaign(campaign, training)
+    return FineTuneCampaign(campaign, training, transfer)
