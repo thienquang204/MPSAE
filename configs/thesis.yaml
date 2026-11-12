@@ -2,7 +2,7 @@
 # Precomputed embeddings; source training recipes remain in mpsae/config.py.
 # No downstream evaluation or repeated retrieval timing in this campaign.
 name: thesis
-backbones: [ff2048, vit_b16, convnext_tiny, rn18, dinov2_vits14]
+backbones: [ff2048, vit_b16, convnext_tiny, dinov2_vits14]
 methods: [csr, csrv2, mpsae]
 seeds: [1227]
 imagenet:
@@ -12,13 +12,11 @@ imagenet:
     ff2048: [8, 16, 32, 256]
     vit_b16: [12, 48, 192]
     convnext_tiny: [12, 48, 192]
-    rn18: [8, 32, 128]
     dinov2_vits14: [12, 48, 192]
   eval_k:                       # fixed checkpoint, inference sweep; E1 also measures train_k
-    ff2048: [2, 16, 32, 256]
+    ff2048: [2, 8, 16, 32, 256]
     vit_b16: [3, 12, 48, 96, 192, 384]
     convnext_tiny: [3, 12, 48, 96, 192, 384]
-    rn18: [2, 8, 16, 32, 64, 128, 256]
     dinov2_vits14: [3, 12, 48, 96, 192, 384]
   e1: true
   e2: true
@@ -27,7 +25,6 @@ imagenet:
     ff2048: [2, 16, 32, 256]
     vit_b16: [3, 48, 96, 384]
     convnext_tiny: []            # 1-NN only
-    rn18: []                     # 1-NN only
     dinov2_vits14: []            # 1-NN only
   timing: false
   timing_warmup: 5              # short timing protocol, if enabled

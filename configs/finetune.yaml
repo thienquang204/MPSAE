@@ -1,0 +1,45 @@
+# Additional supervised joint fine-tuning; main frozen campaign is unchanged.
+name: finetune
+backbones: [ff2048, convnext_tiny, vit_b16]
+methods: [csr, csrv2, mpsae]
+seeds: [1227]
+imagenet:
+  enabled: true
+  prepare: false
+  train_k:
+    ff2048: [8]
+    convnext_tiny: [12]
+    vit_b16: [12]
+  eval_k:
+    ff2048: [2, 8, 16, 32, 256]
+    convnext_tiny: [3, 12, 48, 96, 192, 384]
+    vit_b16: [3, 12, 48, 96, 192, 384]
+  e1: true
+  e2: true
+  linear_probe: true
+  probe_k:
+    ff2048: [2, 16, 32, 256]
+    convnext_tiny: []
+    vit_b16: [3, 48, 96, 384]
+  timing: false
+  timing_warmup: 5
+  timing_rounds: 5
+downstream:
+  enabled: false
+execution:
+  retain_codes: false
+  max_steps: 0
+finetune:
+  epochs: 3
+  batch_size: 16
+  backbone_lr: 0.00001
+  sae_lr: 0.00001
+  classifier_lr: 0.001
+  weight_decay: 0.0001
+  ce_weight: 1.0
+  method_weight: 1.0
+  grad_clip: 1.0
+  precision: bf16
+  freeze_bn_stats: true
+  checkpoint_every: 100
+  log_every: 10

@@ -1,7 +1,7 @@
 # ImageNet benchmarks and optional frozen transfer
 
 The main campaign evaluates ImageNet sparse embeddings from ResNet-50,
-ViT-B/16, ConvNeXt-Tiny, ResNet-18 and DINOv2-S/14. Every selected point measures 1-NN;
+ViT-B/16, ConvNeXt-Tiny and DINOv2-S/14. Every selected point measures 1-NN;
 only the selected ResNet-50 and ViT inference budgets fit linear probes.
 All downstream experiments and repeated retrieval timing are disabled.
 The target protocols documented below remain available for explicit future
@@ -24,7 +24,7 @@ with `bash all_in_one.sh --sync-only`. A synthetic rehearsal via
 `bash all_in_one.sh --smoke` does not write to either service.
 
 The default campaign downloads or reuses five ImageNet embedding bundles:
-`ff2048`, `vit_b16`, `convnext_tiny`, `rn18`, `dinov2_vits14`. No downstream bundles are selected.
+`ff2048`, `vit_b16`, `convnext_tiny`, `dinov2_vits14`. No downstream bundles are selected.
 No raw image download or backbone extraction runs with `precomputed_only: true`.
 
 Direct `python -m mpsae --config ...` commands below run locally. Automatic
@@ -100,7 +100,7 @@ updated before running.
 # Precomputed embeddings; source training recipes remain in mpsae/config.py.
 # No downstream evaluation or repeated retrieval timing in this campaign.
 name: thesis
-backbones: [ff2048, vit_b16, convnext_tiny, rn18, dinov2_vits14]
+backbones: [ff2048, vit_b16, convnext_tiny, dinov2_vits14]
 methods: [csr, csrv2, mpsae]
 seeds: [1227]
 imagenet:
@@ -110,13 +110,11 @@ imagenet:
     ff2048: [8, 16, 32, 256]
     vit_b16: [12, 48, 192]
     convnext_tiny: [12, 48, 192]
-    rn18: [8, 32, 128]
     dinov2_vits14: [12, 48, 192]
   eval_k:                       # fixed checkpoint, inference sweep; E1 also measures train_k
-    ff2048: [2, 16, 32, 256]
+    ff2048: [2, 8, 16, 32, 256]
     vit_b16: [3, 12, 48, 96, 192, 384]
     convnext_tiny: [3, 12, 48, 96, 192, 384]
-    rn18: [2, 8, 16, 32, 64, 128, 256]
     dinov2_vits14: [3, 12, 48, 96, 192, 384]
   e1: true
   e2: true
@@ -125,7 +123,6 @@ imagenet:
     ff2048: [2, 16, 32, 256]
     vit_b16: [3, 48, 96, 384]
     convnext_tiny: []            # 1-NN only
-    rn18: []                     # 1-NN only
     dinov2_vits14: []            # 1-NN only
   timing: false
   timing_warmup: 5              # short timing protocol, if enabled
@@ -154,18 +151,17 @@ identity and cannot be mistaken for a completed full training schedule.
 
 | Backbone | Training K | Inference K (1-NN) | Linear-probe inference K |
 |---|---|---|---|
-| ResNet-50 (`ff2048`) | 8, 16, 32, 256 | 2, 16, 32, 256 | 2, 16, 32, 256 |
+| ResNet-50 (`ff2048`) | 8, 16, 32, 256 | 2, 8, 16, 32, 256 | 2, 16, 32, 256 |
 | ViT-B/16 (`vit_b16`) | 12, 48, 192 | 3, 12, 48, 96, 192, 384 | 3, 48, 96, 384 |
 | ConvNeXt-Tiny (`convnext_tiny`) | 12, 48, 192 | 3, 12, 48, 96, 192, 384 | None |
-| ResNet-18 (`rn18`) | 8, 32, 128 | 2, 8, 16, 32, 64, 128, 256 | None |
 | DINOv2-S/14 (`dinov2_vits14`) | 12, 48, 192 | 3, 12, 48, 96, 192, 384 | None |
 
-With CSR, CSRv2, MPSAE and seed 1227, this selects **48 SAE fits**, **273 E2
-points** (45 shared with E1), **276 unique sparse 1-NN conditions**, and **84
+With CSR, CSRv2, MPSAE and seed 1227, this selects **39 SAE fits**, **222 E2
+points** (39 shared with E1), **222 unique sparse 1-NN conditions**, and **84
 unique linear probes**. The probes are part of those evaluated conditions,
 not additional SAE fits. Existing compatible fits and metrics are reused;
-DINOv2 adds 9 SAE fits to the previous 39-fit selection. These are 3 methods
-across 16 backbone/training-K pairs, with one seed. Backbone networks stay
+ResNet-18 is excluded from the active campaign. These are 3 methods
+across 13 backbone/training-K pairs, with one seed. Backbone networks stay
 frozen; existing HF embeddings are reused. Linear classifiers add 84 fits
 only where requested, independently of the SAE count.
 

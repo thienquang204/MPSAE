@@ -19,11 +19,11 @@ from mpsae.config import Cell
 def test_default_campaign_is_imagenet_only_with_selective_probes(path):
     campaign = load_campaign(path)
     plan = campaign.plan()
-    assert plan["source_cells"] == 48
-    assert plan["imagenet_e1_points"] == 48
-    assert plan["imagenet_e2_points"] == 273
-    assert plan["imagenet_shared_points"] == 45
-    assert plan["imagenet_unique_points"] == 276
+    assert plan["source_cells"] == 39
+    assert plan["imagenet_e1_points"] == 39
+    assert plan["imagenet_e2_points"] == 222
+    assert plan["imagenet_shared_points"] == 39
+    assert plan["imagenet_unique_points"] == 222
     assert plan["imagenet_probe_points"] == 84
     assert plan["downstream_sparse_points"] == 0
     assert plan["downstream_dense_points"] == 0
@@ -36,7 +36,7 @@ def test_default_campaign_is_imagenet_only_with_selective_probes(path):
     assert campaign.execution["precomputed_only"] is True
     assert campaign.seeds == (1227,)
     assert campaign.target_backbones("sop") == ()
-    assert campaign.backbones == ("ff2048", "vit_b16", "convnext_tiny", "rn18", "dinov2_vits14")
+    assert campaign.backbones == ("ff2048", "vit_b16", "convnext_tiny", "dinov2_vits14")
     assert campaign.downstream["datasets"] == ["sop"]
 
 
@@ -78,11 +78,10 @@ def test_dataset_backbone_selection_changes_plan_without_dropping_other_targets(
 
 @pytest.mark.parametrize("config", ["configs/thesis.yaml", "configs/precomputed.yaml"])
 @pytest.mark.parametrize("backbone,expected,training", [
-    ("ff2048", (2, 16, 32, 256), (8, 16, 32, 256)),
+    ("ff2048", (2, 8, 16, 32, 256), (8, 16, 32, 256)),
     ("vit_b16", (3, 12, 48, 96, 192, 384), (12, 48, 192)),
     ("convnext_tiny", (3, 12, 48, 96, 192, 384), (12, 48, 192)),
     ("dinov2_vits14", (3, 12, 48, 96, 192, 384), (12, 48, 192)),
-    ("rn18", (2, 8, 16, 32, 64, 128, 256), (8, 32, 128)),
 ])
 def test_campaigns_restrict_training_and_e2_to_requested_budgets(config, backbone, expected, training):
     from mpsae.config import BACKBONES
@@ -97,7 +96,7 @@ def test_campaigns_restrict_training_and_e2_to_requested_budgets(config, backbon
 
 
 @pytest.mark.parametrize("backbone,expected", [
-    ("ff2048", (2, 16, 32, 256)), ("rn18", (2, 8, 16, 32, 64, 128, 256)),
+    ("ff2048", (2, 8, 16, 32, 256)), ("rn18", (2, 8, 16, 32, 64, 128, 256)),
     ("vit_b16", (3, 12, 48, 96, 192, 384)),
     ("convnext_tiny", (3, 12, 48, 96, 192, 384)),
     ("dinov2_vits14", (3, 12, 48, 96, 192, 384)),
@@ -120,7 +119,7 @@ def test_new_source_models_are_imagenet_only():
         assert selected == expected
         assert campaign.downstream_cells() == []
     assert sum(len(campaign.budgets("imagenet", "eval_k", c.backbone))
-               for c in campaign.source_cells()) == 273
+               for c in campaign.source_cells()) == 222
 
 
 @pytest.mark.parametrize("targets", [[], {"flowers102": ["rn18"]},

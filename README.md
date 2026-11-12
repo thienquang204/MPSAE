@@ -19,8 +19,13 @@ applied silently.
 
 ## Run it
 
+The separate [backbone fine-tuning pilot](docs/finetune.md) adds nine supervised
+joint fits: CSR, CSRv2 and MPSAE on ResNet-50 (K=8), ConvNeXt-Tiny (K=12) and
+ViT-B/16 (K=12). Its entry point is `python -m mpsae.finetune run`; settings
+are in `configs/finetune.yaml`. It preserves the frozen campaign below.
+
 The main campaign selects ImageNet E1/E2 for ResNet-50, ViT-B/16,
-ConvNeXt-Tiny, ResNet-18 and DINOv2-S/14, with selective linear probing. All downstream
+ConvNeXt-Tiny and DINOv2-S/14, with selective linear probing. All downstream
 experiments (including SOP) and repeated retrieval timing are disabled for now.
 `.env` holds credentials; `configs/thesis.yaml` selects the experiments.
 
@@ -155,18 +160,17 @@ below. Linear probing is restricted independently of the 1-NN sweep.
 
 | Backbone | Training K | Inference K (1-NN) | Linear-probe inference K |
 |---|---|---|---|
-| ResNet-50 (`ff2048`) | 8, 16, 32, 256 | 2, 16, 32, 256 | 2, 16, 32, 256 |
+| ResNet-50 (`ff2048`) | 8, 16, 32, 256 | 2, 8, 16, 32, 256 | 2, 16, 32, 256 |
 | ViT-B/16 (`vit_b16`) | 12, 48, 192 | 3, 12, 48, 96, 192, 384 | 3, 48, 96, 384 |
 | ConvNeXt-Tiny (`convnext_tiny`) | 12, 48, 192 | 3, 12, 48, 96, 192, 384 | None |
-| ResNet-18 (`rn18`) | 8, 32, 128 | 2, 8, 16, 32, 64, 128, 256 | None |
 | DINOv2-S/14 (`dinov2_vits14`) | 12, 48, 192 | 3, 12, 48, 96, 192, 384 | None |
 
-With CSR, CSRv2, MPSAE and seed 1227, this selects **48 SAE fits**, **273 E2
-points** (45 shared with E1), **276 unique sparse 1-NN conditions**, and **84
+With CSR, CSRv2, MPSAE and seed 1227, this selects **39 SAE fits**, **222 E2
+points** (39 shared with E1), **222 unique sparse 1-NN conditions**, and **84
 unique linear probes**. The probes are part of those evaluated conditions,
 not additional SAE fits. Existing compatible fits and metrics are reused;
-DINOv2 adds 9 SAE fits to the previous 39-fit selection. These are 3 methods
-across 16 backbone/training-K pairs, with one seed. Backbone networks stay
+ResNet-18 is excluded from the active campaign. These are 3 methods
+across 13 backbone/training-K pairs, with one seed. Backbone networks stay
 frozen; existing HF embeddings are reused. Linear classifiers add 84 fits
 only where requested, independently of the SAE count.
 
@@ -226,7 +230,7 @@ no between-seed uncertainty band.
 The main ImageNet figures are `inference_summary*.pdf` (also PNG); long grids
 are split into parts with at most two backbone/training-K rows. Per-backbone
 `e2_generalisation_*` plots show 1-NN and only the selected linear-probe points
-against inference K. ResNet-18, ConvNeXt and DINOv2 figures contain 1-NN only.
+against inference K. ConvNeXt and DINOv2 figures contain 1-NN only.
 `e2_nnz_*` uses measured gallery nonzeros instead, so saturation of MPSAE can
 compress its horizontal extent there without hiding the larger inference K points
 on the main figure. `e2_cost_*` shows search time, sparse top-1 search time and index

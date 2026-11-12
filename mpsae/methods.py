@@ -68,6 +68,7 @@ class StepOutput:
     components: dict[str, torch.Tensor]
     metrics: dict[str, float] = field(default_factory=dict)
     training_k: int = 0
+    latents: torch.Tensor | None = None
 
 
 def requires_labels(method: str) -> bool:
@@ -125,7 +126,9 @@ def describe(method: str, k: int, preset: TrainPreset) -> dict[str, Any]:
 def compute_step(method: str, sae: SparseAutoencoder, x: torch.Tensor, *,
                  k: int, preset: TrainPreset, step: int, total_steps: int,
                  labels: torch.Tensor | None = None,
-                 update_activity: bool = True, collect_metrics: bool = True) -> StepOutput:
+                 update_activity: bool = True, collect_metrics: bool = True,
+                 reconstruction_target: torch.Tensor | None = None,
+                 fixed_budget: bool = False) -> StepOutput:
     """Evaluate one method's objective on one batch.
 
     Pre-activations are computed once and shared by every view. That is
@@ -151,7 +154,12 @@ def compute_step(method: str, sae: SparseAutoencoder, x: torch.Tensor, *,
             raise ValueError("labels must be one integer per row")
 
     hidden = sae.hidden_dim
-    budget = plan_budget(method, k, preset, step=step, total_steps=total_steps)
+    # Joint fine-tuning may reconstruct a frozen teacher on the same image.
+    # Defaults retain the original frozen-feature objective exactly.
+    target = x if reconstruction_target is None else reconstruction_target.detach()
+    if target.shape != x.shape or target.dtype != x.dtype or target.device != x.device:
+        raise ValueError("reconstruction target must match input shape, dtype and device")
+    budget = k if fixed_budget else plan_budget(method, k, preset, step=step, total_steps=total_steps)
     wide = min(4 * budget, hidden)
     middle = min(2 * budget, hidden)
 
@@ -178,10 +186,10 @@ def compute_step(method: str, sae: SparseAutoencoder, x: torch.Tensor, *,
         # methods, the 2K view for ours.
         sae.count_selected_activity(third_indices, third_values)
 
-    main_term = losses.mse(reconstruction, x)
-    wide_term = losses.mse(sae.decode(z_wide), x)
+    main_term = losses.mse(reconstruction, target)
+    wide_term = losses.mse(sae.decode(z_wide), target)
     aux_term = losses.normalized_mse(
-        sae.decode(z_aux), losses.auxk_target(x, reconstruction, sae.pre_bias))
+        sae.decode(z_aux), losses.auxk_target(target, reconstruction, sae.pre_bias))
 
     components: dict[str, torch.Tensor] = {
         "mse_k": main_term,
@@ -193,7 +201,7 @@ def compute_step(method: str, sae: SparseAutoencoder, x: torch.Tensor, *,
     metrics: dict[str, float] = {}
 
     if method in MULTITOPK:
-        middle_term = losses.mse(sae.decode(z_middle), x)
+        middle_term = losses.mse(sae.decode(z_middle), target)
         components["mse_2k"] = preset.nested_coef * middle_term
         if collect_metrics:
             metric_tensors["loss_mse_2k"] = middle_term
@@ -232,4 +240,5 @@ def compute_step(method: str, sae: SparseAutoencoder, x: torch.Tensor, *,
         for name in ("nnz_min", "active_units"):
             metrics[name] = int(metrics[name])
         metrics.update(training_k=budget, view_2k=middle, view_4k=wide)
-    return StepOutput(loss=total, components=components, metrics=metrics, training_k=budget)
+    return StepOutput(loss=total, components=components, metrics=metrics, training_k=budget,
+                      latents=z_main)
