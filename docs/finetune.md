@@ -1,3 +1,10 @@
+> **Archived experiment, disabled by default.** All nine additional fits and
+> their evaluations were omitted due to memory/compute limits. The commands
+> below describe the historical workflow, not the active experiment plan.
+> The original recipe is in `configs/archive/finetune_gradient_replay.yaml`.
+> Saved artifacts remain available; pass that config explicitly when using
+> `report`, `transfer-report` or `sync` to inspect or back up existing output.
+
 # Additional backbone fine-tuning pilot
 
 `configs/finetune.yaml` selects **nine additional fits**, separately from the

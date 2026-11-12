@@ -52,7 +52,7 @@ def test_joint_features_are_cached_per_checkpoint_and_sop_is_extracted_once(tmp_
     import torch
     from torch import nn
     from mpsae.benchmark.run import classifier_protocol
-    config = load_config("configs/finetune.yaml")
+    config = load_config("configs/archive/finetune_gradient_replay.yaml")
     data = transfer.load_target("sop", tmp_path, config, True)
     spec = transfer.smoke_spec(BACKBONES["ff2048"])
     network = nn.Sequential(nn.Flatten(), nn.Linear(192, 16))
@@ -84,7 +84,7 @@ def test_joint_features_are_cached_per_checkpoint_and_sop_is_extracted_once(tmp_
 
 
 def test_missing_joint_checkpoint_fails_before_downloading_targets(tmp_path, monkeypatch):
-    config = load_config("configs/finetune.yaml")
+    config = load_config("configs/archive/finetune_gradient_replay.yaml")
     monkeypatch.setattr(transfer, "load_target", lambda *a, **kw: pytest.fail("unexpected dataset download"))
     with pytest.raises(FileNotFoundError, match="completed joint"):
         transfer.run_transfer(config, tmp_path, smoke=True, device="cpu", workers=0)
@@ -92,7 +92,7 @@ def test_missing_joint_checkpoint_fails_before_downloading_targets(tmp_path, mon
 
 def test_transfer_options_change_evaluations_without_changing_fit_settings():
     from copy import deepcopy
-    config = load_config("configs/finetune.yaml")
+    config = load_config("configs/archive/finetune_gradient_replay.yaml")
     changed = replace(config, transfer={**deepcopy(config.transfer),
                                       "knn": {"n_neighbors": [1, 5], "temperature": .1}})
     assert changed.plan()["plan_id"] != config.plan()["plan_id"]
@@ -109,7 +109,7 @@ def test_transfer_options_change_evaluations_without_changing_fit_settings():
 ])
 def test_invalid_transfer_config_rejected(tmp_path, setting):
     import yaml
-    payload = yaml.safe_load(Path("configs/finetune.yaml").read_text())
+    payload = yaml.safe_load(Path("configs/archive/finetune_gradient_replay.yaml").read_text())
     payload["transfer"].update(setting)
     path = tmp_path / "invalid.yaml"
     path.write_text(yaml.safe_dump(payload))

@@ -27,7 +27,8 @@ def main(argv=None):
     parser.add_argument("--smoke", action="store_true", help="Synthetic capped test; no downloads or remote writes")
     args = parser.parse_args(argv)
     config = load_config(args.config)
-    if args.command == "plan":
+    # Stop before dotenv, Torch, CUDA, source restoration or any data downloads.
+    if args.command == "plan" or not config.enabled:
         print(json.dumps(config.plan(), indent=2))
         return
     from ..cli import load_dotenv

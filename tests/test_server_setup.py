@@ -71,23 +71,14 @@ def test_newer_explicit_profile_is_allowed_for_older_gpu():
     assert result.returncode == 0 and result.stdout.strip() == "12.9"
 
 
-def test_nine_run_launcher_preserves_paths_and_skips_setup_by_default(tmp_path):
+def test_nine_run_launcher_is_disabled_even_with_setup_flag(tmp_path):
     _executable(tmp_path / "finetune_only.sh", (ROOT / "finetune_only.sh").read_text())
-    _executable(tmp_path / "activate_server.sh", '''#!/usr/bin/env bash
-python() { printf '<%s>\\n' "$@"; }
-export -f python
-''')
-    # exec resolves external programs, so install a fixture executable in PATH.
-    bindir = tmp_path / "bin"
-    _executable(bindir / "python", '#!/usr/bin/env bash\nprintf "<%s>\\n" "$@"\n')
-    env = dict(os.environ, PATH=str(bindir) + os.pathsep + os.environ["PATH"])
-    result = shell('bash finetune_only.sh --workspace "path with spaces"', cwd=tmp_path, env=env)
+    # Neither environment nor installer exists: the retired launcher must not
+    # attempt to load them or create any artifacts, even with old arguments.
+    result = shell('bash finetune_only.sh --setup --workspace "path with spaces"', cwd=tmp_path)
     assert result.returncode == 0, result.stderr
-    assert '<mpsae.finetune>\n<run>' in result.stdout
-    assert '<path with spaces>' in result.stdout
-    assert '<--backup>' in result.stdout and '<packed>' in result.stdout
-    assert '<16>' in result.stdout and '<64>' in result.stdout
-    assert 'mpsae.remote' not in result.stdout and 'pip' not in result.stdout
+    assert 'Disabled: all nine' in result.stdout
+    assert list(tmp_path.iterdir()) == [tmp_path / "finetune_only.sh"]
 
 
 def _executable(path, content):

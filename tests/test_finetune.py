@@ -11,7 +11,7 @@ from mpsae.io import read_json, sha256_file
 
 
 def test_pilot_is_nine_additional_fits_with_existing_probe_selection():
-    config = load_config("configs/finetune.yaml")
+    config = load_config("configs/archive/finetune_gradient_replay.yaml")
     plan = config.plan()
     assert len(config.cells()) == plan["additional_fits"] == 9
     assert {(c.backbone, c.k) for c in config.cells()} == {("ff2048", 8), ("convnext_tiny", 12), ("vit_b16", 12)}
@@ -47,7 +47,7 @@ def test_pilot_is_nine_additional_fits_with_existing_probe_selection():
     ("freeze_bn_stats", False)])
 def test_invalid_finetune_settings_are_rejected(tmp_path, key, value):
     import yaml
-    payload = yaml.safe_load(Path("configs/finetune.yaml").read_text())
+    payload = yaml.safe_load(Path("configs/archive/finetune_gradient_replay.yaml").read_text())
     payload["finetune"][key] = value
     path = tmp_path / "bad.yaml"
     path.write_text(yaml.safe_dump(payload))
@@ -118,7 +118,7 @@ def test_interrupted_joint_training_resumes_exactly_and_rejects_changed_recipe(t
     from mpsae.finetune import train
     torch.manual_seed(77)
     dataset = TensorDataset(torch.randn(12, 3, 8, 8), torch.arange(12) % 4)
-    options = {**load_config("configs/finetune.yaml").training_options(Cell("ff2048", "csr", 8, 7)),
+    options = {**load_config("configs/archive/finetune_gradient_replay.yaml").training_options(Cell("ff2048", "csr", 8, 7)),
                "precision": "float32", "epochs": 2, "batch_size": 4, "checkpoint_every": 1,
                "log_every": 1, "backbone_microbatch": microbatch}
     def fit(directory, **changes):
@@ -178,7 +178,7 @@ def test_frozen_sources_required_without_modifying_them(tmp_path):
     sentinel = root / "existing.npz"
     sentinel.write_bytes(b"cached embedding")
     with pytest.raises(FileNotFoundError, match="missing completed source fit"):
-        preflight_sources(load_config("configs/finetune.yaml"), root)
+        preflight_sources(load_config("configs/archive/finetune_gradient_replay.yaml"), root)
     assert list(root.iterdir()) == [sentinel]
 
 
@@ -191,7 +191,7 @@ def test_source_preflight_requires_full_compatible_schedule(tmp_path, monkeypatc
     from mpsae.config import training_preset
     from mpsae.finetune.run import preflight_sources
     from mpsae.io import atomic_json
-    config = load_config("configs/finetune.yaml")
+    config = load_config("configs/archive/finetune_gradient_replay.yaml")
     loaded = []
 
     def record(cell, root):
@@ -235,7 +235,7 @@ def test_all_nine_smoke_cells_are_sparse_and_resume_without_training(tmp_path, m
     from mpsae.finetune import transfer
     monkeypatch.setattr(transfer, "plot_overview", lambda *args, **kwargs: {})
     monkeypatch.setattr(extract, "_network", lambda *args, **kwargs: pytest.fail("smoke downloaded weights"))
-    config = load_config("configs/finetune.yaml")
+    config = load_config("configs/archive/finetune_gradient_replay.yaml")
     result = runner.run(config, tmp_path, device=device, workers=0, smoke=True)
     assert result["complete"] and not result["scientific"]
     root = runner.output_root(config, tmp_path, True)
@@ -310,7 +310,7 @@ def test_joint_training_only_collects_diagnostics_at_log_steps(tmp_path, monkeyp
         return original(*args, **kwargs)
     monkeypatch.setattr(train, "feature_loss", tracked)
     train.fit_joint(cell, spec, network, teacher, sae, dataset, augment, tmp_path,
-        options={**load_config("configs/finetune.yaml").training_options(cell),
+        options={**load_config("configs/archive/finetune_gradient_replay.yaml").training_options(cell),
                  "precision": "float32", "batch_size": 4, "epochs": 1,
                  "log_every": 4, "checkpoint_every": 3},
         source_identity={}, data_identity={}, preprocessing={}, device="cpu", classes=4)

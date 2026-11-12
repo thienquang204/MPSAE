@@ -1,0 +1,18 @@
+# Opt-in evaluation only. Existing ImageNet campaigns are unchanged.
+backbone: ff2048
+methods: [csr, csrv2, mpsae]
+train_k: 8
+inference_k: [8]
+seed: 1227
+dataset_repo: shijli/voc2012
+dataset_revision: main  # resolved to an immutable commit on first preparation
+dataset_config: segmentation  # optional: segmentation_aug (10582 support images)
+image_size: 512
+memory_patches: 65536
+neighbors: 30  # retrieval neighbors, NOT SAE sparsity K
+temperature: 0.02
+extraction_batch: 8
+encode_batch: 1024
+gallery_chunk: 4096
+query_block: 256
+workers: 4

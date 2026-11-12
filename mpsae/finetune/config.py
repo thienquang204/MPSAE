@@ -19,10 +19,39 @@ TRANSFER_DEFAULTS = dict(enabled=False, datasets=["eurosat", "sop"],
 
 
 @dataclass(frozen=True)
+class DisabledFineTuneCampaign:
+    name: str
+    reason: str
+    enabled: bool = False
+
+    def cells(self):
+        return []
+
+    def ensure_enabled(self):
+        raise RuntimeError(self.reason)
+
+    def plan(self):
+        return {"name": self.name, "enabled": False, "reason": self.reason,
+                "additional_fits": 0, "source_cells": 0,
+                "imagenet_e1_points": 0, "imagenet_e2_points": 0,
+                "imagenet_unique_points": 0, "imagenet_probe_points": 0,
+                "frozen_control_1nn_points": 0, "transfer_knn_points": 0,
+                "transfer_retrieval_points": 0, "transfer_records": 0,
+                "downstream_sparse_points": 0, "source_checkpoints_required": []}
+
+
+@dataclass(frozen=True)
 class FineTuneCampaign:
     campaign: Campaign
     training: dict = field(default_factory=lambda: dict(DEFAULTS))
     transfer: dict = field(default_factory=lambda: dict(TRANSFER_DEFAULTS))
+
+    @property
+    def enabled(self):
+        return True
+
+    def ensure_enabled(self):
+        pass
 
     @property
     def name(self):
@@ -83,6 +112,12 @@ def load_config(path):
     if not isinstance(payload, dict):
         raise ValueError("fine-tuning config must be a mapping")
     payload = dict(payload)
+    enabled = payload.pop("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ValueError("fine-tuning enabled must be a boolean")
+    if not enabled:
+        return DisabledFineTuneCampaign(str(payload.get("name", "finetune_disabled")),
+            str(payload.get("reason", "Additional backbone fine-tuning is disabled.")))
     training = _section(payload.pop("finetune", {}), DEFAULTS, "finetune")
     transfer = _section(payload.pop("transfer", {}), TRANSFER_DEFAULTS, "transfer")
     from ..benchmark.config import knn_settings

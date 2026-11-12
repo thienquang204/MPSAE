@@ -19,20 +19,35 @@ applied silently.
 
 ## Run it
 
-The separate [backbone fine-tuning pilot](docs/finetune.md) adds nine supervised
-joint fits: CSR, CSRv2 and MPSAE on ResNet-50 (K=8), ConvNeXt-Tiny (K=12) and
-ViT-B/16 (K=12). Its entry point is `python -m mpsae.finetune run`; settings
-are in `configs/finetune.yaml`. It preserves the frozen campaign below.
-
-For the nine fits alone on a 32 GB GPU, see the
-[fast server workflow](docs/finetune_fast.md). `bash finetune_only.sh` reuses the
-installed environment, packs/reuses ImageNet once, preserves full-batch losses
-with image gradient replay, and enables incremental checkpoint/result backup.
+The nine additional backbone fine-tuning runs and their ImageNet/EuroSAT/SOP
+evaluations are **disabled** due to resource limits. Their settings are archived
+in `configs/archive/finetune_gradient_replay.yaml`; existing results and
+checkpoints are retained. `finetune_only.sh` no longer starts any work.
 
 The main campaign selects ImageNet E1/E2 for ResNet-50, ViT-B/16,
 ConvNeXt-Tiny and DINOv2-S/14, with selective linear probing. All downstream
 experiments (including SOP) and repeated retrieval timing are disabled for now.
 `.env` holds credentials; `configs/thesis.yaml` selects the experiments.
+
+Optional **spatial SAE evaluation** is available separately through
+`python -m mpsae.scene plan` and `python -m mpsae.scene run`. It loads existing
+ResNet-50 SAEs, uses Hugging Face PASCAL VOC masks, and compares dense and sparse
+patch retrieval without training. See [the protocol and commands](docs/scene_evaluation.md)
+and `configs/scene_voc.yaml`. This is an adapted Hummingbird-style decoder,
+testing pooled-to-local feature transfer; it is not part of the main campaign.
+
+On a **fresh Linux GPU server**, use the separate evaluation environment:
+
+```bash
+bash scene_only.sh --setup-only
+.venv-scene/bin/hf auth login
+bash scene_only.sh --workspace /workspace/scene-v1
+```
+
+This restores the selected pretrained checkpoints and VOC automatically. Rerun
+the last command to resume; add `--publish` to back up completed reports to HF.
+No old server files or ImageNet download are required. See the scene guide for
+driver/Python requirements and alternate repository/revision options.
 
 ```bash
 cp .env.example .env                       # if .env does not exist yet

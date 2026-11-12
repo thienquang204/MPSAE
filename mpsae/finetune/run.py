@@ -152,6 +152,7 @@ def write_report(config, root, catalog, failures):
 def run(config, workspace, *, source_root=None, image_root=None, device="cuda:0", workers=8,
         extract_batch=64, download_images=False, smoke=False, backup=False,
         image_storage="folder", backup_interval=1800):
+    config.ensure_enabled()
     import torch
     from torch import nn
     from torch.utils.data import TensorDataset

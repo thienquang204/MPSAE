@@ -234,6 +234,7 @@ def source_record(config, root, cell, smoke=False):
 
 def run_transfer(config, workspace, *, device="cuda:0", workers=8, extract_batch=64, smoke=False):
     """Evaluate saved joint models without ImageNet images or source SAE files."""
+    config.ensure_enabled()
     import torch
     from torch import nn
     from ..benchmark.extract import _network
