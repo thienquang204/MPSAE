@@ -15,7 +15,7 @@ from ..logs import MetricWriter, Progress
 from ..train import _rng_state, _restore_rng, _configure_backend
 from ..timing_config import runtime_fingerprint
 from .config import VERSION
-from .data import loader
+from .data import TrainingLoader
 
 
 def autocast(device, precision):
@@ -45,6 +45,12 @@ def joint_step(cell, spec, network, teacher, sae, head, images, labels, *, optio
         target = forward_features(teacher, images, spec).float()
     with autocast(images.device, options["precision"]):
         features = forward_features(network, images, spec).float()
+    return feature_loss(cell, spec, sae, head, features, target, labels,
+                        options=options, step=step, total=total, collect_metrics=collect_metrics)
+
+
+def feature_loss(cell, spec, sae, head, features, target, labels, *, options, step, total,
+                 collect_metrics=True):
     # SAE, teacher reconstruction, contrastive and MMPOT stay float32.
     result = methods.compute_step(cell.method, sae, features, k=cell.k,
         preset=training_preset(cell.method, spec.preset, k=cell.k), step=step, total_steps=total,
@@ -62,19 +68,65 @@ def joint_step(cell, spec, network, teacher, sae, head, images, labels, *, optio
         ("loss_method", "loss_ce", "loss_total", "head_top1"), values))}
 
 
+def cached_backward(cell, spec, network, teacher, sae, head, chunks, *, device,
+                    options, step, total, collect_metrics=True):
+    """One full-batch loss; replay image graphs one microbatch at a time.
+
+    Chunk tensors stay on the CPU. Only features and their gradients span the
+    logical batch. This is NOT a sum of independent contrastive/OT losses.
+    """
+    if not options["freeze_bn_stats"]:
+        raise ValueError("gradient replay requires frozen batch-normalization statistics")
+    if any(isinstance(m, nn.modules.batchnorm._BatchNorm) and (m.training or m.running_mean is None)
+           for m in network.modules()):
+        raise ValueError("training batch normalization cannot be replayed safely")
+    device = torch.device(device)
+    states, features, targets, labels = [], [], [], []
+    # Keep the no-grad autocast cache alive across chunks, so the same teacher
+    # and student weights are not recast from float32 for every microbatch.
+    with torch.no_grad(), autocast(device, options["precision"]):
+        for images, y in chunks:
+            images = images.to(device, non_blocking=True)
+            targets.append(forward_features(teacher, images, spec).float())
+            states.append(_rng_state(device))
+            features.append(forward_features(network, images, spec).float())
+            labels.append(y.to(device, non_blocking=True))
+    x = torch.cat(features).detach().requires_grad_(True)
+    target, y = torch.cat(targets), torch.cat(labels)
+    del features, targets, labels, images
+    loss, metrics = feature_loss(cell, spec, sae, head, x, target, y,
+        options=options, step=step, total=total, collect_metrics=collect_metrics)
+    loss.backward()
+    # Preserve the RNG reached by the cache pass and full loss, including any
+    # stochastic regularizer. Each replay sees its original dropout/drop-path RNG.
+    final_rng = _rng_state(device)
+    offset = 0
+    try:
+        for (images, _), state in zip(chunks, states):
+            _restore_rng(state, device)
+            with autocast(device, options["precision"]):
+                output = forward_features(network, images.to(device, non_blocking=True), spec).float()
+            output.backward(x.grad[offset:offset + len(images)])
+            offset += len(images)
+    finally:
+        _restore_rng(final_rng, device)
+    return loss.detach(), metrics
+
+
 def fit_joint(cell, spec, network, teacher, sae, dataset, transform, directory, *,
               options, source_identity, data_identity, preprocessing, device, workers=0,
-              classes=1000, max_steps=0):
+              classes=1000, max_steps=0, on_checkpoint=None):
     directory = Path(directory)
     with exclusive_lock(directory / "fit.lock", timeout=0):
         return _fit(cell, spec, network, teacher, sae, dataset, transform, directory,
                     options=options, source_identity=source_identity, data_identity=data_identity,
                     preprocessing=preprocessing, device=device, workers=workers,
-                    classes=classes, max_steps=max_steps)
+                    classes=classes, max_steps=max_steps, on_checkpoint=on_checkpoint)
 
 
 def _fit(cell, spec, network, teacher, sae, dataset, transform, directory, *, options,
-         source_identity, data_identity, preprocessing, device, workers, classes, max_steps):
+         source_identity, data_identity, preprocessing, device, workers, classes, max_steps,
+         on_checkpoint=None):
     device = torch.device(device)
     _configure_backend()
     per_epoch = (len(dataset) // options["batch_size"] if options["drop_last"]
@@ -160,36 +212,48 @@ def _fit(cell, spec, network, teacher, sae, dataset, transform, directory, *, op
         temporary = checkpoint_path.with_suffix(".partial")
         torch.save(payload, temporary)
         temporary.replace(checkpoint_path)
+        if on_checkpoint:
+            on_checkpoint(directory, step, total)
 
     # Commit only completed optimizer updates; a failed in-flight step is replayed
     # from the last durable checkpoint, never saved with partially mutated state.
-    while step < total:
-        epoch, within = divmod(step, per_epoch)
-        batches = loader(dataset, transform, seed=cell.seed, epoch=epoch,
-            batch_size=options["batch_size"], workers=workers,
-            skip=within * options["batch_size"], training=True, drop_last=options["drop_last"])
-        for images, labels in batches:
-            images, labels = images.to(device, non_blocking=True), labels.to(device, non_blocking=True)
-            optimizer.zero_grad(set_to_none=True)
-            collect_metrics = (step + 1) % options["log_every"] == 0 or step + 1 == total
-            loss, metrics = joint_step(cell, spec, network, teacher, sae, head, images, labels,
-                                      options=options, step=step, total=total, collect_metrics=collect_metrics)
-            loss.backward()
-            norm = torch.nn.utils.clip_grad_norm_(parameters,
-                                                  options["grad_clip"], error_if_nonfinite=True)
-            optimizer.step()
-            step += 1
-            if step % options["log_every"] == 0 or step == total:
-                metrics.update(grad_norm=float(norm), elapsed=prior_seconds + time.perf_counter() - started,
-                    peak_allocated_bytes=torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0,
-                    peak_reserved_bytes=torch.cuda.max_memory_reserved(device) if device.type == "cuda" else 0)
-                writer.log({"epoch": epoch, **metrics}, step=step)
-                progress_detail = f"last logged loss {metrics['loss_total']:.4f} at step {step}"
-            if step % options["checkpoint_every"] == 0 or step == total:
-                save()
-            progress.advance(extra=progress_detail)
-            if step >= total:
-                break
+    training_loader = TrainingLoader(dataset, transform, seed=cell.seed,
+        batch_size=options["batch_size"], microbatch=options.get("backbone_microbatch", 0),
+        workers=workers, drop_last=options["drop_last"],
+        prefetch_factor=options.get("prefetch_factor", 2))
+    try:
+        while step < total:
+            epoch, within = divmod(step, per_epoch)
+            batches = training_loader.batches(epoch, skip=within * options["batch_size"])
+            for chunks in batches:
+                optimizer.zero_grad(set_to_none=True)
+                collect_metrics = (step + 1) % options["log_every"] == 0 or step + 1 == total
+                if options.get("backbone_microbatch", 0):
+                    loss, metrics = cached_backward(cell, spec, network, teacher, sae, head, chunks,
+                        device=device, options=options, step=step, total=total, collect_metrics=collect_metrics)
+                else:
+                    images, labels = chunks[0]
+                    images, labels = images.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+                    loss, metrics = joint_step(cell, spec, network, teacher, sae, head, images, labels,
+                                              options=options, step=step, total=total, collect_metrics=collect_metrics)
+                    loss.backward()
+                norm = torch.nn.utils.clip_grad_norm_(parameters,
+                                                      options["grad_clip"], error_if_nonfinite=True)
+                optimizer.step()
+                step += 1
+                if step % options["log_every"] == 0 or step == total:
+                    metrics.update(grad_norm=float(norm), elapsed=prior_seconds + time.perf_counter() - started,
+                        peak_allocated_bytes=torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0,
+                        peak_reserved_bytes=torch.cuda.max_memory_reserved(device) if device.type == "cuda" else 0)
+                    writer.log({"epoch": epoch, **metrics}, step=step)
+                    progress_detail = f"last logged loss {metrics['loss_total']:.4f} at step {step}"
+                if step % options["checkpoint_every"] == 0 or step == total:
+                    save()
+                progress.advance(extra=progress_detail)
+                if step >= total:
+                    break
+    finally:
+        training_loader.close()
     optimizer.zero_grad(set_to_none=True)
     summary = {"identity": identity, "signature": signature, "cell": cell.__dict__,
         "complete": True, "steps": step, "train_seconds": prior_seconds + time.perf_counter() - started,

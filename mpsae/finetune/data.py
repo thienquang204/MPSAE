@@ -13,12 +13,71 @@ class EpochImages:
 
     def __getitem__(self, index):
         import torch
+        epoch = self.epoch
+        if isinstance(index, tuple):
+            epoch, index = index
         index = int(index)
         image, label = self.dataset[index]
         # Each image has the same augmentation under any worker count/resume.
         with torch.random.fork_rng(devices=[]):
-            torch.random.default_generator.manual_seed(self.seed + self.epoch * len(self.dataset) + index)
+            torch.random.default_generator.manual_seed(self.seed + epoch * len(self.dataset) + index)
             return self.transform(image), label
+
+
+class EpochBatchSampler:
+    """Microbatches never cross an optimizer-batch boundary, even on the tail."""
+    def __init__(self, rows, seed, batch_size, microbatch, drop_last):
+        self.rows, self.seed, self.batch_size = rows, seed, batch_size
+        self.microbatch = min(microbatch or batch_size, batch_size)
+        self.drop_last, self.epoch, self.skip = drop_last, 0, 0
+
+    def sizes(self):
+        for start in range(self.skip, self.rows, self.batch_size):
+            size = min(self.batch_size, self.rows - start)
+            if size < self.batch_size and self.drop_last:
+                break
+            yield size
+
+    def __iter__(self):
+        import torch
+        order = torch.randperm(self.rows, generator=torch.Generator().manual_seed(
+            self.seed + self.epoch)).numpy()
+        start = self.skip
+        for size in self.sizes():
+            for offset in range(0, size, self.microbatch):
+                yield [(self.epoch, int(i)) for i in order[
+                    start + offset:start + min(offset + self.microbatch, size)]]
+            start += size
+
+
+class TrainingLoader:
+    """Persistent workers; seeded epoch indices also work with spawn and resumes."""
+    def __init__(self, dataset, transform, *, seed, batch_size, microbatch=0,
+                 workers=0, drop_last=False, prefetch_factor=2):
+        import torch
+        from torch.utils.data import DataLoader
+        self.sampler = EpochBatchSampler(len(dataset), seed, batch_size, microbatch, drop_last)
+        options = dict(num_workers=workers, pin_memory=torch.cuda.is_available(),
+                       generator=torch.Generator().manual_seed(seed))
+        if workers:
+            options.update(persistent_workers=True, prefetch_factor=prefetch_factor)
+        self.loader = DataLoader(EpochImages(dataset, transform, seed),
+                                 batch_sampler=self.sampler, **options)
+
+    def batches(self, epoch, skip=0):
+        self.sampler.epoch, self.sampler.skip = epoch, skip
+        iterator = iter(self.loader)
+        for size in self.sampler.sizes():
+            chunks = [next(iterator) for _ in range(-(-size // self.sampler.microbatch))]
+            yield chunks
+
+    def close(self):
+        # DataLoader has no public close. Release persistent workers promptly on
+        # interrupts too, before moving on to another backbone or feature loader.
+        iterator = getattr(self.loader, "_iterator", None)
+        if iterator is not None:
+            iterator._shutdown_workers()
+            self.loader._iterator = None
 
 
 def loader(dataset, transform, *, seed, epoch, batch_size, workers, skip=0, training=False, drop_last=None):

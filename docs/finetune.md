@@ -49,7 +49,8 @@ No performance improvement is guaranteed.
 | Setting | Value |
 | --- | --- |
 | Additional epochs | 10 for every method, inherited from its standalone preset |
-| Physical image batch | CSR/CSRv2: 4096; MPSAE: 1024; no gradient accumulation |
+| Full loss batch | CSR/CSRv2: 4096; MPSAE: 1024; one full loss per update |
+| Backbone image microbatch | 32; gradient replay preserves full-batch loss interactions |
 | Optimizer | Adam, constant learning rate; betas (0.9, 0.999), epsilon `6.25e-10` |
 | Backbone / SAE / classifier LR | `4e-5` / `4e-5` / `4e-5`, inherited from the standalone preset |
 | Weight decay / gradient clipping | `1e-4` / norm 1 |
@@ -69,7 +70,7 @@ the actual numbers. There is no separate fixed batch-16 default.
 
 This replaces the earlier three-epoch, batch-16 AdamW pilot, whose learning
 rates were `1e-5` for backbone/SAE and `1e-3` for the head. The new campaign name
-`finetune_source_settings` keeps those earlier outputs separate and cannot
+`finetune_gradient_replay` keeps those earlier outputs separate and cannot
 resume their optimizer state. Fine-tuning still initializes from the completed
 standalone SAE, not from a random SAE. These are 10 additional joint epochs.
 
@@ -152,8 +153,8 @@ Sparse encoding/search currently run separately for classification and retrieval
 
 New `run` executions perform these transfer evaluations automatically after
 each joint fit. Existing completed fits need only the `transfer` command above.
-Transfer-only commands write local results; `run --backup` retains the existing
-optional private backup behavior.
+Transfer-only commands write local results by default; add `--backup` to sync
+their completed output. `run --backup` also uploads during the campaign.
 
 Results are in `reports/<plan_id>/transfer/`, with classification, retrieval,
 paired-method and raw evaluation CSV/JSON tables. `figures/transfer_*` places
@@ -177,7 +178,7 @@ Run from `graduate_thesis_refactor` after its environment has been installed:
 ```bash
 source activate_server.sh
 python -m mpsae.finetune plan --config configs/finetune.yaml
-python -m mpsae.finetune run --config configs/finetune.yaml --download-images
+bash finetune_only.sh --config configs/finetune.yaml
 ```
 
 The nine completed source fits must already exist under
@@ -188,10 +189,12 @@ It rejects missing, partial, capped, incompatible or synthetic source fits.
 It downloads/reuses the exact pretrained weights identified by the source
 provenance rather than guessing a model from its name.
 
-`--download-images` reuses/resumes the existing ImageNet preparation pipeline.
-Raw images are required: extracted embeddings cannot supply gradients through
-the backbone. If images already exist, omit this flag. The default layout is
-`work/imagenet/train/<class>/...` and `work/imagenet/val/<class>/...`.
+The launcher reuses/resumes preparation into original-JPEG packs, directly from
+HF shards or from complete existing `train/val` ImageFolder directories.
+Prepared packs live at `work/imagenet/jpeg-packs-v1/`. Raw pixels remain required:
+extracted pooled embeddings cannot supply gradients through the backbone.
+See [the optimized server workflow](finetune_fast.md) for selective source-fit
+restoration and image caching. `--image-storage folder` retains the old loader.
 The existing Hugging Face credentials and ImageNet access requirements apply.
 Paths can be specified independently:
 
@@ -205,13 +208,13 @@ This has its own entry point. Do not pass `configs/finetune.yaml` to
 `all_in_one.sh`, which runs the frozen campaign schema. Add `--backup` to the
 fine-tuning run to opt into the existing private Hugging Face backup machinery
 and optional W&B reporting. It uses the separate
-`finetune-v1/finetune_source_settings/` remote prefix; local raw images and
+`finetune-v1/finetune_gradient_replay/` remote prefix; local raw images and
 feature caches are not uploaded. Without this
 flag, results and checkpoints are local only.
 
 ## Storage, resume and resource usage
 
-Outputs live in `work/finetune-v1/finetune_source_settings/`. Each checkpoint stores the
+Outputs live in `work/finetune-v1/finetune_gradient_replay/`. Each checkpoint stores the
 trainable backbone, SAE, classifier, optimizer, RNG and next step. Repeating
 the command resumes from the last saved completed update. Completed fits and
 evaluations are reused. Changing training settings, source weights or data
@@ -231,14 +234,13 @@ the frozen teacher has no optimizer or gradient graph. Full-image training
 still costs substantially more than SAE training on cached embeddings. Training
 logs/summary record elapsed time, peak CUDA allocated and reserved bytes.
 GPU hours mean elapsed CUDA training wall time, not a utilization measurement.
-Physical batches of 1024/4096 raw images have much higher activation costs than
-the same batches of cached embeddings. They are likely to exceed a single
-RTX 5090's VRAM, especially for ViT. The runner does not silently shrink batches
-or substitute gradient accumulation: that would change contrastive/OT groups.
-Executing this exact configuration may require additional memory or a separately
-implemented gradient-caching/distributed strategy. No large-batch GPU run has
-been validated locally. Explicit numeric batch overrides remain available, but
-constitute a different setting and require a new campaign name.
+Gradient replay retains only a 32-image backbone graph at a time while applying
+the loss to all 1024/4096 examples together. Contrastive/OT groups and the source
+optimizer schedule remain unchanged. Replay adds a student forward pass but
+reduces activation memory; persistent workers and reusable packed images reduce
+loading overhead. Host RAM caches images, not GPU activations. Real GPU memory
+and throughput still need measurement on the server; local validation uses CPU
+fixtures. Explicit batch or microbatch changes require a new campaign name.
 
 Reports are under `reports/<plan_id>/` with `paired_1nn.csv`, joint/frozen
 figures and a manifest. Regenerate them with:

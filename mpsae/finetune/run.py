@@ -2,6 +2,7 @@
 from copy import deepcopy
 from dataclasses import replace
 import csv
+import math
 import os
 from pathlib import Path
 
@@ -149,7 +150,8 @@ def write_report(config, root, catalog, failures):
 
 
 def run(config, workspace, *, source_root=None, image_root=None, device="cuda:0", workers=8,
-        extract_batch=64, download_images=False, smoke=False, backup=False):
+        extract_batch=64, download_images=False, smoke=False, backup=False,
+        image_storage="folder", backup_interval=1800):
     import torch
     from torch import nn
     from torch.utils.data import TensorDataset
@@ -159,6 +161,10 @@ def run(config, workspace, *, source_root=None, image_root=None, device="cuda:0"
     from .train import fit_joint, forward_features, autocast
     if workers < 0 or extract_batch < 1:
         raise ValueError("workers must be nonnegative; extract_batch must be positive")
+    if not math.isfinite(backup_interval) or backup_interval <= 0:
+        raise ValueError("backup_interval must be finite and positive")
+    if image_storage not in ("folder", "packed"):
+        raise ValueError("image_storage must be folder or packed")
     target = torch.device(device)
     if not smoke and (target.type != "cuda" or not torch.cuda.is_available()):
         raise RuntimeError("scientific backbone fine-tuning requires CUDA; use --smoke for CPU validation")
@@ -177,30 +183,40 @@ def run(config, workspace, *, source_root=None, image_root=None, device="cuda:0"
         failures = []
         transfer_datasets = {}
         session = None
+        incremental = None
         if backup and not smoke:
             from ..remote import RemoteSession
             session = RemoteSession(config, root)
             session.remote_prefix = f"finetune-v1/{config.name}/"
             session.start()
+            from .backup import IncrementalBackup
+            incremental = IncrementalBackup(session, backup_interval)
         manifest = None
+        prepared_networks = {}
         try:
             sources = {} if smoke else preflight_sources(config, source_root)
             if not smoke:
                 # Exercise every exact pinned graph before a potentially large download.
                 for name in config.campaign.backbones:
                     source = next(r for r in sources.values() if r["cell"]["backbone"] == name)
-                    net, _, _ = _network(BACKBONES[name], root / "cache" / "weights", target,
+                    net, pretrained, weights = _network(BACKBONES[name], root / "cache" / "weights", target,
                         os.environ.get("HF_TOKEN"), source["backbone_weights"])
                     with torch.no_grad(), autocast(target, config.training["precision"]):
                         value = forward_features(net, torch.zeros(1, 3, 224, 224, device=target), BACKBONES[name])
                         if not torch.isfinite(value).all():
                             raise RuntimeError(f"{name}: nonfinite backbone preflight")
+                    prepared_networks[name] = (net.to("cpu"), pretrained, weights)
                     del net, value
                     torch.cuda.empty_cache()
-                if download_images:
-                    from ..data.imagenet import prepare_imagenet
-                    prepare_imagenet(image_root, token=os.environ.get("HF_TOKEN"))
-                datasets, data_identity = image_datasets(image_root)
+                if image_storage == "packed":
+                    from .jpeg_store import prepare_packs
+                    datasets, data_identity = prepare_packs(image_root,
+                        token=os.environ.get("HF_TOKEN"), download=download_images)
+                else:
+                    if download_images:
+                        from ..data.imagenet import prepare_imagenet
+                        prepare_imagenet(image_root, token=os.environ.get("HF_TOKEN"))
+                    datasets, data_identity = image_datasets(image_root)
             else:
                 generator = torch.Generator().manual_seed(91)
                 datasets = {split: TensorDataset(torch.randn(rows, 3, 8, 8, generator=generator),
@@ -219,9 +235,8 @@ def run(config, workspace, *, source_root=None, image_root=None, device="cuda:0"
                     preprocessing = {"synthetic": True}
                     weights = {"synthetic": "fixed-teacher"}
                 else:
-                    source = next(r for r in sources.values() if r["cell"]["backbone"] == name)
-                    teacher, pretrained, weights = _network(spec, root / "cache" / "weights", target,
-                        os.environ.get("HF_TOKEN"), source["backbone_weights"])
+                    teacher, pretrained, weights = prepared_networks.pop(name)
+                    teacher.to(target)
                     train_transform, eval_transform, preprocessing = transforms(spec, pretrained)
                 teacher.eval().requires_grad_(False)
                 base_identity = {"data": data_identity, "backbone": name, "weights": weights,
@@ -243,7 +258,8 @@ def run(config, workspace, *, source_root=None, image_root=None, device="cuda:0"
                         summary = fit_joint(cell, spec, student, teacher, sae, datasets["train"],
                             train_transform, directory, options=options, source_identity=source_identity,
                             data_identity=data_identity, preprocessing=preprocessing, device=target,
-                            workers=workers, classes=4 if smoke else 1000, max_steps=2 if smoke else 0)
+                            workers=workers, classes=4 if smoke else 1000, max_steps=2 if smoke else 0,
+                            on_checkpoint=incremental.checkpoint if incremental else None)
                         if session:
                             session.on_task(f"source/{cell.slug}", summary)
                         # Teacher features are shared across the three methods, never gradients.
@@ -287,6 +303,8 @@ def run(config, workspace, *, source_root=None, image_root=None, device="cuda:0"
                                 summary=summary, device=device, smoke=smoke)
                             catalog["imagenet"].append(record)
                             atomic_json(catalog_path, catalog)
+                            if incremental:
+                                incremental.results()
                         finally:
                             close_bundle(bundle)
                         del sae
@@ -305,7 +323,15 @@ def run(config, workspace, *, source_root=None, image_root=None, device="cuda:0"
                 manifest = write_report(config, root, catalog, failures)
             finally:
                 if session:
-                    session.finish(scientific_success=bool(manifest and manifest["complete"]))
+                    try:
+                        synced = session.finish(scientific_success=bool(manifest and manifest["complete"]))
+                        if not synced and not failures:
+                            raise RuntimeError("HF backup incomplete; run python -m mpsae.finetune sync "
+                                               "with the same --config and --workspace")
+                    except Exception as error:
+                        if not failures:
+                            raise
+                        get_logger("finetune").error("Final backup also failed: %s", type(error).__name__)
         if not manifest["complete"]:
             raise RuntimeError(f"incomplete fine-tuning report: {root / 'reports'}")
         return manifest

@@ -198,21 +198,23 @@ main() {
     # python3-dev alone does not provide that interpreter's extension headers.
     "$venv_python" -c 'import sys, sysconfig; from pathlib import Path; header = Path(sysconfig.get_path("include")) / "Python.h"; sys.exit(0 if header.is_file() else f"Missing {header}. Install python{sys.version_info.major}.{sys.version_info.minor}-dev (and the matching -venv package), or choose a Python with development headers using --python.")'
     step 'Python packaging tools'
-    "$venv_python" -m pip install --no-cache-dir --upgrade pip 'setuptools==80.9.0' 'wheel==0.45.1'
+    # Keep pip's wheel/download cache: reinstalling on a persistent server must
+    # not fetch multi-GB CUDA wheels again. Versions remain pinned below.
+    "$venv_python" -m pip install --upgrade pip 'setuptools==80.9.0' 'wheel==0.45.1'
     # torchvision depends on NumPy. Install the shared ABI first, so the initial
     # Torch install cannot leave NumPy 2 in a half-configured environment.
-    "$venv_python" -m pip install --no-cache-dir -c constraints/server.txt numpy
+    "$venv_python" -m pip install -c constraints/server.txt numpy
     step 'pinned GPU-compatible PyTorch'
     # The official ARM64 torchvision wheels have no +cuXXX local suffix.
     vision_spec="torchvision==$TORCHVISION_VERSION+$CUDA_FLAVOR"
     [[ "$repo_arch" != sbsa ]] || vision_spec="torchvision==$TORCHVISION_VERSION"
-    "$venv_python" -m pip install --no-cache-dir -c constraints/server.txt --index-url "$TORCH_INDEX" \
+    "$venv_python" -m pip install -c constraints/server.txt --index-url "$TORCH_INDEX" \
         "torch==$TORCH_VERSION+$CUDA_FLAVOR" "$vision_spec"
     if [[ "$repo_arch" == sbsa ]]; then
-        "$venv_python" -m pip install --no-cache-dir --force-reinstall --no-deps --index-url "$TORCH_INDEX" "$vision_spec"
+        "$venv_python" -m pip install --force-reinstall --no-deps --index-url "$TORCH_INDEX" "$vision_spec"
     fi
     step 'direct-extraction and experiment dependencies (no FFCV/CuPy required)'
-    "$venv_python" -m pip install --no-cache-dir --no-build-isolation -r requirements-server.txt
+    "$venv_python" -m pip install --no-build-isolation -r requirements-server.txt
     "$venv_python" -m pip check
 
     step 'runtime environment'

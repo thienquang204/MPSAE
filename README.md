@@ -24,6 +24,11 @@ joint fits: CSR, CSRv2 and MPSAE on ResNet-50 (K=8), ConvNeXt-Tiny (K=12) and
 ViT-B/16 (K=12). Its entry point is `python -m mpsae.finetune run`; settings
 are in `configs/finetune.yaml`. It preserves the frozen campaign below.
 
+For the nine fits alone on a 32 GB GPU, see the
+[fast server workflow](docs/finetune_fast.md). `bash finetune_only.sh` reuses the
+installed environment, packs/reuses ImageNet once, preserves full-batch losses
+with image gradient replay, and enables incremental checkpoint/result backup.
+
 The main campaign selects ImageNet E1/E2 for ResNet-50, ViT-B/16,
 ConvNeXt-Tiny and DINOv2-S/14, with selective linear probing. All downstream
 experiments (including SOP) and repeated retrieval timing are disabled for now.

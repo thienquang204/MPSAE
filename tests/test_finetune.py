@@ -35,14 +35,16 @@ def test_pilot_is_nine_additional_fits_with_existing_probe_selection():
         assert options["weight_decay"] == preset.weight_decay
         assert options["optimizer"] == "adam" and options["drop_last"] is False
         assert plan["config"]["resolved_training"][cell.slug] == options
-    assert config.name == "finetune_source_settings"
+    assert config.name == "finetune_gradient_replay"
     from mpsae.benchmark.config import load_campaign
     assert load_campaign("configs/thesis.yaml").plan()["source_cells"] == 39
 
 
 @pytest.mark.parametrize("key,value", [("epochs", 0), ("batch_size", 1), ("backbone_lr", float("nan")),
     ("sae_lr", -1), ("precision", "fp16"), ("ce_weight", 0), ("freeze_bn_stats", "yes"), ("typo", 1),
-    ("adam_eps", 0), ("adam_betas", [0.9, 1]), ("optimizer", "typo"), ("batch_size", "inherit")])
+    ("adam_eps", 0), ("adam_betas", [0.9, 1]), ("optimizer", "typo"), ("batch_size", "inherit"),
+    ("backbone_microbatch", -1), ("backbone_microbatch", True), ("prefetch_factor", 0),
+    ("freeze_bn_stats", False)])
 def test_invalid_finetune_settings_are_rejected(tmp_path, key, value):
     import yaml
     payload = yaml.safe_load(Path("configs/finetune.yaml").read_text())
@@ -109,7 +111,8 @@ def augment(image):
     return image + torch.rand_like(image) * 0.01
 
 
-def test_interrupted_joint_training_resumes_exactly_and_rejects_changed_recipe(tmp_path, monkeypatch):
+@pytest.mark.parametrize("microbatch", [0, 2])
+def test_interrupted_joint_training_resumes_exactly_and_rejects_changed_recipe(tmp_path, monkeypatch, microbatch):
     torch = pytest.importorskip("torch")
     from torch.utils.data import TensorDataset
     from mpsae.finetune import train
@@ -117,7 +120,7 @@ def test_interrupted_joint_training_resumes_exactly_and_rejects_changed_recipe(t
     dataset = TensorDataset(torch.randn(12, 3, 8, 8), torch.arange(12) % 4)
     options = {**load_config("configs/finetune.yaml").training_options(Cell("ff2048", "csr", 8, 7)),
                "precision": "float32", "epochs": 2, "batch_size": 4, "checkpoint_every": 1,
-               "log_every": 1}
+               "log_every": 1, "backbone_microbatch": microbatch}
     def fit(directory, **changes):
         cell, spec, network, teacher, sae, _ = fixture_models()
         return train.fit_joint(cell, spec, network, teacher, sae, dataset, augment, directory,
@@ -125,17 +128,18 @@ def test_interrupted_joint_training_resumes_exactly_and_rejects_changed_recipe(t
             preprocessing={"augmentation": "seeded"}, device="cpu", classes=4)
     full, resumed = tmp_path / "full", tmp_path / "resumed"
     fit(full)
-    actual_step = train.joint_step
+    step_name = "cached_backward" if microbatch else "joint_step"
+    actual_step = getattr(train, step_name)
     def interrupt(*args, step, **kwargs):
         if step == 2:
             raise KeyboardInterrupt("simulate interrupted image batch")
         return actual_step(*args, step=step, **kwargs)
-    monkeypatch.setattr(train, "joint_step", interrupt)
+    monkeypatch.setattr(train, step_name, interrupt)
     with pytest.raises(KeyboardInterrupt):
         fit(resumed)
     checkpoint = resumed / "checkpoint.pt"
     assert torch.load(checkpoint, weights_only=False)["next_step"] == 2
-    monkeypatch.setattr(train, "joint_step", actual_step)
+    monkeypatch.setattr(train, step_name, actual_step)
     fit(resumed)
     first, second = (torch.load(p / "checkpoint.pt", weights_only=False) for p in (full, resumed))
     for group in first["optimizer"]["param_groups"]:
@@ -145,7 +149,7 @@ def test_interrupted_joint_training_resumes_exactly_and_rejects_changed_recipe(t
         for key in first[group]:
             torch.testing.assert_close(first[group][key], second[group][key], atol=0, rtol=0)
     before = sha256_file(checkpoint)
-    monkeypatch.setattr(train, "joint_step", lambda *args, **kwargs: pytest.fail("completed fit retrained"))
+    monkeypatch.setattr(train, step_name, lambda *args, **kwargs: pytest.fail("completed fit retrained"))
     monkeypatch.setattr(torch.optim, "Adam", lambda *args, **kwargs: pytest.fail("completed fit allocated optimizer"))
     assert fit(resumed)["complete"]
     assert sha256_file(checkpoint) == before
@@ -299,12 +303,12 @@ def test_joint_training_only_collects_diagnostics_at_log_steps(tmp_path, monkeyp
     from mpsae.finetune import train
     cell, spec, network, teacher, sae, _ = fixture_models()
     dataset = TensorDataset(torch.randn(22, 3, 8, 8), torch.arange(22) % 4)
-    original, calls, batch_sizes = train.joint_step, [], []
+    original, calls, batch_sizes = train.feature_loss, [], []
     def tracked(*args, **kwargs):
         calls.append(kwargs["collect_metrics"])
-        batch_sizes.append(len(args[6]))
+        batch_sizes.append(len(args[4]))
         return original(*args, **kwargs)
-    monkeypatch.setattr(train, "joint_step", tracked)
+    monkeypatch.setattr(train, "feature_loss", tracked)
     train.fit_joint(cell, spec, network, teacher, sae, dataset, augment, tmp_path,
         options={**load_config("configs/finetune.yaml").training_options(cell),
                  "precision": "float32", "batch_size": 4, "epochs": 1,

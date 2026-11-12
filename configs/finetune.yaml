@@ -1,5 +1,5 @@
 # Additional supervised joint fine-tuning; main frozen campaign is unchanged.
-name: finetune_source_settings
+name: finetune_gradient_replay
 backbones: [ff2048, convnext_tiny, vit_b16]
 methods: [csr, csrv2, mpsae]
 seeds: [1227]
@@ -37,6 +37,10 @@ execution:
   retain_codes: false
   max_steps: 0
 finetune:
+  # Image graphs are replayed in chunks, but losses still see the source batch
+  # (4096 for CSR/CSRv2, 1024 for MPSAE). No independent microbatch losses.
+  backbone_microbatch: 32
+  prefetch_factor: 2
   epochs: source
   batch_size: source
   backbone_lr: source

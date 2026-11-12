@@ -12,7 +12,8 @@ DEFAULTS = dict(epochs="source", batch_size="source", backbone_lr="source", sae_
                 classifier_lr="source", weight_decay="source", optimizer="adam",
                 adam_eps="source", adam_betas="source", drop_last=False, ce_weight=1.0,
                 method_weight=1.0, grad_clip=1.0, precision="bf16",
-                freeze_bn_stats=True, checkpoint_every=100, log_every=10)
+                freeze_bn_stats=True, checkpoint_every=100, log_every=10,
+                backbone_microbatch=0, prefetch_factor=2)
 TRANSFER_DEFAULTS = dict(enabled=False, datasets=["eurosat", "sop"],
                         knn={"n_neighbors": [1, 20], "temperature": 0.07}, revisions={})
 
@@ -42,6 +43,10 @@ class FineTuneCampaign:
             if result[key] == "source":
                 result[key] = getattr(preset, "lr" if key.endswith("_lr") else key)
         result["adam_betas"] = list(result["adam_betas"])
+        # Old full-graph configs retain their checkpoint training identity.
+        if result["backbone_microbatch"] == 0 and result["prefetch_factor"] == 2:
+            result.pop("backbone_microbatch")
+            result.pop("prefetch_factor")
         return result
 
     def resolved(self):
@@ -52,7 +57,7 @@ class FineTuneCampaign:
                 "objective": {"classification": "CE(head(L2_normalize(z_K)), y)",
                     "reconstruction_target": "frozen original backbone, same augmented image",
                     "sparsity_schedule": "fixed target K for all methods, including CSRv2",
-                    "regularizer_batch": "physical batch; no gradient accumulation",
+                    "regularizer_batch": "full logical batch; image gradient replay when backbone_microbatch > 0",
                     "optimizer": self.training["optimizer"] + ", constant LR, separate backbone/SAE/head groups",
                     "drop_last": self.training["drop_last"], "teacher_mode": "eval, no gradients"},
                 "method_presets": {c.slug: asdict(training_preset(c.method, BACKBONES[c.backbone].preset, k=c.k))
@@ -103,6 +108,11 @@ def load_config(path):
             continue
         if isinstance(value, bool) or not isinstance(value, int) or value < (2 if key == "batch_size" else 1):
             raise ValueError(f"invalid finetune.{key}")
+    for key, minimum in (("backbone_microbatch", 0), ("prefetch_factor", 1)):
+        if isinstance(training[key], bool) or not isinstance(training[key], int) or training[key] < minimum:
+            raise ValueError(f"invalid finetune.{key}")
+    if training["backbone_microbatch"] and not training["freeze_bn_stats"]:
+        raise ValueError("backbone_microbatch requires freeze_bn_stats: true")
     for key in ("backbone_lr", "sae_lr", "classifier_lr", "ce_weight", "method_weight", "grad_clip", "weight_decay", "adam_eps"):
         value = training[key]
         if key in ("backbone_lr", "sae_lr", "classifier_lr", "weight_decay", "adam_eps") and value == "source":

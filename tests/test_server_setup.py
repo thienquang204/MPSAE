@@ -71,6 +71,25 @@ def test_newer_explicit_profile_is_allowed_for_older_gpu():
     assert result.returncode == 0 and result.stdout.strip() == "12.9"
 
 
+def test_nine_run_launcher_preserves_paths_and_skips_setup_by_default(tmp_path):
+    _executable(tmp_path / "finetune_only.sh", (ROOT / "finetune_only.sh").read_text())
+    _executable(tmp_path / "activate_server.sh", '''#!/usr/bin/env bash
+python() { printf '<%s>\\n' "$@"; }
+export -f python
+''')
+    # exec resolves external programs, so install a fixture executable in PATH.
+    bindir = tmp_path / "bin"
+    _executable(bindir / "python", '#!/usr/bin/env bash\nprintf "<%s>\\n" "$@"\n')
+    env = dict(os.environ, PATH=str(bindir) + os.pathsep + os.environ["PATH"])
+    result = shell('bash finetune_only.sh --workspace "path with spaces"', cwd=tmp_path, env=env)
+    assert result.returncode == 0, result.stderr
+    assert '<mpsae.finetune>\n<run>' in result.stdout
+    assert '<path with spaces>' in result.stdout
+    assert '<--backup>' in result.stdout and '<packed>' in result.stdout
+    assert '<16>' in result.stdout and '<64>' in result.stdout
+    assert 'mpsae.remote' not in result.stdout and 'pip' not in result.stdout
+
+
 def _executable(path, content):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8", newline="\n")
@@ -88,7 +107,7 @@ if [[ "$*" == *"Missing {header}"* && "${TEST_FAIL_HEADERS:-0}" == 1 ]]; then
     echo 'fixture matching Python.h missing' >&2
     exit 29
 fi
-if [[ "$*" == *"pip install --no-cache-dir --no-build-isolation -r requirements-server.txt"* && "${TEST_FAIL_INSTALL:-0}" == 1 ]]; then
+if [[ "$*" == *"pip install --no-build-isolation -r requirements-server.txt"* && "${TEST_FAIL_INSTALL:-0}" == 1 ]]; then
     echo 'fixture FFCV build failed' >&2
     exit 17
 fi
@@ -158,7 +177,7 @@ def test_success_verifies_full_environment_and_keeps_existing_artifacts(installa
     calls = (root / "calls.txt").read_text()
     assert "torch==2.9.1+cu130 torchvision==0.24.1+cu130" in calls
     assert "--no-build-isolation -r requirements-server.txt" in calls
-    assert calls.index("-m pip install --no-cache-dir -c constraints/server.txt numpy") < calls.index("torch==2.9.1+cu130")
+    assert calls.index("-m pip install -c constraints/server.txt numpy") < calls.index("torch==2.9.1+cu130")
     assert calls.index("-m pip check") < calls.index("-m mpsae.server") < calls.index("-m pip freeze")
     assert (root / "env.sh").is_file()
     assert (root / ".venv/server-requirements.freeze.txt").read_text().strip() == "fixture==1"
