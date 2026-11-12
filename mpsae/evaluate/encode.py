@@ -338,13 +338,16 @@ def _encode(sae, features: Any, row_ids: np.ndarray, k: int, *, device: torch.de
                 stop = min(start + batch_size, rows)
                 batch = _feature_batch(features, row_ids, start, stop, device)
                 code_indices, code_values = sae.encode_compact(batch, k)
-                nnz = code_values.gt(0).sum(dim=1)
+                # The values must reach the host for storage anyway. Count
+                # support there instead of synchronizing CUDA four extra times.
+                host_values = code_values.cpu().numpy()
+                nnz = np.count_nonzero(host_values > 0, axis=1)
                 nnz_sum += int(nnz.sum())
                 nnz_min = min(nnz_min, int(nnz.min()))
-                empty += int(nnz.eq(0).sum())
-                below_k += int(nnz.lt(k).sum())
+                empty += int(np.count_nonzero(nnz == 0))
+                below_k += int(np.count_nonzero(nnz < k))
                 indices[start:stop] = code_indices.cpu().numpy()
-                values[start:stop] = code_values.cpu().numpy()
+                values[start:stop] = host_values
                 progress.advance(stop - start)
     finally:
         sae.train(was_training)

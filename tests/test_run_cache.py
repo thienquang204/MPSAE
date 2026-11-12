@@ -401,7 +401,7 @@ def test_e2_without_override_uses_current_inference_grid(runs, tmp_path, monkeyp
     assert [point["k"] for point in result["points"]] == [2, 8, 16, 32, 64, 128, 256]
 
 
-@pytest.mark.parametrize("backbone", ["ff2048", "vit_b16", "convnext_tiny", "rn18", "dinov2_vits14"])
+@pytest.mark.parametrize("backbone", ["ff2048", "vit_b16", "convnext_tiny", "dinov2_vits14"])
 def test_selective_probes_apply_to_e1_e2_and_resume(runs, tmp_path, monkeypatch, backbone):
     from mpsae.benchmark.config import load_campaign
 

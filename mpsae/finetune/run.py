@@ -75,6 +75,7 @@ def evaluate_model(cell, spec, sae, bundle, root, config, *, signature, summary,
     for k in selected:
         if _cached_e1_complete(done.get(k), settings.at_budget(k)):
             continue
+        sae.to(device)
         def persist(point):
             done[k] = point
             atomic_json(path, {"signature": signature, "points": [done[b] for b in sorted(done)]})
@@ -223,13 +224,14 @@ def run(config, workspace, *, source_root=None, image_root=None, device="cuda:0"
                 try:
                     for cell in (c for c in config.cells() if c.backbone == name):
                         directory = root / "runs" / cell.slug
-                        options = dict(config.training)
+                        options = config.training_options(cell)
                         if smoke:
                             options.update(precision="float32", batch_size=4, epochs=1, checkpoint_every=1)
                         source = sources.get(cell.slug, {"synthetic": True, "cell": cell.__dict__})
                         source_identity = {k: v for k, v in source.items() if k != "path"}
-                        sae = (build_sae(spec.dim, spec.preset.hidden_dim, seed=cell.seed, device=target)
-                               if smoke else load_fitted(cell, Path(source["path"]).parent, spec, device=target))
+                        sae = (build_sae(spec.dim, spec.preset.hidden_dim, seed=cell.seed, device="cpu")
+                               if smoke else load_fitted(cell, Path(source["path"]).parent, spec, device="cpu"))
+                        # Keep the frozen control off CUDA during joint training.
                         frozen_sae = deepcopy(sae)
                         student = deepcopy(teacher)
                         summary = fit_joint(cell, spec, student, teacher, sae, datasets["train"],
@@ -244,10 +246,14 @@ def run(config, workspace, *, source_root=None, image_root=None, device="cuda:0"
                                 root / "cache" / "frozen_features", identity=base_identity,
                                 batch_size=extract_batch, workers=workers, device=target,
                                 precision=options["precision"])
+                        # The teacher is only needed again at the next fit;
+                        # fit_joint moves it back before its next forward pass.
+                        teacher.to("cpu")
                         baseline_signature = canonical_hash({"features": baseline_bundle.identity, "source": source_identity})
                         baseline = evaluate_model(cell, spec, frozen_sae, baseline_bundle, root / "baseline", config,
                             signature=baseline_signature, summary={}, device=device, baseline=True, smoke=smoke)
                         catalog["frozen"].append(baseline)
+                        del frozen_sae
                         atomic_json(catalog_path, catalog)
                         # The backbone changed; cached original embeddings must not be reused.
                         checkpoint_id = sha256_file(directory / "checkpoint.pt")
@@ -256,6 +262,9 @@ def run(config, workspace, *, source_root=None, image_root=None, device="cuda:0"
                                 "stage": "joint", "checkpoint_sha256": checkpoint_id},
                             batch_size=extract_batch, workers=workers, device=target,
                             precision=options["precision"])
+                        # Search and probes consume cached features plus the SAE.
+                        # The image backbone is no longer needed on the device.
+                        del student
                         try:
                             signature = canonical_hash({"checkpoint": checkpoint_id, "features": bundle.identity})
                             record = evaluate_model(cell, spec, sae, bundle, root, config, signature=signature,
@@ -264,7 +273,7 @@ def run(config, workspace, *, source_root=None, image_root=None, device="cuda:0"
                             atomic_json(catalog_path, catalog)
                         finally:
                             close_bundle(bundle)
-                        del student, sae, frozen_sae
+                        del sae
                         if target.type == "cuda":
                             torch.cuda.empty_cache()
                 finally:

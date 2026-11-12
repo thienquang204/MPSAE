@@ -227,11 +227,13 @@ class BatchSource:
         for index in range(skip_batches, self.batches_per_epoch):
             ids = order[index * self.batch_size:(index + 1) * self.batch_size]
             if self.residency == "mmap":
-                rows = np.ascontiguousarray(self._features[np.sort(ids)], dtype=np.float32)
+                sorted_positions = np.argsort(ids)
+                rows = np.ascontiguousarray(self._features[ids[sorted_positions]], dtype=np.float32)
                 # Restore the shuffled order after the locality-friendly read:
                 # OT groups are contiguous slices of the batch, so row order
                 # inside a batch is part of the objective.
-                inverse = np.argsort(np.argsort(ids))
+                inverse = np.empty_like(sorted_positions)
+                inverse[sorted_positions] = np.arange(len(ids))
                 batch = torch.from_numpy(rows[inverse]).to(self.device, non_blocking=True)
                 labels = (self._labels[torch.from_numpy(ids)].to(self.device, non_blocking=True)
                           if self._labels is not None else None)

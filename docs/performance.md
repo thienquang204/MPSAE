@@ -104,6 +104,57 @@ with new sharded timings.
 
 ## Measure on the GPU host
 
+### Additional runtime cleanup (2026-11-12)
+
+The main and fine-tuning experiment grids, losses, precision, batch sizes,
+epochs, learning rates, OT convergence checks and checkpoint intervals remain
+unchanged. No CLIP/VOC campaign is enabled by these optimizations.
+
+- Fine-tuning computes optional loss/sparsity/OT diagnostics only at log steps
+  and the final step. The joint loss and gradient finite checks still run every
+  step. Progress reports identify the last logged loss rather than presenting
+  it as the current step's loss. Joint scalar diagnostics use one packed host
+  transfer instead of four separate transfers.
+- Completed fine-tuning checkpoints restore only backbone/SAE weights for
+  evaluation. They no longer construct a classifier or restore Adam state onto
+  CUDA. The existing combined checkpoint is still read on CPU and fully checked;
+  there is no new checkpoint format or reduced integrity validation.
+- Frozen control SAEs remain on CPU during training and move to CUDA only if
+  an uncached evaluation needs them. The teacher returns to CPU after its shared
+  feature extraction; the next fit restores it to the training device. The
+  fine-tuned backbone is released after extraction, before sparse search/probes.
+  Final training gradients are cleared before returning to evaluation.
+- Image loaders keep shuffle indices in a compact NumPy array and sequential
+  evaluation indices in a `range`. The torch permutation, augmentation seeds,
+  batch composition and resume offsets are unchanged. On this CPU environment,
+  seven trials with 1,281,167 rows and one torch thread gave median index-build
+  times of 36.1 ms (Python list) versus 15.8 ms (NumPy view); index payload falls
+  from 44.0 MiB to 9.8 MiB. These are index-only measurements, not training speedups.
+- Memory-mapped embedding batches sort row positions once and build the inverse
+  permutation in linear time, replacing three sorts while restoring identical
+  row order before the loss, including contiguous OT groups.
+- Sparse encoding counts active entries from the values already copied to the
+  host for storage. This removes four scalar device-to-host synchronizations per
+  batch without changing codes, Top-K tie behavior, normalization or statistics.
+- Feature extraction holds one inference precision context per split instead
+  of entering it for every batch.
+
+Tests compare detailed/quiet fine-tuning losses, gradients and activity counters,
+exact interrupted resume, completed-run reuse, nine synthetic training/evaluation
+cells, feature row order and sparse encoding/search. CUDA versions of the joint
+gradient and nine-cell integration tests skip when CUDA is unavailable. To run
+these checks on the server before a long campaign:
+
+```bash
+python -m pytest -q tests/test_finetune.py tests/test_data_performance.py tests/test_evaluate.py tests/test_training_performance.py
+```
+
+The full-gallery exact FP32 search, linear-probe training and converged OT solver
+remain substantial workloads. This change does not replace them with approximate
+search, TF32, fewer examples or fewer solver iterations. GPU throughput and peak
+VRAM savings must be measured on the experiment host; local CPU tests cannot
+establish an RTX 5090 speedup.
+
 The development environment has CPU-only PyTorch. Numerical and orchestration
 tests are available, but no RTX 5090 speedup or peak-memory measurement is claimed.
 Local validation on 2026-11-10 used Python 3.13 and PyTorch 2.9.1+cpu:

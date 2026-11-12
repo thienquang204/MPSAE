@@ -112,7 +112,15 @@ def test_codes_are_normalised_and_within_budget(sae, features):
 
 
 def test_stats_describe_the_codes(sae, features):
-    stats = encode.encode_split(sae, features, None, K, device="cpu")["stats"]
+    features[::3] = 0  # Include empty rows in both full and final short batches.
+    result = encode.encode_split(sae, features, None, K, device="cpu", batch_size=7)
+    stats = result["stats"]
+    support = np.count_nonzero(result["values"] > 0, axis=1)
+    assert stats["nnz_mean"] == support.mean()
+    assert stats["nnz_min"] == support.min()
+    assert stats["empty_codes"] == np.count_nonzero(support == 0)
+    assert stats["empty_fraction"] == np.mean(support == 0)
+    assert stats["below_k_fraction"] == np.mean(support < K)
     for field in ("rows", "k", "nnz_mean", "nnz_min", "empty_codes",
                   "empty_fraction", "seconds"):
         assert field in stats, field

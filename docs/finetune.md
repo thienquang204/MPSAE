@@ -40,19 +40,18 @@ none of these three selected training budgets exceeds 64.
 This is a **supervised, teacher-anchored joint fine-tuning experiment**.
 It changes the training protocol and is not a reproduction of the original
 frozen-backbone paper experiment. All methods receive the same added CE loss,
-images, number of epochs, batch size and optimizer settings. Their original
-method regularizers remain different. A random batch of 16 may contain few
-same-class positives for CSRv2, so the effect of batch size must be acknowledged
-when interpreting the comparison. No performance improvement is guaranteed.
+images and number of epochs. Each method inherits its own standalone SAE
+batch size and Adam settings; its original regularizer remains different.
+No performance improvement is guaranteed.
 
 ## Default optimization
 
 | Setting | Value |
 | --- | --- |
-| Additional epochs | 3 for every method |
-| Physical image batch | 16, no gradient accumulation |
-| Optimizer | AdamW, constant learning rate |
-| Backbone / SAE / classifier LR | `1e-5` / `1e-5` / `1e-3` |
+| Additional epochs | 10 for every method, inherited from its standalone preset |
+| Physical image batch | CSR/CSRv2: 4096; MPSAE: 1024; no gradient accumulation |
+| Optimizer | Adam, constant learning rate; betas (0.9, 0.999), epsilon `6.25e-10` |
+| Backbone / SAE / classifier LR | `4e-5` / `4e-5` / `4e-5`, inherited from the standalone preset |
 | Weight decay / gradient clipping | `1e-4` / norm 1 |
 | CE / method weights | 1 / 1 |
 | Precision | BF16 backbone and teacher; float32 SAE, classifier and losses |
@@ -61,12 +60,18 @@ when interpreting the comparison. No performance improvement is guaranteed.
 | Training augmentation | Random resized crop 224, scale 0.8–1.0, horizontal flip |
 | Evaluation preprocessing | Deterministic resize 256, center crop 224 |
 
-Normalization uses the pinned backbone's preprocessing. Full training uses
-`floor(1,281,167 / 16) = 80,072` updates per epoch, **240,216 updates per fit**.
-The last incomplete batch is dropped. These are conservative pilot defaults,
-not learning rates selected on validation results. The source method presets
-in manifests describe the inherited regularizers; their old batch/epoch/LR
-fields do not override the separate `finetune` settings above.
+Normalization uses the pinned backbone's preprocessing. The final incomplete
+batch is retained, matching standalone training. For 1,281,167 images, CSR/CSRv2
+use 313 updates per epoch (3,130 per fit), and MPSAE uses 1,252 (12,520 per fit).
+The YAML value `source` resolves through `training_preset(method, backbone, K)`;
+the plan's `config.resolved_training` and each fit's checkpoint identity record
+the actual numbers. There is no separate fixed batch-16 default.
+
+This replaces the earlier three-epoch, batch-16 AdamW pilot, whose learning
+rates were `1e-5` for backbone/SAE and `1e-3` for the head. The new campaign name
+`finetune_source_settings` keeps those earlier outputs separate and cannot
+resume their optimizer state. Fine-tuning still initializes from the completed
+standalone SAE, not from a random SAE. These are 10 additional joint epochs.
 
 ## Evaluation and controls
 
@@ -126,13 +131,14 @@ python -m mpsae.finetune run --source-root /data/work/direct-v1 \
 This has its own entry point. Do not pass `configs/finetune.yaml` to
 `all_in_one.sh`, which runs the frozen campaign schema. Add `--backup` to the
 fine-tuning run to opt into the existing private Hugging Face backup machinery
-and optional W&B reporting. It uses the separate `finetune-v1/finetune/` remote
-prefix; local raw images and feature caches are not uploaded. Without this
+and optional W&B reporting. It uses the separate
+`finetune-v1/finetune_source_settings/` remote prefix; local raw images and
+feature caches are not uploaded. Without this
 flag, results and checkpoints are local only.
 
 ## Storage, resume and resource usage
 
-Outputs live in `work/finetune-v1/finetune/`. Each checkpoint stores the
+Outputs live in `work/finetune-v1/finetune_source_settings/`. Each checkpoint stores the
 trainable backbone, SAE, classifier, optimizer, RNG and next step. Repeating
 the command resumes from the last saved completed update. Completed fits and
 evaluations are reused. Changing training settings, source weights or data
@@ -147,14 +153,19 @@ approximately **71 GiB** for feature arrays at full ImageNet size, before raw
 images, weights, labels, checkpoints and temporary evaluation storage. Existing
 frozen-campaign caches remain intact. Ensure adequate disk space before running.
 
-Training executes one fit at a time. BF16 and batch 16 limit activation memory;
+Training executes one fit at a time. BF16 reduces activation memory;
 the frozen teacher has no optimizer or gradient graph. Full-image training
 still costs substantially more than SAE training on cached embeddings. Training
 logs/summary record elapsed time, peak CUDA allocated and reserved bytes.
 GPU hours mean elapsed CUDA training wall time, not a utilization measurement.
-Batch 16 is a starting point, not a measured VRAM guarantee on RTX 5090.
-If it does not fit, lower the common batch for all methods and use a new campaign
-name; this changes contrastive/OT batch statistics and must be reported.
+Physical batches of 1024/4096 raw images have much higher activation costs than
+the same batches of cached embeddings. They are likely to exceed a single
+RTX 5090's VRAM, especially for ViT. The runner does not silently shrink batches
+or substitute gradient accumulation: that would change contrastive/OT groups.
+Executing this exact configuration may require additional memory or a separately
+implemented gradient-caching/distributed strategy. No large-batch GPU run has
+been validated locally. Explicit numeric batch overrides remain available, but
+constitute a different setting and require a new campaign name.
 
 Reports are under `reports/<plan_id>/` with `paired_1nn.csv`, joint/frozen
 figures and a manifest. Regenerate them with:

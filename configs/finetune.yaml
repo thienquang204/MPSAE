@@ -1,5 +1,5 @@
 # Additional supervised joint fine-tuning; main frozen campaign is unchanged.
-name: finetune
+name: finetune_source_settings
 backbones: [ff2048, convnext_tiny, vit_b16]
 methods: [csr, csrv2, mpsae]
 seeds: [1227]
@@ -30,12 +30,16 @@ execution:
   retain_codes: false
   max_steps: 0
 finetune:
-  epochs: 3
-  batch_size: 16
-  backbone_lr: 0.00001
-  sae_lr: 0.00001
-  classifier_lr: 0.001
-  weight_decay: 0.0001
+  epochs: source
+  batch_size: source
+  backbone_lr: source
+  sae_lr: source
+  classifier_lr: source
+  optimizer: adam
+  adam_eps: source
+  adam_betas: source
+  weight_decay: source
+  drop_last: false
   ce_weight: 1.0
   method_weight: 1.0
   grad_clip: 1.0

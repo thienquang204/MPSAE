@@ -13,6 +13,7 @@ class EpochImages:
 
     def __getitem__(self, index):
         import torch
+        index = int(index)
         image, label = self.dataset[index]
         # Each image has the same augmentation under any worker count/resume.
         with torch.random.fork_rng(devices=[]):
@@ -20,14 +21,17 @@ class EpochImages:
             return self.transform(image), label
 
 
-def loader(dataset, transform, *, seed, epoch, batch_size, workers, skip=0, training=False):
+def loader(dataset, transform, *, seed, epoch, batch_size, workers, skip=0, training=False, drop_last=None):
     import torch
     from torch.utils.data import DataLoader, Subset
     generator = torch.Generator().manual_seed(seed + epoch)
-    order = torch.randperm(len(dataset), generator=generator).tolist() if training else list(range(len(dataset)))
+    # Compact indices avoid millions of Python integers (and worker copies).
+    # Keep the exact torch permutation and skip offset used by old checkpoints.
+    order = torch.randperm(len(dataset), generator=generator).numpy() if training else range(len(dataset))
     rows = EpochImages(dataset, transform, seed, epoch)
     return DataLoader(Subset(rows, order[skip:]), batch_size=batch_size, shuffle=False,
-                      drop_last=training, num_workers=workers, pin_memory=torch.cuda.is_available(),
+                      drop_last=training if drop_last is None else drop_last,
+                      num_workers=workers, pin_memory=torch.cuda.is_available(),
                       generator=torch.Generator().manual_seed(seed + epoch))
 
 
@@ -86,10 +90,10 @@ def extract_features(network, datasets, transform, spec, directory, *, identity,
             if sink.remaining:
                 batches = loader(datasets[split], transform, seed=0, epoch=0, batch_size=batch_size,
                                  workers=workers, skip=sink.cursor)
-                with torch.no_grad():
+                # One inference precision context avoids per-batch setup.
+                with torch.no_grad(), autocast(device, precision):
                     for images, labels in batches:
-                        with autocast(device, precision):
-                            values = forward_features(network, images.to(device, non_blocking=True), spec)
+                        values = forward_features(network, images.to(device, non_blocking=True), spec)
                         sink.write(values.float().cpu().numpy(), labels.numpy())
                         progress.advance(len(labels))
             features, labels = sink.publish()

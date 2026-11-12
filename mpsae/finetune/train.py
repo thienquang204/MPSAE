@@ -39,7 +39,8 @@ def train_mode(network, freeze_bn_stats):
                 module.eval()  # affine parameters train; small-batch running statistics do not
 
 
-def joint_step(cell, spec, network, teacher, sae, head, images, labels, *, options, step, total):
+def joint_step(cell, spec, network, teacher, sae, head, images, labels, *, options, step, total,
+               collect_metrics=True):
     with torch.no_grad(), autocast(images.device, options["precision"]):
         target = forward_features(teacher, images, spec).float()
     with autocast(images.device, options["precision"]):
@@ -47,15 +48,18 @@ def joint_step(cell, spec, network, teacher, sae, head, images, labels, *, optio
     # SAE, teacher reconstruction, contrastive and MMPOT stay float32.
     result = methods.compute_step(cell.method, sae, features, k=cell.k,
         preset=training_preset(cell.method, spec.preset, k=cell.k), step=step, total_steps=total,
-        labels=labels, reconstruction_target=target, fixed_budget=True)
+        labels=labels, reconstruction_target=target, fixed_budget=True, collect_metrics=collect_metrics)
     logits = head(F.normalize(result.latents, dim=-1))
     ce = F.cross_entropy(logits, labels)
     loss = options["ce_weight"] * ce + options["method_weight"] * result.loss
     if not torch.isfinite(loss):
         raise FloatingPointError("nonfinite joint fine-tuning loss")
-    return loss, {**result.metrics, "loss_method": result.loss.detach().item(),
-                  "loss_ce": ce.detach().item(), "loss_total": loss.detach().item(),
-                  "head_top1": 100 * (logits.argmax(-1) == labels).float().mean().item()}
+    if not collect_metrics:
+        return loss, {}
+    values = torch.stack([result.loss.detach(), ce.detach(), loss.detach(),
+        100 * (logits.argmax(-1) == labels).float().mean()]).cpu().tolist()
+    return loss, {**result.metrics, **dict(zip(
+        ("loss_method", "loss_ce", "loss_total", "head_top1"), values))}
 
 
 def fit_joint(cell, spec, network, teacher, sae, dataset, transform, directory, *,
@@ -73,7 +77,8 @@ def _fit(cell, spec, network, teacher, sae, dataset, transform, directory, *, op
          source_identity, data_identity, preprocessing, device, workers, classes, max_steps):
     device = torch.device(device)
     _configure_backend()
-    per_epoch = len(dataset) // options["batch_size"]
+    per_epoch = (len(dataset) // options["batch_size"] if options["drop_last"]
+                 else -(-len(dataset) // options["batch_size"]))
     if not per_epoch:
         raise ValueError("not enough images for one complete physical training batch")
     total = per_epoch * options["epochs"]
@@ -82,7 +87,7 @@ def _fit(cell, spec, network, teacher, sae, dataset, transform, directory, *, op
     identity = {"format": VERSION, "cell": cell.__dict__, "source": source_identity,
         "data": data_identity, "preprocessing": preprocessing, "training": options,
         "preset": asdict(training_preset(cell.method, spec.preset, k=cell.k)),
-        "schedule": {"total_steps": total, "per_epoch": per_epoch, "drop_last": True},
+        "schedule": {"total_steps": total, "per_epoch": per_epoch, "drop_last": options["drop_last"]},
         "classes": classes, "smoke": bool(max_steps)}
     signature = canonical_hash(identity)
     checkpoint_path = directory / "checkpoint.pt"
@@ -103,18 +108,24 @@ def _fit(cell, spec, network, teacher, sae, dataset, transform, directory, *, op
     teacher.to(device).eval().requires_grad_(False)
     sae.to(device).train().requires_grad_(True)
     train_mode(network, options["freeze_bn_stats"])
-    with torch.random.fork_rng(devices=[]):
-        torch.manual_seed(cell.seed)
-        head = nn.Linear(spec.preset.hidden_dim, classes).to(device)
-    optimizer = torch.optim.AdamW([
-        {"params": list(network.parameters()), "lr": options["backbone_lr"]},
-        {"params": list(sae.parameters()), "lr": options["sae_lr"]},
-        {"params": list(head.parameters()), "lr": options["classifier_lr"]}],
-        weight_decay=options["weight_decay"])
-    step, prior_seconds = 0, 0.0
     if saved:
         network.load_state_dict(saved["backbone"], strict=True)
         sae.load_state_dict(saved["sae"], strict=True)
+        if saved["next_step"] == total and summary and summary.get("complete"):
+            # Evaluation needs only these weights, not the training head or
+            # potentially gigabytes of CUDA Adam state.
+            return summary
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(cell.seed)
+        head = nn.Linear(spec.preset.hidden_dim, classes).to(device)
+    optimizer_class = torch.optim.Adam if options["optimizer"] == "adam" else torch.optim.AdamW
+    optimizer = optimizer_class([
+        {"params": list(network.parameters()), "lr": options["backbone_lr"]},
+        {"params": list(sae.parameters()), "lr": options["sae_lr"]},
+        {"params": list(head.parameters()), "lr": options["classifier_lr"]}],
+        weight_decay=options["weight_decay"], eps=options["adam_eps"], betas=tuple(options["adam_betas"]))
+    step, prior_seconds = 0, 0.0
+    if saved:
         head.load_state_dict(saved["classifier"], strict=True)
         optimizer.load_state_dict(saved["optimizer"])
         _restore_rng(saved["rng"], device)
@@ -136,6 +147,8 @@ def _fit(cell, spec, network, teacher, sae, dataset, transform, directory, *, op
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
     started = time.perf_counter()
+    parameters = [p for group in optimizer.param_groups for p in group["params"]]
+    progress_detail = ""
 
     def save():
         if device.type == "cuda":
@@ -154,14 +167,15 @@ def _fit(cell, spec, network, teacher, sae, dataset, transform, directory, *, op
         epoch, within = divmod(step, per_epoch)
         batches = loader(dataset, transform, seed=cell.seed, epoch=epoch,
             batch_size=options["batch_size"], workers=workers,
-            skip=within * options["batch_size"], training=True)
+            skip=within * options["batch_size"], training=True, drop_last=options["drop_last"])
         for images, labels in batches:
             images, labels = images.to(device, non_blocking=True), labels.to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
+            collect_metrics = (step + 1) % options["log_every"] == 0 or step + 1 == total
             loss, metrics = joint_step(cell, spec, network, teacher, sae, head, images, labels,
-                                      options=options, step=step, total=total)
+                                      options=options, step=step, total=total, collect_metrics=collect_metrics)
             loss.backward()
-            norm = torch.nn.utils.clip_grad_norm_([p for group in optimizer.param_groups for p in group["params"]],
+            norm = torch.nn.utils.clip_grad_norm_(parameters,
                                                   options["grad_clip"], error_if_nonfinite=True)
             optimizer.step()
             step += 1
@@ -170,11 +184,13 @@ def _fit(cell, spec, network, teacher, sae, dataset, transform, directory, *, op
                     peak_allocated_bytes=torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0,
                     peak_reserved_bytes=torch.cuda.max_memory_reserved(device) if device.type == "cuda" else 0)
                 writer.log({"epoch": epoch, **metrics}, step=step)
+                progress_detail = f"last logged loss {metrics['loss_total']:.4f} at step {step}"
             if step % options["checkpoint_every"] == 0 or step == total:
                 save()
-            progress.advance(extra=f"loss {metrics['loss_total']:.4f}")
+            progress.advance(extra=progress_detail)
             if step >= total:
                 break
+    optimizer.zero_grad(set_to_none=True)
     summary = {"identity": identity, "signature": signature, "cell": cell.__dict__,
         "complete": True, "steps": step, "train_seconds": prior_seconds + time.perf_counter() - started,
         "peak_allocated_bytes": torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0,
