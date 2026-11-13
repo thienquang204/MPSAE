@@ -1,0 +1,2 @@
+-r requirements-scene.txt
+transformers==4.57.1
