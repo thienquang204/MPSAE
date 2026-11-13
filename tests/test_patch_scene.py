@@ -119,6 +119,58 @@ def test_dense_eval_resume_and_table_missing_cells(tmp_path):
     assert not json.loads((tmp_path/'table/results.json').read_text())['complete']
 
 
+def test_local_export_updates_zip_without_hub_calls(monkeypatch, tmp_path):
+    from zipfile import ZipFile
+    import huggingface_hub
+    from mpsae.io import atomic_json
+    from mpsae.patch_scene.report import collect_tables
+    def no_network(*args, **kwargs):
+        raise AssertionError('local export must not contact Hugging Face')
+    monkeypatch.setattr(huggingface_hub, 'HfApi', no_network)
+    monkeypatch.setattr(huggingface_hub, 'hf_hub_download', no_network)
+    hub = Hub(tmp_path)
+    campaign = 'local-test'
+    root = tmp_path/'campaigns'/campaign
+    atomic_json(root/'settings/config.json', Config().plan())
+    row = {'dataset': 'voc', 'encoder': 'dinov2', 'method': 'dense', 'k': None,
+           'seed': 1227, 'miou': .5, 'pixel_accuracy': .75, 'complete': True}
+    atomic_json(root/'cells/voc-dinov2/rows.json', {'results': [row]})
+    # Unrelated large/private artifacts must not be swept into the download.
+    atomic_json(tmp_path/'fits/checkpoint.pt', {'not': 'a real checkpoint'})
+    atomic_json(tmp_path/'features/cache.npz', {'not': 'a real cache'})
+    collect_tables(hub, campaign)
+    archive = tmp_path/'patch-scene-results.zip'
+    with ZipFile(archive) as zipped:
+        assert set(zipped.namelist()) == {'results.csv', 'results.tex', 'results.json', 'config.json', 'README.txt'}
+        result = json.loads(zipped.read('results.json'))
+        assert result['completed'] == 1 and not result['complete']
+        assert '50.00' in zipped.read('results.tex').decode()
+    atomic_json(root/'cells/voc-dinov2/rows.json', {'results': [row, {**row, 'method': 'csr', 'k': 12}]})
+    # Replace a previously sealed local cell, as the real runner does.
+    seal(root/'cells/voc-dinov2')
+    collect_tables(hub, campaign)
+    with ZipFile(archive) as zipped:
+        assert json.loads(zipped.read('results.json'))['completed'] == 2
+
+
+def test_empty_local_export_is_explicit(tmp_path):
+    from mpsae.patch_scene.report import collect_tables
+    with pytest.raises(FileNotFoundError, match='No completed evaluations'):
+        collect_tables(Hub(tmp_path), 'empty')
+    assert not (tmp_path/'patch-scene-results.zip').exists()
+
+
+def test_kaggle_notebook_has_no_token_or_publish_requirement():
+    import ast
+    notebook = Path(__file__).resolve().parents[1]/'notebooks/patch_scene_kaggle.ipynb'
+    cells = json.loads(notebook.read_text(encoding='utf-8'))['cells']
+    code = '\n'.join(''.join(c['source']) for c in cells if c['cell_type'] == 'code')
+    ast.parse(code)
+    assert 'UserSecretsClient' not in code and 'kaggle_secrets' not in code
+    assert 'HF_TOKEN' not in code and '--publish' not in code and '--repo' not in code
+    assert 'patch-scene-results.zip' in code and 'finally:' in code
+
+
 def test_hub_restores_hashed_bundle(monkeypatch, tmp_path):
     import huggingface_hub
     source = tmp_path/'remote'

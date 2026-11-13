@@ -45,13 +45,13 @@ def run_cell(config, encoder, dataset, sources, hub, device, campaign, *, smoke=
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=('plan', 'run', 'restore-table', 'smoke', 'doctor'))
+    parser.add_argument('command', choices=('plan', 'run', 'export', 'restore-table', 'smoke', 'doctor'))
     parser.add_argument('--config', default='configs/patch_scene_kaggle.yaml')
     parser.add_argument('--workspace', default='work/patch-scene-v2')
     parser.add_argument('--encoder', choices=(*ENCODERS, 'all'), default='dinov2')
     parser.add_argument('--dataset', choices=(*DATASETS, 'all'), default='voc')
     parser.add_argument('--device', default='cuda:0')
-    parser.add_argument('--repo', help='HF dataset repository: restore bundles if present')
+    parser.add_argument('--repo', help='Optional HF artifact repository; omitted means local artifacts only')
     parser.add_argument('--publish', action='store_true', help='Back up shards, fits, evaluation progress and tables')
     args = parser.parse_args()
     config = load(args.config)
@@ -72,11 +72,16 @@ def main():
     campaign = canonical_hash(config.identity())[:20]
     with exclusive_lock(workspace/'.campaign.lock', timeout=0):
         hub = Hub(workspace, args.repo, publish=args.publish)
-        if args.command == 'restore-table':
+        settings_rel = f'campaigns/{campaign}/settings'
+        atomic_json(hub.root/settings_rel/'config.json', config.plan())
+        hub.push(settings_rel)
+        if args.command in ('export', 'restore-table'):
             from .report import collect_tables
             path = collect_tables(hub, campaign)/'results.tex'
             print(path)
             return
+        print('[artifacts] ' + ('optional HF repository enabled' if args.repo else
+              f'local only: {workspace}; no account/token or uploads required'), flush=True)
         if not smoke:
             from ..scene.server import doctor
             doctor(args.device)

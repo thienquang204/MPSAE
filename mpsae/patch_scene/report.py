@@ -1,5 +1,7 @@
 import csv
+import os
 from pathlib import Path
+from zipfile import ZipFile, ZIP_DEFLATED
 
 from ..io import read_json, atomic_json
 from .config import ENCODERS, DATASETS
@@ -11,10 +13,43 @@ def collect_tables(hub, campaign):
         for encoder in ENCODERS:
             folder = hub.pull(f'campaigns/{campaign}/cells/{dataset}-{encoder}')
             rows.extend((read_json(folder/'rows.json') or {}).get('results', []))
+    if not rows:
+        raise FileNotFoundError('No completed evaluations found for this campaign; run a job first.')
     relative = f'campaigns/{campaign}/table'
     write_tables(rows, hub.root/relative)
     hub.push(relative)
+    archive = export_results(hub.root, campaign)
+    print(f'[download] {archive} ({len(rows)}/24 completed evaluations)', flush=True)
     return hub.root/relative
+
+
+def export_results(workspace, campaign):
+    """Small, atomic local download; never includes feature caches or model weights."""
+    workspace = Path(workspace)
+    root = workspace/'campaigns'/campaign
+    table = root/'table'
+    result = read_json(table/'results.json')
+    if not result or not result.get('results'):
+        raise FileNotFoundError('No completed evaluation results to export')
+    sources = [(table/name, name) for name in ('results.csv', 'results.tex', 'results.json')]
+    for folder, name in [('settings', 'config.json'), ('sources', 'sources.json')]:
+        if (root/folder/name).is_file():
+            sources.append((root/folder/name, name))
+    archive = workspace/'patch-scene-results.zip'
+    temporary = archive.with_suffix('.zip.partial')
+    # Build before replacing: an interrupted export leaves the previous ZIP usable.
+    with ZipFile(temporary, 'w', ZIP_DEFLATED) as handle:
+        for path, name in sources:
+            handle.write(path, arcname=name)
+        handle.writestr('README.txt',
+            f'Campaign: {campaign}\nCompleted evaluations: {len(result["results"])}/24\n'
+            'results.csv: metrics in percent and measured sparsity.\n'
+            'results.tex: mIoU table; -- means not evaluated.\n'
+            'results.json: detailed metrics and provenance.\n'
+            'This is a results archive, not a training-resume backup.\n'
+            'Model checkpoints and feature caches remain in the Kaggle workspace.\n')
+    os.replace(temporary, archive)
+    return archive
 
 
 def write_tables(rows, directory):

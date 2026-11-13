@@ -1,10 +1,14 @@
 # Kaggle: 24-point patch SAE benchmark
 
 Open `notebooks/patch_scene_kaggle.ipynb` on Kaggle. Push this code to the
-`refactor` branch before running the notebook. Enable Internet, select a T4
-GPU, and add a notebook secret `HF_TOKEN` with read/write access to the
-**dataset** repository `quangnguyenopt/MPSAE`. Keep the notebook private if
-your artifacts are private. The code never writes the token into artifacts.
+`refactor` branch before running the notebook. Enable Internet and select a
+T4 GPU. **No Hugging Face account, token, secret, or artifact repository is
+required.** The notebook downloads public models/datasets but keeps all
+experiment outputs on Kaggle. No upload flags are passed.
+
+If you already have an open Kaggle notebook, use **File -> Import Notebook**
+and upload `notebooks/patch_scene_kaggle.ipynb`, then run its cells in order.
+Start with `ENCODER = "dinov2"` and `DATASET = "voc"`.
 
 The notebook creates an isolated Python 3.11 environment with pinned packages
 and CUDA 12.6 PyTorch wheels, independently of Kaggle's notebook Python.
@@ -26,14 +30,13 @@ backbone fine-tuning jobs. No ImageNet download or old SAE checkpoint is needed.
 python -m mpsae.patch_scene plan --config configs/patch_scene_kaggle.yaml
 python -m mpsae.patch_scene run --config configs/patch_scene_kaggle.yaml \
   --encoder dinov2 --dataset voc --device cuda:0 \
-  --workspace /kaggle/working/patch-scene-v2 \
-  --repo quangnguyenopt/MPSAE --publish
+  --workspace /kaggle/working/patch-scene-v2
 ```
 
 Use `/tmp/mpsae-env/bin/python` for these commands in the supplied notebook.
-`--repo` enables restoration; `--publish` additionally enables uploading.
-The repository must already exist and be accessible. Publication failures
-raise an error rather than silently leaving results unprotected.
+The default run saves locally. Optional CLI flags `--repo` and `--publish`
+still support remote restoration/backup for users who explicitly request it;
+they are not used by the Kaggle notebook.
 
 ## Fixed experiment protocol
 
@@ -93,26 +96,39 @@ Native-size class probabilities are interpolated in row tiles to bound memory.
 The notebook places downloaded datasets/model caches under `/tmp`, outside
 saved Kaggle outputs. Only selected feature shards and run artifacts are under
 `/kaggle/working`. Monitor disk space; six jobs' caches may exceed saved-output
-limits. Feature shards are backed up to HF for reuse on new sessions. Neither
-original images nor authentication tokens are uploaded.
+limits. Feature shards are reused locally while the workspace remains.
+There is no remote backup in the default notebook.
 
 The query timing field includes streaming, encoding, search, upsampling,
 metrics and periodic backups. It is not a kernel-only retrieval latency.
 Profile actual VRAM/time on the pilot; no GPU runtime or memory guarantee is
 implied by CPU tests. The backbone batch size is independent of SAE batch size.
 
-## Recovery and tables
+## Download results directly from Kaggle
 
-With `--publish`, each completed extraction shard is uploaded; incomplete
-shards are recomputed. Training saves locally every 128 steps and uploads at
-epoch boundaries. Evaluation progress is uploaded every 64 query images and
-at completion. A crash can lose work since the last uploaded boundary.
+After each completed evaluation, the runner atomically refreshes:
 
-Restart the same notebook/config with the same `--repo`. It pins and restores
-source revisions, verified feature shards, optimizer/model/RNG checkpoints,
-and accumulated evaluation confusion matrices. Existing completed fits and
-evaluations are reused. Do not change package versions/configuration during
-a resume if you intend to reuse exactly the same experiment.
+```
+/kaggle/working/patch-scene-v2/patch-scene-results.zip
+```
+
+The notebook also copies it to `/kaggle/working/patch-scene-results.zip` when
+the training cell exits (including a Python exception), and displays a download
+link in its final cell. In Kaggle's file browser, find that ZIP under
+`/kaggle/working` and select **Download**. It is available with partial results;
+you do not need to wait for all 24 evaluations.
+
+Contents: `results.csv`, `results.tex`, `results.json`, `config.json`,
+`sources.json` when available, and `README.txt`. The ZIP excludes feature
+caches and model/optimizer checkpoints to keep the download small. It is a
+results archive, not a training-resume backup.
+
+To rebuild the ZIP from already completed local evaluations, without training,
+GPU use, or any artifact-service connection:
+
+```bash
+python -m mpsae.patch_scene export --workspace /kaggle/working/patch-scene-v2
+```
 
 Tables live at:
 
@@ -123,12 +139,29 @@ Tables live at:
 ```
 
 Missing cells are `--`, never zero. The table becomes complete at 24 entries.
-Per-cell artifacts avoid overwriting other encoder/dataset jobs. On a fresh
-workspace, collect all completed cells from HF without evaluating again:
+Per-cell artifacts avoid overwriting other encoder/dataset jobs. Jobs run in
+the same retained workspace are combined automatically. Results from separate
+sessions whose workspaces were discarded are not automatically combined.
+
+## Local resume and session lifetime
+
+Training saves locally every 128 steps and at epoch boundaries. Extraction
+commits every completed shard; evaluation commits progress every 64 images
+and at completion. Rerun the same command/config to resume from those files
+as long as the workspace remains. Do not change package versions/configuration
+if you intend to reuse exactly the same experiment.
+
+Download the results ZIP before ending the session, or save a Kaggle notebook
+version **including output files**. Saving only notebook code does not preserve
+results. A reset/deleted session without retained outputs loses its local
+checkpoints/cache; this workflow makes no remote recovery promise. To resume
+training in another session, preserve/restore the full workspace, not just the ZIP.
+
+Optional remote backup is still available outside this notebook:
 
 ```bash
-python -m mpsae.patch_scene restore-table --repo quangnguyenopt/MPSAE \
-  --workspace /kaggle/working/recovered-patch-tables
+python -m mpsae.patch_scene run --encoder dinov2 --dataset voc \
+  --workspace work/patch-scene-v2 --repo YOUR_ACCOUNT/YOUR_DATASET_REPO --publish
 ```
 
 For an offline synthetic end-to-end check (not benchmark results):
