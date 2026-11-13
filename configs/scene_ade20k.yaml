@@ -1,0 +1,42 @@
+# 12 SAE-only adaptations; 78 adapted + 78 frozen + 4 dense evaluation points.
+# Frozen backbone features are reused. No ImageNet or backbone fine-tuning.
+adaptation:
+  enabled: true
+  compare_frozen: true
+  epochs: 5
+  batch_size: 1024
+  lr: 0.00001
+  residency: device
+  log_every: 10
+  checkpoint_every: 50
+methods: [csr, csrv2, mpsae]
+seed: 1227
+dataset: ade20k
+dataset_repo: zhoubolei/scene_parse_150
+dataset_revision: e660d866a1351c70bcf07925d2600b60bd6e3bc3
+dataset_config: scene_parsing
+memory_patches: 65536
+neighbors: 30
+temperature: 0.02
+extraction_batch: 8
+encode_batch: 1024
+gallery_chunk: 4096
+query_block: 256
+workers: 4
+experiments:
+  - backbone: ff2048
+    train_k: 8
+    inference_k: [2, 4, 8, 16, 32, 64, 128, 256]
+    image_size: 512
+  - backbone: vit_b16
+    train_k: 12
+    inference_k: [3, 12, 48, 96, 192, 384]
+    image_size: 448
+  - backbone: dinov2_vits14
+    train_k: 12
+    inference_k: [3, 12, 48, 96, 192, 384]
+    image_size: 448
+  - backbone: convnext_tiny
+    train_k: 12
+    inference_k: [3, 12, 48, 96, 192, 384]
+    image_size: 448

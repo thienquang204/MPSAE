@@ -55,6 +55,18 @@ is saved in `configs/archive/scene_voc_frozen_multi.yaml`.
 No old server files or ImageNet download are required. See the scene guide for
 driver/Python requirements and alternate repository/revision options.
 
+The same benchmark also supports **ADE20K (SceneParse150)**: 20,210 training and
+2,000 validation images, 150 classes, with raw label 0 ignored. It uses pinned HF
+Parquet files, the same K sweeps and SAE adaptation settings, and separate results:
+
+```bash
+bash scene_only.sh --config configs/scene_ade20k.yaml --workspace /workspace/scene-ade20k-v1 --publish
+```
+
+This adds 12 SAE adaptations and 160 evaluation points. The patch bank stays bounded;
+the first backbone extraction processes more images. See the scene guide for the
+label mapping, dataset revision, memory budget and publication details.
+
 ```bash
 cp .env.example .env                       # if .env does not exist yet
 # Fill HF_TOKEN (write access for result backup); WANDB_TOKEN is optional.

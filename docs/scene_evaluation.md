@@ -1,5 +1,60 @@
 # Patch SAE fine-tuning and segmentation
 
+## ADE20K / SceneParse150
+
+ADE20K is available in `configs/scene_ade20k.yaml`. Run it separately from VOC:
+
+```bash
+bash scene_only.sh --config configs/scene_ade20k.yaml --workspace /workspace/scene-ade20k-v1 --publish
+```
+
+On a completely new server, first run `bash scene_only.sh --setup-only` and
+`.venv-scene/bin/hf auth login` as described below. No additional packages are needed.
+The same source ImageNet SAEs are downloaded automatically; ADE adaptations start
+from those sources, not from VOC-adapted weights.
+
+The dataset is [zhoubolei/scene_parse_150](https://huggingface.co/datasets/zhoubolei/scene_parse_150),
+configuration `scene_parsing`, using the Hugging Face Parquet conversion pinned to
+`e660d866a1351c70bcf07925d2600b60bd6e3bc3`. Only train and validation shards are loaded,
+without running remote dataset scripts. The protocol uses 20,210 training images,
+2,000 validation images and 150 semantic classes. These are **validation scores**;
+the unlabeled challenge test split is not evaluated. `scene_category` is an image-level
+scene label and is never used as a semantic patch target.
+
+Following the [official evaluation](https://github.com/CSAILVision/sceneparsing/blob/master/evaluationCode/intersectionAndUnion.m),
+raw mask ID 0 is ignored. IDs 1..150 map to internal 0..149; ignore maps to 255.
+There is no scored background class. CSRv2 uses the dominant valid semantic class,
+and all-void patches are excluded. ADE mIoU averages all 150 class IoUs (zero for
+zero-union classes); pixel accuracy ignores void pixels. Empty sparse queries count
+as abstentions/false negatives. Counts use int64, including class 149.
+
+All four backbones, source K values, inference sweeps, decoder settings and SAE
+adaptation hyperparameters match VOC. This adds 12 independent SAE fits and 160
+evaluation points (78 adapted, 78 frozen, four dense). Running both configs gives
+24 new SAE fits and 320 evaluation points. Backbone weights remain frozen.
+
+The same 65,536-patch cap gives three sampled patches per training image, at most
+60,630 total, before void exclusions. Five epochs at batch 1,024 take at most 300
+updates per method. The training/cache budget is bounded, but extracting features
+from all 20,210 training images is a larger first-run cost than VOC. Memory estimates
+in `plan` count feature arrays; labels, original masks and download caches are extra.
+The dataset-specific label contract is included in cache/report identities. Existing
+VOC cache and report identities remain compatible. Raw features are reusable across
+methods and inference K; train and validation features remain separate.
+Per-image ADE confusion records store only nonzero integer counts, avoiding tens of
+thousands of zero entries per image per inference K; aggregation remains exact.
+
+ADE plots and CSVs identify the dataset explicitly. They have the same frozen/adapted
+curves and measured dense baselines as VOC. This remains our adapted Hummingbird-style
+retrieval benchmark, not a reproduction of a published ADE20K leaderboard result.
+`--publish` uses the existing Hub paths `scene-v1/adaptations/<identity>` and
+`scene-v1/reports/<identity>` for both datasets; dataset-aware identities prevent
+collisions, and the report manifests/CSV identify which dataset was evaluated.
+
+```bash
+.venv-scene/bin/python -m mpsae.scene plan --config configs/scene_ade20k.yaml
+```
+
 This opt-in module applies existing ResNet-50, ViT-B/16, DINOv2-S/14 and
 ConvNeXt-Tiny SAEs to local features. The default fine-tunes only the SAE on cached
 VOC training patches, then compares frozen and adapted representations using the

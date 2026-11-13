@@ -55,17 +55,20 @@ def batch_ranges(rows, batch_size):
     return list(zip([0] + ends[:-1], ends))
 
 
-def patch_targets(labels):
+def patch_targets(labels, *, classes=21):
     labels = np.asarray(labels)
-    if (labels.ndim != 2 or labels.shape[1] != 21 or not np.isfinite(labels).all()
+    if (labels.ndim != 2 or labels.shape[1] != classes or not np.isfinite(labels).all()
             or np.any(labels < 0) or not np.allclose(labels.sum(1), 1, atol=1e-5)):
-        raise ValueError('training patches need valid nonvoid VOC label distributions')
+        raise ValueError('training patches need valid nonvoid semantic label distributions')
     target = labels.argmax(1).astype(np.int64)
     purity = labels.max(1)
-    return target, {'label_rule': 'dominant nonvoid class; ties choose lowest class ID',
-        'class_counts': np.bincount(target, minlength=21).tolist(),
+    stats = {'label_rule': 'dominant nonvoid class; ties choose lowest class ID',
+        'class_counts': np.bincount(target, minlength=classes).tolist(),
         'mean_purity': float(purity.mean()), 'mixed_fraction': float((purity < 1-1e-6).mean()),
         'background_fraction': float((target == 0).mean())}
+    if classes != 21:
+        stats.pop('background_fraction')  # ADE class zero is wall, not background
+    return target, stats
 
 
 def _save(path, payload):
@@ -87,7 +90,7 @@ def fit(config, cell, record, features, labels, train_identity, workspace, *, de
     settings = config.adaptation
     if not settings.enabled:
         raise ValueError('adaptation is disabled')
-    target, label_stats = patch_targets(labels)
+    target, label_stats = patch_targets(labels, classes=config.dataset_spec.classes)
     if (features.dtype != np.float32 or features.ndim != 2 or len(features) != len(target)
             or not np.isfinite(features).all()):
         raise ValueError('adaptation needs finite float32 training patch features')

@@ -15,6 +15,7 @@ from ..io import atomic_json, canonical_hash, read_json, sha256_file
 from .config import VERSION, STRIDES
 from .spatial import spatial_features, normalization, RECIPES, loading_spec
 from .core import label_distributions, resnet_spatial, sample_patches
+from .datasets import VOC, row_ids, load_splits
 
 
 def open_mask(value):
@@ -39,9 +40,10 @@ def save_arrays(path, **arrays):
 
 
 class ImageRows:
-    def __init__(self, dataset, pending, size, normalize):
+    def __init__(self, dataset, pending, size, normalize, spec=VOC):
         self.dataset, self.pending, self.size = dataset, pending, size
         self.normalize = normalize
+        self.spec = spec
 
     def __len__(self):
         return len(self.pending)
@@ -50,16 +52,14 @@ class ImageRows:
         from torchvision.transforms.functional import normalize, pil_to_tensor
         index = self.pending[position]
         row = self.dataset[index]
-        image, mask = open_rgb(row['image']), open_mask(row['mask'])
+        image, mask = open_rgb(row['image']), open_mask(row[self.spec.mask_column])
         if image.size != mask.size:
             raise ValueError('image and segmentation mask are misaligned')
-        truth = np.array(mask, dtype=np.int64)
-        if truth.ndim != 2 or not np.all(((truth >= 0) & (truth <= 20)) | (truth == 255)):
-            raise ValueError('HF masks must preserve VOC class IDs (not RGB)')
+        truth = self.spec.remap(mask)
         image = image.resize((self.size, self.size), Image.Resampling.BILINEAR)
         scaled = mask.resize((self.size, self.size), Image.Resampling.NEAREST)
         image = normalize(pil_to_tensor(image).float()/255, *self.normalize)
-        return index, image, truth, np.array(scaled, dtype=np.int64)
+        return index, image, truth, self.spec.remap(scaled)
 
 
 def collate(rows):
@@ -88,6 +88,9 @@ def prepare(config, workspace, weights, *, device):
                 'normalize': [list(x) for x in normalization(BACKBONES[config.backbone])],
                 'library_versions': library_versions(),
                 'geometry': 'square_bilinear_image_nearest_mask_no_crop', 'augmentation': 'none'}
+    if config.dataset != 'voc':
+        identity['label_contract'] = config.plan()['label_contract']
+        identity['dataset_name'] = config.dataset
     directory = workspace / 'features' / canonical_hash(identity)[:20]
     completed = read_json(directory / 'manifest.json')
     if completed and completed.get('identity') == identity:
@@ -97,17 +100,15 @@ def prepare(config, workspace, weights, *, device):
                 raise RuntimeError(f'Feature cache is incomplete/corrupt: {path}')
         return directory, completed
 
-    from datasets import load_dataset
     from torch.utils.data import DataLoader
 
-    data = load_dataset(config.dataset_repo, config.dataset_config, revision=resolution['revision'],
-                        cache_dir=str(workspace / 'hf_datasets'))
-    expected = {'train': config.plan()['support_images'], 'validation': 1449}
+    data = load_splits(config, resolution, workspace / 'hf_datasets')
+    expected = {'train': config.plan()['support_images'], 'validation': config.plan()['query_images']}
     ids = {}
     for split, count in expected.items():
         if len(data[split]) != count:
-            raise ValueError(f'{split}: expected {count} VOC rows, got {len(data[split])}')
-        ids[split] = list(data[split]['id'])
+            raise ValueError(f'{split}: expected {count} {config.dataset} rows, got {len(data[split])}')
+        ids[split] = row_ids(data[split])
         if len(set(ids[split])) != count:
             raise ValueError(f'duplicate image IDs in {split}')
     if set(ids['train']) & set(ids['validation']):
@@ -124,7 +125,7 @@ def prepare(config, workspace, weights, *, device):
         for split, count in expected.items():
             folder = directory / split
             pending = [i for i in range(count) if not (folder / f'{i:05d}.npz').is_file()]
-            loader = DataLoader(ImageRows(data[split], pending, config.image_size, normalization(spec)),
+            loader = DataLoader(ImageRows(data[split], pending, config.image_size, normalization(spec), config.dataset_spec),
                                 batch_size=config.extraction_batch, num_workers=config.workers,
                                 collate_fn=collate, shuffle=False, pin_memory=str(device).startswith('cuda'))
             amp = torch.autocast('cuda', dtype=torch.float16) if str(device).startswith('cuda') else nullcontext()
@@ -136,7 +137,7 @@ def prepare(config, workspace, weights, *, device):
                     for index, feature, truth, mask in zip(positions, features, truths, scaled):
                         feature = feature.reshape(-1, spec.dim)
                         if split == 'train':
-                            labels = label_distributions(mask, grid)
+                            labels = label_distributions(mask, grid, classes=config.dataset_spec.classes)
                             chosen = sample_patches(labels, config.plan()['patches_per_support_image'],
                                                     np.random.default_rng([config.seed, index]))
                             save_arrays(folder / f'{index:05d}.npz', features=feature[chosen],
@@ -152,7 +153,7 @@ def prepare(config, workspace, weights, *, device):
     finally:
         torch.backends.cudnn.allow_tf32 = old_tf32
     manifest = {'complete': True, 'identity': identity, 'grid': grid, 'files': files,
-                'weights_observed': observed, 'support_images': expected['train'], 'query_images': 1449}
+                'weights_observed': observed, 'support_images': expected['train'], 'query_images': expected['validation']}
     atomic_json(directory / 'manifest.json', manifest)
     return directory, manifest
 

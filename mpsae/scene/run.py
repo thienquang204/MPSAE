@@ -11,7 +11,7 @@ from ..config import BACKBONES
 from ..io import atomic_json, canonical_hash, read_json, array_hash
 from ..train import load_fitted
 from .config import VERSION, Adaptation
-from .core import CLASSES, confusion, encode, metrics, predict
+from .core import confusion, encode, metrics, predict
 from .data import prepare, support_bank
 
 
@@ -31,6 +31,8 @@ def run(config, workspace, source_root, *, device='cuda:0', prepare_only=False, 
     if prepare_only:
         return {'feature_cache': str(directory), 'complete': True}
     features, labels = support_bank(directory, manifest)
+    if labels.shape[1] != config.dataset_spec.classes:
+        raise ValueError('cached label width does not match the selected dataset')
     if len(features) < config.neighbors:
         raise ValueError('too few valid support patches for configured neighbor count')
     adapted = []
@@ -41,6 +43,8 @@ def run(config, workspace, source_root, *, device='cuda:0', prepare_only=False, 
         train_identity = {'feature_cache': manifest['identity'],
                           'features_sha256': array_hash(features), 'labels_sha256': array_hash(labels),
                           'sampling': 'shared VOC train support; label-informed; all-void excluded'}
+        if config.dataset != 'voc':
+            train_identity['sampling'] = f'shared {config.dataset} train support; label-informed; all-void excluded'
         for cell, record in zip(config.cells(), records):
             fitted = fit(config, cell, record, features, labels, train_identity, workspace, device=device)
             adapted.append(fitted)
@@ -58,6 +62,7 @@ def run(config, workspace, source_root, *, device='cuda:0', prepare_only=False, 
 
 def _evaluate(config, workspace, records, directory, manifest, features, labels, *,
               device, adapted=(), frozen_rows=(), dense_only=False):
+    classes = config.dataset_spec.classes
     campaign = {'version': VERSION, 'plan': config.plan(), 'features': manifest['identity'],
                 'sources': [{k: r[k] for k in ('checkpoint_id', 'signature', 'cell')} for r in records],
                 'device': str(device), 'sae_precision': 'float32_tf32_disabled',
@@ -103,7 +108,7 @@ def _evaluate(config, workspace, records, directory, manifest, features, labels,
             bank = encode(sae, features, k, device, config.encode_batch) if sae else features
             values = bank['values'] if sae else bank
             bank_nnz = np.count_nonzero(values, axis=1)
-            matrix = np.zeros((CLASSES, CLASSES+1), dtype=np.int64)
+            matrix = np.zeros((classes, classes+1), dtype=np.int64)
             nnz_count = nnz_total = empty_count = 0
             nnz_max = 0
             seconds = 0.0
@@ -122,10 +127,19 @@ def _evaluate(config, workspace, records, directory, manifest, features, labels,
                         query_block=config.query_block)
                     qvalues = query['values'] if sae else query
                     nnz = np.count_nonzero(qvalues, axis=1)
-                    saved = {'confusion': confusion(prediction, truth).tolist(), **timing,
-                             'nnz_sum': int(nnz.sum()), 'patches': len(nnz), 'nnz_max': int(nnz.max())}
+                    counts = confusion(prediction, truth, classes=classes)
+                    saved = {**timing, 'nnz_sum': int(nnz.sum()), 'patches': len(nnz), 'nnz_max': int(nnz.max())}
+                    if config.dataset == 'ade20k':
+                        rr, cc = np.nonzero(counts)
+                        saved['confusion_entries'] = np.column_stack((rr, cc, counts[rr, cc])).tolist()
+                    else:
+                        saved['confusion'] = counts.tolist()
                     atomic_json(saved_path, saved)
-                matrix += np.asarray(saved['confusion'], dtype=np.int64)
+                if 'confusion' in saved:
+                    matrix += np.asarray(saved['confusion'], dtype=np.int64)
+                elif saved['confusion_entries']:
+                    entries = np.asarray(saved['confusion_entries'], dtype=np.int64)
+                    np.add.at(matrix, (entries[:, 0], entries[:, 1]), entries[:, 2])
                 nnz_total += saved['nnz_sum']
                 nnz_count += saved['patches']
                 nnz_max = max(nnz_max, saved['nnz_max'])
@@ -136,9 +150,10 @@ def _evaluate(config, workspace, records, directory, manifest, features, labels,
             if sae and (bank_nnz.max() > k or nnz_max > k):
                 raise AssertionError('SAE sparsity budget violated')
             record_out = {'complete': True, 'method': method, 'train_k': cell.k if cell else None,
+                          'dataset': config.dataset,
                           'variant': variant,
                           'inference_k': k, 'checkpoint_id': record['checkpoint_id'] if cell else None,
-                          **metrics(matrix), 'confusion': matrix.tolist(),
+                          **metrics(matrix, include_absent=config.dataset == 'ade20k'), 'confusion': matrix.tolist(),
                           'bank_rows': len(features), 'bank_nnz_mean': float(bank_nnz.mean()),
                           'bank_empty_patches': int(np.count_nonzero(bank_nnz == 0)),
                           'query_nnz_mean': nnz_total/nnz_count, 'query_nnz_max': nnz_max,

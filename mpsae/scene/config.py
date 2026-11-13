@@ -40,6 +40,7 @@ class SceneConfig:
     train_k: int = 8
     inference_k: tuple[int, ...] = (8,)
     seed: int = 1227
+    dataset: str = 'voc'
     dataset_repo: str = 'shijli/voc2012'
     dataset_revision: str = 'main'
     dataset_config: str = 'segmentation'
@@ -77,41 +78,51 @@ class SceneConfig:
             raise ValueError('workers must be nonnegative')
         if not math.isfinite(self.temperature) or self.temperature <= 0:
             raise ValueError('temperature must be finite and positive')
-        if self.dataset_config not in ('segmentation', 'segmentation_aug'):
-            raise ValueError('dataset_config must be segmentation or segmentation_aug')
+        self.dataset_spec
+
+    @property
+    def dataset_spec(self):
+        from .datasets import dataset_spec
+        return dataset_spec(self.dataset, self.dataset_config)
 
     def cells(self):
         return [Cell(self.backbone, method, self.train_k, self.seed) for method in self.methods]
 
     def plan(self):
-        rows = 1464 if self.dataset_config == 'segmentation' else 10582
+        spec = self.dataset_spec
+        rows, queries = spec.train_rows, spec.validation_rows
         patches = (self.image_size // STRIDES[self.backbone])**2
         per_image = min(patches, self.memory_patches // rows)
         if per_image < 1 or per_image * rows < self.neighbors:
             raise ValueError('memory_patches too small for equal-per-image sampling / neighbor count')
         values = asdict(self)
+        if self.dataset == 'voc':
+            values.pop('dataset')  # keep existing VOC report identities
         if not self.adaptation.enabled:
             values.pop('adaptation')  # preserve old frozen report/cache identities
         variants = 2 if self.adaptation.enabled and self.adaptation.compare_frozen else 1
         result = {'version': VERSION, 'config': values,
                 'training_runs': len(self.methods) if self.adaptation.enabled else 0,
                 'evaluations': 1 + variants * len(self.methods) * len(self.inference_k),
-                'support_images': rows, 'query_images': 1449,
+                'support_images': rows, 'query_images': queries,
                 'patches_per_support_image': per_image, 'bank_rows_upper_bound': per_image * rows,
-                'cache_bytes_upper_bound': (per_image*rows + 1449*patches)*BACKBONES[self.backbone].dim*4,
+                'cache_bytes_upper_bound': (per_image*rows + queries*patches)*BACKBONES[self.backbone].dim*4,
                 'sparse_bank_bytes_per_k': {k: per_image*rows*k*8 for k in self.inference_k},
                 'protocol': 'adapted Hummingbird decoder; frozen pooled-to-spatial SAE transfer',
                 'differences_from_paper': [f'native spatial stride {STRIDES[self.backbone]}', 'bounded memory bank',
                     'one deterministic square resize, no augmentation', 'exact search, not ScaNN',
                     'existing pooled-feature SAE; not Hummingbird pretraining']}
         if self.adaptation.enabled:
-            result['protocol'] = 'VOC train-patch SAE adaptation; adapted Hummingbird decoder'
+            result['protocol'] = f'{"VOC" if self.dataset == "voc" else "ADE20K"} train-patch SAE adaptation; adapted Hummingbird decoder'
             result['differences_from_paper'].append('SAE adapted on downstream training patches')
             result['adaptation'] = {'fixed_k': self.train_k, 'backbone_trainable': False,
                 'csrv2_labels': 'dominant nonvoid class; ties choose lowest class ID',
                 'validation_use': 'evaluation only; final epoch selection',
                 'sampling': 'shared label-informed support patches',
                 'loss_weights': 'inherited from each source checkpoint'}
+        if self.dataset != 'voc':
+            result['label_contract'] = {'classes': spec.classes, 'ignore': 255,
+                'mapping': 'raw 0 ignored; raw 1..150 mapped to 0..149'}
         return result
 
 

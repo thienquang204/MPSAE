@@ -15,7 +15,9 @@ MARKERS = {'csr': 's', 'csrv2': 'D', 'mpsae': 'o', 'dense': '^'}
 
 def _rows(payload):
     backbone = payload.get('campaign', {}).get('plan', {}).get('config', {}).get('backbone', '')
+    dataset = payload.get('campaign', {}).get('plan', {}).get('config', {}).get('dataset', 'voc')
     return [{**row, 'backbone': row.get('backbone', backbone),
+             'dataset': row.get('dataset', dataset),
              'variant': row.get('variant', 'dense' if row['method'] == 'dense' else 'frozen')}
             for row in payload['results']]
 
@@ -101,7 +103,7 @@ def plot(path):
         count = row.get('query_images', 0)
         row['search_seconds_per_image'] = row['search_seconds']/count if count else None
     with (path.parent / 'results.csv').open('w', newline='', encoding='utf-8') as handle:
-        columns = ('backbone', 'method', 'variant', 'train_k', 'inference_k', 'checkpoint_id',
+        columns = ('dataset', 'backbone', 'method', 'variant', 'train_k', 'inference_k', 'checkpoint_id',
                    'miou', 'pixel_accuracy', 'bank_nnz_mean', 'query_nnz_mean', 'query_nnz_max',
                    'query_empty_patches', 'index_bytes', 'search_seconds', 'search_seconds_per_image')
         writer = csv.DictWriter(handle, fieldnames=columns, extrasaction='ignore')
@@ -110,6 +112,10 @@ def plot(path):
     groups = [(b, [r for r in rows if r['backbone'] == b]) for b in dict.fromkeys(r['backbone'] for r in rows)]
     if not groups:
         raise ValueError('no scene results to plot')
+    datasets = {r['dataset'] for r in rows}
+    if len(datasets) != 1:
+        raise ValueError('plot each segmentation dataset separately')
+    dataset_title = {'voc': 'Pascal VOC', 'ade20k': 'ADE20K'}.get(next(iter(datasets)), '')
     style = {'font.family': 'DejaVu Sans', 'font.size': 9, 'axes.titlesize': 10,
              'axes.labelsize': 9, 'xtick.labelsize': 8, 'ytick.labelsize': 8,
              'legend.fontsize': 8, 'pdf.fonttype': 42, 'ps.fonttype': 42, 'axes.linewidth': .7}
@@ -121,6 +127,7 @@ def plot(path):
                            ('index_bytes', 'miou', 'mIoU (%)')])):
             fig, axes = plt.subplots(len(groups), 2, squeeze=False,
                 figsize=(7.2, 2.6*len(groups)+.35), layout='constrained')
+            fig.suptitle(dataset_title, fontsize=10)
             for group_index, (backbone, selected) in enumerate(groups):
                 for column, (xkey, ykey, ylabel) in enumerate(panels):
                     ax = axes[group_index, column]
@@ -160,6 +167,7 @@ def plot(path):
             nrows = math.ceil(len(groups)/columns)
             fig, axes = plt.subplots(nrows, columns, squeeze=False,
                                      figsize=(3.6*columns, 2.6*nrows+.35), layout='constrained')
+            fig.suptitle(dataset_title, fontsize=10)
             for ax in axes.flat[len(groups):]:
                 ax.set_visible(False)
             for ax, (backbone, selected) in zip(axes.flat, groups):
