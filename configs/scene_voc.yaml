@@ -1,4 +1,14 @@
-# Frozen checkpoints only: 12 source SAEs, 82 evaluations, zero new fits.
+# 12 SAE-only adaptations; 78 adapted + 78 frozen + 4 dense evaluation points.
+# Frozen backbone features are reused. No ImageNet or backbone fine-tuning.
+adaptation:
+  enabled: true
+  compare_frozen: true
+  epochs: 5
+  batch_size: 1024
+  lr: 0.00001
+  residency: device
+  log_every: 10
+  checkpoint_every: 50
 methods: [csr, csrv2, mpsae]
 seed: 1227
 dataset_repo: shijli/voc2012

@@ -11,8 +11,8 @@ from mpsae.config import BACKBONES
 def test_expanded_plan():
     config=load_config(Path(__file__).resolve().parents[1]/'configs/scene_voc.yaml')
     assert isinstance(config, SceneSuite)
-    assert config.plan()['evaluations']==82
-    assert config.plan()['training_runs']==0
+    assert config.plan()['evaluations']==160
+    assert config.plan()['training_runs']==12
     assert len(config.cells())==12
     assert [g.train_k for g in config.groups]==[8,12,12,12]
 

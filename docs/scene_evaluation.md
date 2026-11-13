@@ -1,8 +1,49 @@
-# Frozen spatial SAE evaluation
+# Patch SAE fine-tuning and segmentation
 
 This opt-in module applies existing ResNet-50, ViT-B/16, DINOv2-S/14 and
-ConvNeXt-Tiny SAEs to local features. It does not fit a backbone, an SAE, or a segmentation head. The main
-ImageNet campaign and disabled fine-tuning campaign are unchanged.
+ConvNeXt-Tiny SAEs to local features. The default fine-tunes only the SAE on cached
+VOC training patches, then compares frozen and adapted representations using the
+same retrieval decoder. The backbone stays frozen and there is no trained segmentation
+head. The main ImageNet campaign and disabled backbone fine-tuning campaign are unchanged.
+
+## Adaptation settings
+
+The archived frozen configuration is `configs/archive/scene_voc_frozen_multi.yaml`.
+`configs/scene_voc.yaml` enables SAE adaptation: five epochs, batch 1,024, constant
+Adam learning rate 1e-5, seed 1227. Fine-tune once at the source training K (8 for
+ResNet-50, 12 for the other backbones), then sweep inference K. There are 12 new
+fits and 78 adapted evaluation points, plus 78 frozen points and four dense baselines.
+
+Start from the completed ImageNet SAE weights with a fresh optimizer and reset
+activity counters. Both the tied dictionary and biases are trainable. Loss weights,
+Adam betas/epsilon/weight decay, AuxK and OT solver settings are read from the source
+checkpoint's recorded recipe, not silently replaced with current defaults. Reuse
+`methods.compute_step` with a fixed target budget. CSRv2 does not restart its completed
+pretraining annealing schedule. CSR keeps instance contrastive loss, CSRv2 keeps
+supervised contrastive loss, and MPSAE keeps its K/2K/4K MMPOT matching gap.
+
+CSRv2 uses the dominant nonvoid class of each patch; ties choose the smallest class
+ID. Mixed patches remain in the dataset, and their purity and class distribution are
+logged. Retrieval still uses the full soft class distributions. CSRv2 therefore has
+supervised adaptation, while CSR/MPSAE do not use labels in their loss. All share the
+same label-informed patch sampling. This is a comparison of method-specific adaptation
+recipes, not a comparison with identical loss supervision. The new recipe is not a
+claim to reproduce CSRv2's original backbone fine-tuning protocol.
+
+Only VOC train patches enter gradient updates. Validation is used for scoring only;
+the final epoch is selected without validation-based checkpoint selection. All patches
+are shuffled across images using the same order for all methods. A final singleton
+batch is merged into the preceding batch to keep contrastive/OT objectives defined.
+Training uses FP32 with TF32 disabled. At the default upper bound, there are 315
+updates per fit. `adaptation.residency: device` keeps the small training bank on the
+GPU; `cpu` transfers batches instead. Checkpoints are saved every 50 updates and
+at each epoch end. A resume uses the new adaptation optimizer, never the ImageNet optimizer.
+
+Feature caches and frozen report identities remain compatible. Adapted checkpoint
+identities include source bytes, training feature/label hashes, objective and optimizer
+settings, K and seed. Changing the recipe creates a different fit. Source checkpoints
+are never overwritten. Both support and query codes are regenerated with the adapted
+SAE at each inference K. Raw feature caches can be reused; old sparse codes cannot.
 
 ## Plan and scientific interpretation
 
@@ -11,8 +52,9 @@ ImageNet campaign and disabled fine-tuning campaign are unchanged.
    frozen backbone's spatial feature map before average pooling, once.
 3. Within each backbone, sample the same annotated support patches for every method. Reuse one bank
    and all query features across dense, CSR, CSRv2 and MPSAE evaluation.
-4. Apply each SAE directly to raw local features. Normalize only retrieval keys
-   and queries. Sweep inference K without fitting another checkpoint.
+4. Adapt the SAE on cached training patches and compare it with the frozen source.
+   Feed raw local features to both; normalize only retrieval keys and queries.
+   Sweep inference K without fitting another checkpoint for every inference K.
 5. Retrieve neighbors, average soft patch labels with similarity weights,
    upsample probabilities and score original-resolution masks. Save mIoU,
    pixel accuracy, per-class IoU, sparsity, key storage and search time.
@@ -28,8 +70,9 @@ spatial stride depends on the backbone, the bank is smaller, search is exact rat
 ScaNN, and preprocessing uses a deterministic square resize without augmentation.
 The default standard VOC split also differs from augmented VOC training.
 Most importantly, the SAE was trained on pooled image features, not local
-features. Matching channel width permits this transfer but does not guarantee
-matching distributions or useful segmentation. Always include the dense local
+features. Frozen evaluation measures direct transfer; SAE adaptation measures
+downstream adaptation on those patches. Neither guarantees improved segmentation.
+Always include the dense local
 backbone baseline. No contextual pretraining or Hummingbird model is introduced.
 
 ## Data and geometry
@@ -38,7 +81,8 @@ The default [shijli/voc2012](https://huggingface.co/datasets/shijli/voc2012)
 `segmentation` config has 1,464 support and 1,449 validation images; the optional
 `segmentation_aug` config has 10,582 support images. Image IDs must be unique
 and disjoint across support/query splits. Validation labels are used only for
-scoring. Train masks construct the memory, not gradient updates.
+scoring. Train masks construct the memory and supply dominant-class training targets
+for CSRv2. CSR/MPSAE loss terms consume features only.
 
 Images are bilinearly resized to the configured resolution; masks use nearest
 interpolation. The spatial grid and feature width depend on the backbone. Mask values
@@ -61,7 +105,7 @@ Clone/update this repository and run the following **from its root**:
 ```bash
 bash scene_only.sh --setup-only
 .venv-scene/bin/hf auth login
-bash scene_only.sh --workspace /workspace/scene-v1
+bash scene_only.sh --workspace /workspace/scene-v1 --publish
 ```
 
 Requirements: Linux x86_64, Python 3.10-3.12 with venv support, a working NVIDIA
@@ -89,7 +133,7 @@ bash scene_only.sh --setup --workspace /workspace/scene-v1
 
 The launcher calls `python -m mpsae.scene bootstrap`. It restores the twelve
 selected completed fits from `quangnguyenopt/MPSAE`, validates their backbone
-provenance, downloads the backbone weights and VOC, extracts features, evaluates,
+provenance, downloads the backbone weights and VOC, extracts features, adapts the SAE, evaluates,
 and writes plots. You do not need the old workspace or any ImageNet downloads.
 All 36 required source artifacts were confirmed in the Hub at revision
 `22aa69e63d565c238bf334a79fdf89ad3db7428d` during implementation. Use
@@ -107,7 +151,10 @@ For result backup, authenticate with a token that can write to the result repo:
 bash scene_only.sh --workspace /workspace/scene-v1 --publish
 ```
 
-This explicitly uploads completed JSON/CSV/PDF/PNG reports to
+Each completed adaptation is backed up immediately to
+`scene-v1/adaptations/<identity>/` (checkpoint.pt, config.json, summary.json, train.jsonl),
+before segmentation evaluation. Checkpoints include optimizer state for recovery.
+This also uploads completed JSON/CSV/PDF/PNG reports to
 `quangnguyenopt/MPSAE/scene-v1/reports/<identity>/`. Upload failures preserve local
 results; rerunning with `--publish` retries the backup using completed evaluations.
 It does not upload dataset caches, credentials, or images.
@@ -127,8 +174,10 @@ python -m mpsae.scene plan --config configs/scene_voc.yaml
 python -m mpsae.scene run --config configs/scene_voc.yaml --source-root work/direct-v1 --workspace work/scene-v1 --device cuda:0
 ```
 
-The default suite has 12 existing SAE checkpoints, 82 evaluations and zero new
-training runs. Each backbone runs sequentially and has its own dense baseline.
+The default suite has 12 existing SAE checkpoints, 12 new SAE adaptations and 160
+evaluation points (including frozen comparisons and four dense baselines).
+Each backbone runs sequentially and has its own dense baseline. Previously completed
+frozen results are reused when the source, grid, data, precision and decoder settings match.
 
 | Backbone | Train K | Inference K | Image size | Grid |
 |---|---:|---|---:|---|
@@ -147,10 +196,11 @@ Their positional embeddings are interpolated by timm when loading at the scene
 resolution. ConvNeXt runs its original pre-logit head on each one-cell feature
 map so the local representation retains head normalization. This is a local
 adaptation of an image-level head; averaging these local vectors need not equal
-the original pooled vector. SAE checkpoints remain unchanged. DINO refers here
+the original pooled vector. Original SAE checkpoints remain unchanged; adapted weights
+are saved separately. DINO refers here
 specifically to the existing DINOv2-S/14 backbone, not original DINO.
 
-These are image-level SAE-to-spatial transfer tests. Different native grids and
+These compare image-level SAE-to-spatial transfer and patch adaptation. Different native grids and
 head semantics mean cross-backbone mIoU is not a controlled sparsification-only
 comparison: compare each SAE with its own dense spatial baseline first.
 
@@ -182,9 +232,20 @@ L2-normalized before SAE encoding.
 ## Outputs and resource budget
 
 `work/scene-v1/reports/<identity>/` contains `results.json`, `results.csv`, a full
-manifest, per-image resumable metrics, and `segmentation.pdf/png`. Figures show
-mIoU versus inference K (bars for a single K), and mIoU versus key storage, with
-no published reference curves. Key storage excludes label values and runtime
+manifest, per-image resumable metrics, and publication figures (vector PDF, 400 dpi PNG):
+
+- `segmentation`: mIoU and pixel accuracy versus inference K.
+- `retrieval`: mIoU versus measured active dimensions and key storage.
+- `adaptation_gain`: paired fine-tuned minus frozen mIoU, in percentage points.
+- `search_time`: search seconds per validation image, explicitly a partial timing metric.
+
+Method colors and markers are consistent. Solid/filled curves are fine-tuned;
+dashed/open curves are frozen. Dense values are measured in this experiment. No
+published curves, smoothing, or invented confidence intervals are included. Plots
+connect increasing inference K even when actual nonzeros saturate. `figure_notes.txt`
+documents units and interpretation. The completed suite adds combined plots/CSV under
+`reports/suite-<identity>/`; `latest_suite.json` records that path.
+Key storage excludes label values and runtime
 buffers; search time is not end-to-end latency or a throughput benchmark.
 
 Each default backbone uses at most 44 patches per support image: 64,416 total before
@@ -201,6 +262,18 @@ python -m mpsae.scene plot --results work/scene-v1/reports/IDENTITY/results.json
 python -m mpsae.scene publish --repo quangnguyenopt/MPSAE --results work/scene-v1/reports/IDENTITY/results.json
 ```
 
-Publishing is explicit and uploads result JSON/CSV/plots only. Feature caches stay
+Publishing is explicit and uploads adapted checkpoints/logs and result JSON/CSV/plots. Feature caches stay
 local; copy the feature directory and its manifest to reuse it elsewhere. No
 large upload or server experiment runs automatically when this module is added.
+
+To download results and adapted checkpoints on another machine:
+
+```bash
+hf download quangnguyenopt/MPSAE --repo-type dataset --include "scene-v1/reports/*" "scene-v1/adaptations/*" --local-dir ./MPSAE-results
+```
+
+To reuse recovered adaptations, copy the downloaded `scene-v1/adaptations` directory
+into the selected scene workspace, retaining its identity subdirectories. Rerun the
+same pinned source and dataset settings. A matching completed adaptation is checked
+and loaded without training again. Image/backbone extraction is still required if
+the feature cache has not been copied to the new server.

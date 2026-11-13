@@ -1,1 +1,1 @@
-"""Opt-in frozen spatial SAE evaluation; never schedules training."""
+"""Frozen-backbone patch SAE adaptation and segmentation evaluation."""

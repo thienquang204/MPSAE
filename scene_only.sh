@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fresh-server entry point. Always invokes scene bootstrap, never SAE training.
+# Fresh-server entry point: frozen-backbone extraction, SAE adaptation, evaluation.
 set -Eeuo pipefail
 scene_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$scene_root"

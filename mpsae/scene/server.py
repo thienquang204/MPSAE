@@ -69,13 +69,38 @@ def doctor(device='cuda:0', expected_cuda=None):
 def publish_results(path, repo):
     from huggingface_hub import HfApi
     path = Path(path)
-    if not (read_json(path) or {}).get('complete'):
+    payload = read_json(path) or {}
+    if not payload.get('complete'):
         raise ValueError('cannot publish an incomplete report')
+    for artifact in payload.get('adaptations', []):
+        directory = Path(artifact['directory'])
+        expected = Path('adaptations') / artifact['signature'][:20]
+        if directory != expected:
+            raise ValueError('invalid adaptation artifact path')
+        publish_adaptation(path.parent.parent.parent / directory, repo,
+                           expected_checkpoint=artifact['checkpoint_id'])
     commit = HfApi().upload_folder(repo_id=repo, repo_type='dataset', folder_path=str(path.parent),
         path_in_repo=f'scene-v1/reports/{path.parent.name}',
-        allow_patterns=['*.json', '*.csv', '*.pdf', '*.png'], ignore_patterns=['per_image/**'],
-        commit_message='Save frozen spatial SAE evaluation')
+        allow_patterns=['*.json', '*.csv', '*.pdf', '*.png', 'figure_notes.txt'], ignore_patterns=['per_image/**'],
+        commit_message='Save spatial SAE benchmark and publication figures')
     return str(commit)
+
+
+def publish_adaptation(directory, repo, *, expected_checkpoint=None):
+    """Upload recovery artifacts before evaluation, excluding locks and partial writes."""
+    from huggingface_hub import HfApi
+    from ..io import sha256_file
+    directory = Path(directory)
+    summary = read_json(directory / 'summary.json') or {}
+    if (not summary.get('complete') or summary.get('signature') != canonical_hash(summary.get('identity'))
+            or directory.name != summary['signature'][:20]
+            or summary.get('checkpoint_id') != sha256_file(directory / 'checkpoint.pt')
+            or expected_checkpoint is not None and summary['checkpoint_id'] != expected_checkpoint):
+        raise ValueError('cannot publish incomplete or mismatched adaptation')
+    return str(HfApi().upload_folder(repo_id=repo, repo_type='dataset', folder_path=str(directory),
+        path_in_repo=f'scene-v1/adaptations/{directory.name}',
+        allow_patterns=['checkpoint.pt', 'config.json', 'summary.json', 'train.jsonl'],
+        commit_message='Back up completed VOC patch SAE adaptation'))
 
 
 def bootstrap(config, workspace, *, repo, revision, prefix, device='cuda:0',
@@ -90,7 +115,7 @@ def bootstrap(config, workspace, *, repo, revision, prefix, device='cuda:0',
     receipt_path = workspace / 'sources' / f'{canonical_hash(selection)[:20]}.json'
     status_path = workspace / 'status.json'
     state = {'complete': False, 'stage': 'verify_environment', 'updated': time.time(),
-             'training_runs': 0, 'selection': selection, 'publish_requested': publish}
+             'training_runs': config.plan()['training_runs'], 'selection': selection, 'publish_requested': publish}
 
     def stage(name):
         state.update(stage=name, updated=time.time())
@@ -122,8 +147,12 @@ def bootstrap(config, workspace, *, repo, revision, prefix, device='cuda:0',
                                   cache_dir=str(workspace / 'hf_checkpoints')), 'selection': selection}
             atomic_json(receipt_path, receipt)
         state['source'] = receipt
-        stage('evaluate')
-        result = run(config, workspace, receipt['source_root'], device=device)
+        stage('adapt_and_evaluate' if config.adaptation.enabled else 'evaluate')
+        def completed_fit(record):
+            if publish:
+                print('[scene server] backing up completed adaptation', flush=True)
+                publish_adaptation(Path(record['path']).parent, repo)
+        result = run(config, workspace, receipt['source_root'], device=device, on_adapted=completed_fit)
         state['report'] = result['report']
         atomic_json(workspace / 'latest.json', {'report': result['report'], 'source_revision': receipt['revision'],
                                                'evaluation_complete': True})

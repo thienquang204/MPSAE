@@ -1,0 +1,31 @@
+# Frozen checkpoints only: 12 source SAEs, 82 evaluations, zero new fits.
+methods: [csr, csrv2, mpsae]
+seed: 1227
+dataset_repo: shijli/voc2012
+dataset_revision: main
+dataset_config: segmentation
+memory_patches: 65536
+neighbors: 30
+temperature: 0.02
+extraction_batch: 8
+encode_batch: 1024
+gallery_chunk: 4096
+query_block: 256
+workers: 4
+experiments:
+  - backbone: ff2048
+    train_k: 8
+    inference_k: [2, 4, 8, 16, 32, 64, 128, 256]
+    image_size: 512
+  - backbone: vit_b16
+    train_k: 12
+    inference_k: [3, 12, 48, 96, 192, 384]
+    image_size: 448
+  - backbone: dinov2_vits14
+    train_k: 12
+    inference_k: [3, 12, 48, 96, 192, 384]
+    image_size: 448
+  - backbone: convnext_tiny
+    train_k: 12
+    inference_k: [3, 12, 48, 96, 192, 384]
+    image_size: 448

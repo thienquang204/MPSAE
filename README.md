@@ -29,24 +29,29 @@ ConvNeXt-Tiny and DINOv2-S/14, with selective linear probing. All downstream
 experiments (including SOP) and repeated retrieval timing are disabled for now.
 `.env` holds credentials; `configs/thesis.yaml` selects the experiments.
 
-Optional **spatial SAE evaluation** is available separately through
+Optional **patch SAE fine-tuning and segmentation** is available separately through
 `python -m mpsae.scene plan` and `python -m mpsae.scene run`. It loads existing
 ResNet-50/ViT/DINOv2/ConvNeXt SAEs, uses Hugging Face PASCAL VOC masks, and compares dense and sparse
-patch retrieval without training. See [the protocol and commands](docs/scene_evaluation.md)
+patch retrieval before and after SAE-only fine-tuning. The backbone stays frozen;
+cached VOC training patches supply five epochs at batch 1024 and LR 1e-5.
+See [the protocol and commands](docs/scene_evaluation.md)
 and `configs/scene_voc.yaml`. This is an adapted Hummingbird-style decoder,
-testing pooled-to-local feature transfer; it is not part of the main campaign.
+testing frozen transfer and downstream adaptation; it is not part of the main campaign.
 
 On a **fresh Linux GPU server**, use the separate evaluation environment:
 
 ```bash
 bash scene_only.sh --setup-only
 .venv-scene/bin/hf auth login
-bash scene_only.sh --workspace /workspace/scene-v1
+bash scene_only.sh --workspace /workspace/scene-v1 --publish
 ```
 
-The default runs 82 evaluations over four backbones using 12 pretrained SAEs,
-with zero new training. It restores the selected checkpoints and VOC automatically. Rerun
-the last command to resume; add `--publish` to back up completed reports to HF.
+The default adds 12 SAE adaptations and 78 fine-tuned evaluation points, alongside
+78 frozen points and four dense baselines. Compatible frozen results and feature caches
+are reused. It restores source checkpoints and VOC automatically. Rerun the last
+command to resume; `--publish` backs up each completed adapted checkpoint before
+evaluation, then the CSV/JSON and PDF/PNG figures. The original frozen configuration
+is saved in `configs/archive/scene_voc_frozen_multi.yaml`.
 No old server files or ImageNet download are required. See the scene guide for
 driver/Python requirements and alternate repository/revision options.
 

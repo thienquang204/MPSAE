@@ -1,4 +1,5 @@
-"""Evaluate completed source fits. No fitting or ImageNet extraction paths."""
+"""Frozen or patch-adapted SAEs evaluated with the same retrieval decoder."""
+from dataclasses import replace
 from pathlib import Path
 import time
 
@@ -7,9 +8,9 @@ import torch
 
 from ..benchmark.run import checkpoint_record
 from ..config import BACKBONES
-from ..io import atomic_json, canonical_hash, read_json
+from ..io import atomic_json, canonical_hash, read_json, array_hash
 from ..train import load_fitted
-from .config import VERSION
+from .config import VERSION, Adaptation
 from .core import CLASSES, confusion, encode, metrics, predict
 from .data import prepare, support_bank
 
@@ -23,7 +24,7 @@ def source_records(config, source_root):
     return records
 
 
-def run(config, workspace, source_root, *, device='cuda:0', prepare_only=False):
+def run(config, workspace, source_root, *, device='cuda:0', prepare_only=False, on_adapted=None):
     config.plan()
     records = source_records(config, source_root)
     directory, manifest = prepare(config, workspace, records[0]['backbone_weights'], device=device)
@@ -32,28 +33,72 @@ def run(config, workspace, source_root, *, device='cuda:0', prepare_only=False):
     features, labels = support_bank(directory, manifest)
     if len(features) < config.neighbors:
         raise ValueError('too few valid support patches for configured neighbor count')
+    adapted = []
+    frozen_rows = []
+    if config.adaptation.enabled:
+        from .adapt import fit
+        # Only training rows reach fit. Validation arrays are opened by evaluation below.
+        train_identity = {'feature_cache': manifest['identity'],
+                          'features_sha256': array_hash(features), 'labels_sha256': array_hash(labels),
+                          'sampling': 'shared VOC train support; label-informed; all-void excluded'}
+        for cell, record in zip(config.cells(), records):
+            fitted = fit(config, cell, record, features, labels, train_identity, workspace, device=device)
+            adapted.append(fitted)
+            if on_adapted is not None:
+                on_adapted(fitted)  # back up each completed fit before the expensive sweep
+        frozen = replace(config, adaptation=Adaptation())
+        baseline = _evaluate(frozen, workspace, records, directory, manifest, features, labels,
+                             device=device, dense_only=not config.adaptation.compare_frozen)
+        frozen_rows = [{**row, 'variant': 'dense' if row['method'] == 'dense' else 'frozen',
+                        'query_images': row.get('query_images', manifest['query_images'])}
+                       for row in baseline['results']]
+    return _evaluate(config, workspace, records, directory, manifest, features, labels,
+                     device=device, adapted=adapted, frozen_rows=frozen_rows)
+
+
+def _evaluate(config, workspace, records, directory, manifest, features, labels, *,
+              device, adapted=(), frozen_rows=(), dense_only=False):
     campaign = {'version': VERSION, 'plan': config.plan(), 'features': manifest['identity'],
                 'sources': [{k: r[k] for k in ('checkpoint_id', 'signature', 'cell')} for r in records],
                 'device': str(device), 'sae_precision': 'float32_tf32_disabled',
                 'search': 'exact_cosine_score_desc_gallery_position_asc',
                 'empty_code_policy': 'abstain_nearest_grid_mask_count_false_negative'}
+    if adapted:
+        campaign.update(version='voc-spatial-adapted-v1',
+            adaptations=[{'checkpoint_id': r['checkpoint_id'], 'signature': r['signature'],
+                          'identity': r['identity']} for r in adapted])
+    if dense_only:
+        campaign['dense_only'] = True
     output = Path(workspace) / 'reports' / canonical_hash(campaign)[:20]
     atomic_json(output / 'manifest.json', campaign)
-    results = []
-    points = [(None, None, None)] + [(cell, record, k) for cell, record in zip(config.cells(), records)
+    results = list(frozen_rows)
+    model_records = adapted or records
+    points = ([] if frozen_rows else [(None, None, None)]) + [(cell, record, k) for cell, record in zip(config.cells(), model_records)
                                      for k in config.inference_k]
+    if dense_only:
+        points = [(None, None, None)]
     from ..evaluate.knn import fp32_matmul
+    loaded_key, loaded_sae = None, None
     with torch.inference_mode(), fp32_matmul():
         for cell, record, k in points:
             method = cell.method if cell else 'dense'
+            variant = 'adapted' if adapted and cell else 'frozen' if cell else 'dense'
             slug = f'{method}_k{k}' if cell else 'dense'
             point_path = output / f'{slug}.json'
             previous = read_json(point_path)
             if previous and previous.get('complete'):
                 results.append(previous)
                 continue
-            sae = load_fitted(cell, Path(record['path']).parent, BACKBONES[cell.backbone],
-                              device=torch.device(device)).requires_grad_(False) if cell else None
+            key = (variant, method, record['checkpoint_id']) if cell else None
+            if key != loaded_key:
+                if adapted:
+                    from .adapt import load_adapted
+                    loaded_sae = load_adapted(record, device=torch.device(device))
+                else:
+                    loaded_sae = load_fitted(cell, Path(record['path']).parent, BACKBONES[cell.backbone],
+                                            device=torch.device(device)).requires_grad_(False)
+                loaded_key = key
+            sae = loaded_sae if cell else None
             dim = sae.hidden_dim if sae else features.shape[1]
             bank = encode(sae, features, k, device, config.encode_batch) if sae else features
             values = bank['values'] if sae else bank
@@ -91,19 +136,24 @@ def run(config, workspace, source_root, *, device='cuda:0', prepare_only=False):
             if sae and (bank_nnz.max() > k or nnz_max > k):
                 raise AssertionError('SAE sparsity budget violated')
             record_out = {'complete': True, 'method': method, 'train_k': cell.k if cell else None,
+                          'variant': variant,
                           'inference_k': k, 'checkpoint_id': record['checkpoint_id'] if cell else None,
                           **metrics(matrix), 'confusion': matrix.tolist(),
                           'bank_rows': len(features), 'bank_nnz_mean': float(bank_nnz.mean()),
                           'bank_empty_patches': int(np.count_nonzero(bank_nnz == 0)),
                           'query_nnz_mean': nnz_total/nnz_count, 'query_nnz_max': nnz_max,
                           'query_empty_patches': empty_count, 'query_patches': nnz_count,
+                          'query_images': manifest['query_images'],
                           'search_seconds': seconds, 'invocation_seconds': time.perf_counter()-start,
                           'timing_note': 'search_seconds includes cached per-image measurements; not end-to-end latency',
                           'index_bytes': int(bank['indices'].nbytes + bank['values'].nbytes) if sae else int(bank.nbytes)}
             atomic_json(point_path, record_out)
             results.append(record_out)
-            del sae, bank
-    atomic_json(output / 'results.json', {'complete': True, 'campaign': campaign, 'results': results})
+            del bank
+    artifacts = [{'signature': r['signature'], 'checkpoint_id': r['checkpoint_id'],
+                  'directory': f'adaptations/{r["signature"][:20]}'} for r in adapted]
+    atomic_json(output / 'results.json', {'complete': True, 'campaign': campaign,
+                                         'adaptations': artifacts, 'results': results})
     from .report import plot
     plot(output / 'results.json')
     return {'complete': True, 'report': str(output), 'results': results}

@@ -1,4 +1,4 @@
-"""python -m mpsae.scene: opt-in evaluation with no training side effects."""
+"""python -m mpsae.scene: cached-patch SAE adaptation and segmentation benchmarks."""
 import argparse
 import json
 from pathlib import Path, PurePosixPath
@@ -46,7 +46,7 @@ def main():
     parser.add_argument('--results', help='Path to one completed results.json (plot/publish)')
     parser.add_argument('--env-file', default='.env')
     parser.add_argument('--refresh-source', action='store_true', help='Explicitly resolve the latest source revision again')
-    parser.add_argument('--publish', action='store_true', help='Upload completed bootstrap reports to --repo')
+    parser.add_argument('--publish', action='store_true', help='Back up completed SAE adaptations and reports to --repo')
     parser.add_argument('--expected-cuda', help='Doctor: require this torch CUDA runtime, e.g. 12.8')
     args = parser.parse_args()
     if args.command not in ('plan', 'doctor'):
@@ -92,10 +92,15 @@ def main():
                                    refresh_source=args.refresh_source, publish=args.publish)
         else:
             from .run import run
+            from .server import publish_adaptation, publish_results
             from ..io import exclusive_lock
             with exclusive_lock(Path(args.workspace) / '.scene.lock'):
                 result = run(config, args.workspace, args.source_root, device=args.device,
-                             prepare_only=args.command == 'prepare')
+                             prepare_only=args.command == 'prepare',
+                             on_adapted=(lambda r: publish_adaptation(Path(r['path']).parent, args.repo))
+                                        if args.publish else None)
+                if args.publish and args.command == 'run':
+                    result['upload_commit'] = publish_results(Path(result['report'])/'results.json', args.repo)
     print(json.dumps(result, indent=2))
 
 
