@@ -1,5 +1,6 @@
 from dataclasses import asdict
 import time
+import math
 
 import numpy as np
 import torch
@@ -25,6 +26,14 @@ def fit(config, method, features, labels, feature_identity, hub, device, *, pres
                 'initialization': 'fresh SAE; never load an image-level SAE',
                 'label_policy': label_stats['label_rule'] if method == 'csrv2' else 'not used by loss',
                 'selection': 'final epoch', 'precision': 'fp32_tf32_disabled'}
+    if config.early_stopping:
+        identity['early_stopping'] = {
+            'monitor': 'sample_weighted_epoch_training_objective',
+            'min_epochs': config.early_min_epochs, 'patience': config.early_patience,
+            'relative_min_delta': config.early_min_delta,
+            'start': 'after minimum epochs and a full epoch at target K',
+            'selection': 'last completed epoch; no validation selection'}
+        identity['selection'] = 'last epoch at plateau or epoch limit'
     # Normalize tuples for serialization and exact identity comparisons.
     import json
     identity = json.loads(json.dumps(identity))
@@ -38,6 +47,8 @@ def fit(config, method, features, labels, feature_identity, hub, device, *, pres
     optimizer = torch.optim.Adam(model.parameters(), lr=preset.lr, betas=preset.adam_betas,
                                  eps=preset.adam_eps, weight_decay=preset.weight_decay)
     step, elapsed = 0, 0.0
+    tracker = {'best': None, 'bad_epochs': 0, 'loss_sum': 0.0, 'samples': 0,
+               'history': [], 'stopped': False}
     path = folder/'checkpoint.pt'
     if path.exists():
         state = torch.load(path, map_location=device, weights_only=False)
@@ -46,12 +57,13 @@ def fit(config, method, features, labels, feature_identity, hub, device, *, pres
         model.load_state_dict(state['model'])
         optimizer.load_state_dict(state['optimizer'])
         step, elapsed = state['next_step'], state['train_seconds']
+        tracker = state.get('convergence', tracker)
         if not 0 <= step <= total:
             raise ValueError('invalid resume step')
         torch.set_rng_state(state['rng_cpu'].cpu())
         if str(device).startswith('cuda') and state.get('rng_cuda') is not None:
             torch.cuda.set_rng_state(state['rng_cuda'].cpu(), device)
-        if step == total and (folder/'summary.json').exists():
+        if (step == total or tracker['stopped']) and (folder/'summary.json').exists():
             summary = read_json(folder/'summary.json')
             if summary['checkpoint_sha256'] != sha256_file(path):
                 raise RuntimeError('completed checkpoint hash mismatch')
@@ -63,7 +75,8 @@ def fit(config, method, features, labels, feature_identity, hub, device, *, pres
     started = time.perf_counter()
 
     def checkpoint(remote=True):
-        save_torch(path, {'identity': identity, 'next_step': step, 'complete': step == total,
+        save_torch(path, {'identity': identity, 'next_step': step, 'complete': step == total or tracker['stopped'],
+            'convergence': tracker,
             'model': model.state_dict(), 'optimizer': optimizer.state_dict(),
             'rng_cpu': torch.get_rng_state(),
             'rng_cuda': torch.cuda.get_rng_state(device) if str(device).startswith('cuda') else None,
@@ -73,6 +86,8 @@ def fit(config, method, features, labels, feature_identity, hub, device, *, pres
     model.train()
     with fp32_matmul():
         for epoch in range(step//len(ranges), preset.epochs):
+            if tracker['stopped']:
+                break
             order = np.random.default_rng([config.seed, epoch]).permutation(len(features))
             for b, (start, stop) in enumerate(ranges):
                 if epoch*len(ranges)+b < step:
@@ -89,21 +104,57 @@ def fit(config, method, features, labels, feature_identity, hub, device, *, pres
                 if any(p.grad is not None and not torch.isfinite(p.grad).all() for p in model.parameters()):
                     raise FloatingPointError('nonfinite gradient')
                 optimizer.step()
+                if config.early_stopping:
+                    tracker['loss_sum'] += float(out.loss.detach()) * (stop-start)
+                    tracker['samples'] += stop-start
                 step += 1
                 if collect:
                     print(f'[fit {method}] {step}/{total} K={out.training_k} loss={out.loss.item():.5f}', flush=True)
                     atomic_json(folder/'progress.json', {'step': step, 'total': total, 'loss': out.loss.item(),
                         'training_k': out.training_k, 'metrics': out.metrics})
+                if config.early_stopping and b+1 == len(ranges):
+                    mean_loss = tracker['loss_sum']/tracker['samples']
+                    # CSRv2 changes its objective's K during the first 70% of training.
+                    first_k = methods.plan_budget(method, config.k, preset, step=epoch*len(ranges), total_steps=total)
+                    eligible = epoch+1 >= config.early_min_epochs and first_k == config.k
+                    update_plateau(tracker, mean_loss, eligible, config.early_patience, config.early_min_delta)
+                    tracker['history'].append({'epoch': epoch+1, 'mean_loss': mean_loss,
+                        'eligible': eligible, 'bad_epochs': tracker['bad_epochs'],
+                        'stopped': tracker['stopped']})
+                    tracker['loss_sum'], tracker['samples'] = 0.0, 0
+                    atomic_json(folder/'convergence.json', tracker)
+                    print(f"[convergence {method}] epoch={epoch+1} mean_loss={mean_loss:.6g} "
+                          f"eligible={eligible} patience={tracker['bad_epochs']}/{config.early_patience} "
+                          f"stopped={tracker['stopped']}", flush=True)
                 if step % config.checkpoint_every == 0 or b+1 == len(ranges) or step == stop_after:
                     checkpoint(remote=b+1 == len(ranges) or step == stop_after)
-                if step == stop_after and step < total:
+                if step == stop_after and step < total and not tracker['stopped']:
                     return None
     if not path.exists():
         checkpoint()
     summary = {'complete': True, 'identity': identity, 'path': relative,
-               'checkpoint_sha256': sha256_file(path), 'steps': total,
+               'checkpoint_sha256': sha256_file(path), 'steps': step,
                'train_seconds': elapsed+time.perf_counter()-started}
+    if config.early_stopping:
+        summary.update(epochs_completed=step//len(ranges), max_epochs=preset.epochs,
+                       stop_reason='training_loss_plateau' if tracker['stopped'] else 'max_epochs',
+                       convergence=tracker)
     atomic_json(folder/'summary.json', summary)
     hub.push(relative)
     del optimizer, x, y
     return model.eval().requires_grad_(False), summary
+
+
+def update_plateau(tracker, loss, eligible, patience, delta):
+    """Relative improvement over the last significant best; never uses evaluation labels."""
+    if not math.isfinite(loss):
+        raise FloatingPointError('nonfinite epoch loss')
+    if not eligible:
+        tracker['best'], tracker['bad_epochs'] = None, 0
+        return
+    best = tracker['best']
+    if best is None or best-loss > delta*max(abs(best), 1e-12):
+        tracker['best'], tracker['bad_epochs'] = loss, 0
+    else:
+        tracker['bad_epochs'] += 1
+    tracker['stopped'] = tracker['bad_epochs'] >= patience

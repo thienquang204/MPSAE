@@ -40,8 +40,26 @@ class Config:
     checkpoint_every: int = 128
     log_every: int = 20
     cache_dtype: str = 'float16'
+    datasets: tuple[str, ...] | None = None
+    early_stopping: bool = False
+    early_min_epochs: int = 15
+    early_patience: int = 3
+    early_min_delta: float = 0.001
 
     def __post_init__(self):
+        if self.datasets is not None:
+            if not isinstance(self.datasets, (list, tuple)) or not self.datasets or any(d not in DATASETS for d in self.datasets) or len(set(self.datasets)) != len(self.datasets):
+                raise ValueError('datasets must be distinct registered dataset names')
+            object.__setattr__(self, 'datasets', tuple(d for d in DATASETS if d in self.datasets))
+        if type(self.early_stopping) is not bool:
+            raise ValueError('early_stopping must be boolean')
+        for key in ('early_min_epochs', 'early_patience'):
+            if type(getattr(self, key)) is not int or getattr(self, key) < 1:
+                raise ValueError(f'invalid {key}')
+        if not math.isfinite(self.early_min_delta) or not 0 <= self.early_min_delta < 1:
+            raise ValueError('early_min_delta must be in [0, 1)')
+        if self.early_stopping and self.early_min_epochs > self.epochs:
+            raise ValueError('early_min_epochs exceeds epochs')
         for key in ('seed', 'k', 'hidden_dim', 'image_size', 'train_patches',
                     'support_patches', 'epochs', 'batch_size', 'extraction_batch',
                     'workers', 'shard_images', 'query_block', 'neighbors',
@@ -83,6 +101,11 @@ class Config:
 
     def identity(self):
         settings = asdict(self)
+        if self.datasets is None:
+            settings.pop('datasets')
+        if not self.early_stopping:
+            for key in ('early_stopping', 'early_min_epochs', 'early_patience', 'early_min_delta'):
+                settings.pop(key)
         # Preserve the original K=12 campaign ID and all training/cache identities.
         settings.pop('inference_k')
         settings.pop('train_k')
@@ -94,6 +117,10 @@ class Config:
         if self.inference_ks != (self.k,):
             settings['inference_k'] = list(self.inference_ks)
         return {'version': VERSION, 'settings': settings}
+
+    @property
+    def dataset_names(self):
+        return self.datasets or tuple(DATASETS)
 
     @property
     def inference_ks(self):
@@ -115,6 +142,12 @@ class Config:
 
     def source_identity(self):
         identity = self.identity()
+        identity['settings'].pop('datasets', None)
+        if self.early_stopping:
+            # Training duration/stopping does not change extracted features.
+            for key in ('early_stopping', 'early_min_epochs', 'early_patience', 'early_min_delta'):
+                identity['settings'].pop(key, None)
+            identity['settings']['epochs'] = 10
         identity['settings'].pop('inference_k', None)
         identity['settings'].pop('train_k', None)
         identity['settings'].pop('encoders', None)
@@ -124,12 +157,12 @@ class Config:
         return identity
 
     def plan(self):
-        cells = len(self.encoder_names)*len(DATASETS)
+        cells = len(self.encoder_names)*len(self.dataset_names)
         fits = cells*len(METHODS)*len(self.training_ks)
         sparse = fits*len(self.inference_ks)
         matched = cells*len(METHODS)*len(set(self.training_ks) & set(self.inference_ks))
         return {**self.identity(), 'campaign': canonical_hash(self.identity())[:20],
-                'encoders': {e: ENCODERS[e] for e in self.encoder_names}, 'datasets': DATASETS, 'methods': METHODS,
+                'encoders': {e: ENCODERS[e] for e in self.encoder_names}, 'datasets': {d: DATASETS[d] for d in self.dataset_names}, 'methods': METHODS,
                 'sae_fits': fits, 'sparse_evaluations': sparse, 'dense_evaluations': cells,
                 'matched_evaluations': matched, 'cross_k_evaluations': sparse-matched,
                 'total_evaluations': cells+sparse,

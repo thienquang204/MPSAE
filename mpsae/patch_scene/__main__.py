@@ -67,7 +67,9 @@ def main():
         encoders = list(config.encoder_names) if args.encoder == 'all' else [args.encoder]
         if any(e not in config.encoder_names for e in encoders):
             parser.error('--encoder must be selected in the configuration')
-        datasets = list(DATASETS) if args.dataset == 'all' else [args.dataset]
+        datasets = list(config.dataset_names) if args.dataset == 'all' else [args.dataset]
+        if any(d not in config.dataset_names for d in datasets):
+            parser.error('--dataset must be selected in the configuration')
         if len(devices) > 1:
             from .scheduler import validate_devices
             devices = validate_devices(devices, smoke=smoke)

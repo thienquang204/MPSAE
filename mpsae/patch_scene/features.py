@@ -46,7 +46,7 @@ def resolve_sources(config, hub):
         sources = read_json(hub.pull(original)/'sources.json')
     sources = sources or {'models': {}, 'datasets': {}}
     missing_models = [e for e in config.encoder_names if e not in sources['models']]
-    missing_data = [d for d in DATASETS if d not in sources['datasets']]
+    missing_data = [d for d in config.dataset_names if d not in sources['datasets']]
     if missing_models or missing_data:
         api = HfApi()
         for name in missing_models:

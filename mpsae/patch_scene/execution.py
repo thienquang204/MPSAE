@@ -105,6 +105,10 @@ class TaskRunner:
                 print(f'[job {task.dataset}/{task.encoder}/{task.method}] train K={task.train_k}; inference K={k}', flush=True)
                 result = evaluate(config, task.encoder, task.dataset, task.method, model, record,
                                   features, labels, selected, manifest, self.hub, self.device, inference_k=k)
+                if record is not None and config.early_stopping:
+                    result['training'] = {key: record[key] for key in (
+                        'path', 'steps', 'epochs_completed', 'max_epochs', 'stop_reason', 'convergence')
+                        if key in record}
                 emit(result)
         finally:
             del model

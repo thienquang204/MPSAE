@@ -23,8 +23,8 @@ def row_key(row):
 
 
 def expected_keys(config):
-    return {(d, e, 'dense', None, None) for d in DATASETS for e in config.encoder_names} | {
-        (d, e, m, train_k, k) for d in DATASETS for e in config.encoder_names
+    return {(d, e, 'dense', None, None) for d in config.dataset_names for e in config.encoder_names} | {
+        (d, e, m, train_k, k) for d in config.dataset_names for e in config.encoder_names
         for m in METHODS for train_k in config.training_ks for k in config.inference_ks}
 
 
@@ -210,16 +210,16 @@ def write_tables(rows, directory, config=None):
     _csv(directory/'results.csv', fields, metrics)
     _csv(directory/'comparisons.csv', list(comparisons[0]), comparisons)
     matched = len(config.training_ks) > 1 and set(config.training_ks) <= set(config.inference_ks)
-    (directory/'results.tex').write_text(_latex(lookup, config, datasets=tuple(DATASETS), matched=matched), encoding='utf-8')
+    (directory/'results.tex').write_text(_latex(lookup, config, datasets=config.dataset_names, matched=matched), encoding='utf-8')
     (directory/'inference_sweep.tex').write_text(
-        _latex(lookup, config, datasets=tuple(DATASETS), label='patch-sae-sweep'), encoding='utf-8')
+        _latex(lookup, config, datasets=config.dataset_names, label='patch-sae-sweep'), encoding='utf-8')
     for dataset in DATASETS:
         (directory/f'table_{dataset}.tex').write_text(
             _latex(lookup, config, datasets=(dataset,), label=f'patch-sae-{dataset}', matched=matched), encoding='utf-8')
         (directory/f'sweep_{dataset}.tex').write_text(
             _latex(lookup, config, datasets=(dataset,), label=f'patch-sae-sweep-{dataset}'), encoding='utf-8')
     (directory/'pixel_accuracy.tex').write_text(
-        _latex(lookup, config, datasets=tuple(DATASETS), metric='pixel_accuracy', label='patch-sae-pa', matched=matched), encoding='utf-8')
+        _latex(lookup, config, datasets=config.dataset_names, metric='pixel_accuracy', label='patch-sae-pa', matched=matched), encoding='utf-8')
     (directory/'tables_preview.tex').write_text(
         '\\documentclass{article}\n\\usepackage[a4paper,margin=18mm]{geometry}\n'
         '\\usepackage{booktabs}\n\\begin{document}\n\\input{results.tex}\n\\clearpage\n'
