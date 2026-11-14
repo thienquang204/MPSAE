@@ -10,12 +10,15 @@ from .config import VERSION
 
 
 def evaluate(config, encoder, dataset, method, model, fit_record, features, labels, selected,
-             manifest, hub, device):
+             manifest, hub, device, *, inference_k=None):
     sparse = model is not None
+    k = (config.k if inference_k is None else inference_k) if sparse else None
+    if sparse and (type(k) is not int or not 1 <= k <= model.hidden_dim):
+        raise ValueError('inference K must be in [1, model.hidden_dim]')
     identity = {'version': VERSION, 'features': manifest['identity'], 'method': method,
                 'fit': fit_record['checkpoint_sha256'] if sparse else None,
                 'support_indices': array_hash(selected), 'support_rows': len(selected),
-                'k': config.k if sparse else None, 'neighbors': config.neighbors,
+                'k': k, 'neighbors': config.neighbors,
                 'temperature': config.temperature, 'query_block': config.query_block,
                 'search': 'fp32_exact_coordinate_lookup_v1' if sparse else 'fp32_exact_gemm_v1',
                 'tie_rule': 'score_desc_position_asc', 'ignore': 255}
@@ -25,7 +28,8 @@ def evaluate(config, encoder, dataset, method, model, fit_record, features, labe
     if result is not None:
         if result['identity'] != identity or not result['complete']:
             raise ValueError('evaluation identity mismatch')
-        return result
+        print(f'[reuse eval {dataset}/{encoder}/{method}] K={k}', flush=True)
+        return {**result, 'train_k': config.k if sparse else None, 'inference_k': k}
     state = read_json(folder/'progress.json') or {}
     if state and state['identity'] != identity:
         raise ValueError('evaluation resume mismatch')
@@ -37,7 +41,9 @@ def evaluate(config, encoder, dataset, method, model, fit_record, features, labe
     if str(device).startswith('cuda'):
         torch.cuda.reset_peak_memory_stats(device)
     if sparse:
-        gallery = codes(model, features[selected], config.k, device)
+        gallery = codes(model, features[selected], k, device)
+        if int(gallery[1].ne(0).sum(1).max()) > k:
+            raise AssertionError('gallery K-sparsity violated')
         gallery_nnz = float(gallery[1].ne(0).sum(1).float().mean())
         dim = model.hidden_dim
     else:
@@ -48,10 +54,10 @@ def evaluate(config, encoder, dataset, method, model, fit_record, features, labe
     del gallery
     started = time.perf_counter()
     for i, x, truth in queries(manifest, hub, skip=next_image):
-        query = codes(model, x, config.k, device) if sparse else x
+        query = codes(model, x, k, device) if sparse else x
         if sparse:
             counts = query[1].ne(0).sum(1)
-            if int(counts.max()) > config.k:
+            if int(counts.max()) > k:
                 raise AssertionError('K-sparsity violated')
             nnz_sum += int(counts.sum())
         else:
@@ -66,11 +72,12 @@ def evaluate(config, encoder, dataset, method, model, fit_record, features, labe
                 'confusion': matrix.tolist(), 'nnz_sum': nnz_sum, 'patches': patches, 'empty': empties,
                 'seconds': prior_seconds+time.perf_counter()-started})
             hub.push(relative)
-            print(f'[eval {dataset}/{encoder}/{method}] {next_image}/{manifest["counts"]["validation"]}', flush=True)
+            print(f'[eval {dataset}/{encoder}/{method} K={k}] {next_image}/{manifest["counts"]["validation"]}', flush=True)
     if next_image != manifest['counts']['validation']:
         raise RuntimeError('incomplete validation split')
     result = {'complete': True, 'identity': identity, 'dataset': dataset, 'encoder': encoder, 'method': method,
-              'k': config.k if sparse else None, 'seed': config.seed, 'query_images': next_image,
+              'k': k, 'train_k': config.k if sparse else None, 'inference_k': k,
+              'seed': config.seed, 'query_images': next_image,
               **metrics(matrix, include_absent=dataset == 'ade20k'), 'mean_nnz': nnz_sum/patches,
               'gallery_mean_nnz': gallery_nnz, 'empty_patches': empties,
               'query_seconds': prior_seconds+time.perf_counter()-started,

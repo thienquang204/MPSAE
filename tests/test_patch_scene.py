@@ -19,11 +19,25 @@ from mpsae.patch_scene.smoke import fixture
 from mpsae.config import TrainPreset
 
 
-def test_plan_24_and_reject_sweeps():
+def test_plan_sweep_preserves_original_training_identity():
+    from mpsae.io import canonical_hash
     p = Config().plan()
     assert (p['sae_fits'], p['total_evaluations'], p['inference_k']) == (18, 24, [12])
+    assert canonical_hash(Config().identity())[:20] == '54d9e25955a1f70142da'
+    assert Config(inference_k=[12]).identity() == Config().identity()
+    config = Config(inference_k=[48, 3, 12])
+    assert config.inference_ks == (3, 12, 48)
+    assert config.source_identity() == Config().identity()
+    assert config.preset() == Config().preset()
+    assert config.plan()['total_evaluations'] == 60
+    assert config.plan()['sae_fits'] == 18
+    assert config.plan()['sparse_evaluations'] == 54
+    assert config.plan()['dense_evaluations'] == 6
     with pytest.raises(ValueError):
         Config(k=48)
+    for invalid in ([], [0], [True], [1.5], [12, 12], [8193], 12, '3,12,48'):
+        with pytest.raises(ValueError, match='inference_k'):
+            Config(inference_k=invalid)
 
 
 @pytest.mark.parametrize('depth', [1, 3, 7])
@@ -141,7 +155,8 @@ def test_local_export_updates_zip_without_hub_calls(monkeypatch, tmp_path):
     collect_tables(hub, campaign)
     archive = tmp_path/'patch-scene-results.zip'
     with ZipFile(archive) as zipped:
-        assert set(zipped.namelist()) == {'results.csv', 'results.tex', 'results.json', 'config.json', 'README.txt'}
+        from mpsae.patch_scene.report import TABLE_FILES
+        assert set(zipped.namelist()) == {*TABLE_FILES, 'config.json', 'README.txt'}
         result = json.loads(zipped.read('results.json'))
         assert result['completed'] == 1 and not result['complete']
         assert '50.00' in zipped.read('results.tex').decode()
@@ -169,6 +184,8 @@ def test_kaggle_notebook_has_no_token_or_publish_requirement():
     assert 'UserSecretsClient' not in code and 'kaggle_secrets' not in code
     assert 'HF_TOKEN' not in code and '--publish' not in code and '--repo' not in code
     assert 'patch-scene-results.zip' in code and 'finally:' in code
+    assert 'ENCODER = "all"' in code and 'DATASET = "all"' in code
+    assert '== 60' in code and '[3, 12, 48]' in code
 
 
 def test_hub_restores_hashed_bundle(monkeypatch, tmp_path):

@@ -1,4 +1,4 @@
-"""Kaggle patch campaign. Plan is 18 SAE fits and exactly 24 evaluation entries."""
+"""Kaggle patch campaign: train K=12 once; reuse each SAE across inference K."""
 import argparse
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -14,7 +14,7 @@ def run_cell(config, encoder, dataset, sources, hub, device, campaign, *, smoke=
     from .features import prepare, training_bank
     from .train import fit
     from .evaluate import evaluate
-    from .report import collect_tables
+    from .report import collect_tables, row_key
     if smoke:
         from .smoke import fixture
         manifest, features, labels, selected = fixture(hub, config, encoder, dataset)
@@ -30,13 +30,17 @@ def run_cell(config, encoder, dataset, sources, hub, device, campaign, *, smoke=
             preset = replace(config.preset(), hidden_dim=64, epochs=1, batch_size=16,
                              k_aux=32, ot_microbatch=4) if smoke else None
             model, record = fit(config, method, features, labels, manifest['identity'], hub, device, preset=preset)
-        result = evaluate(config, encoder, dataset, method, model, record, features, labels,
-                          selected, manifest, hub, device)
-        rows = [r for r in rows if (r['dataset'], r['encoder'], r['method']) != (dataset, encoder, method)]
-        rows.append(result)
-        atomic_json(cell_folder/'rows.json', {'results': rows})
-        hub.push(cell_rel)
-        table_folder = collect_tables(hub, campaign)
+        # Finish/reuse train-K first, then extend without fitting another model.
+        grid = sorted(config.inference_ks, key=lambda k: (k != config.k, k)) if model is not None else (None,)
+        for k in grid:
+            print(f'[job {dataset}/{encoder}/{method}] train K={config.k if model is not None else None}; inference K={k}', flush=True)
+            result = evaluate(config, encoder, dataset, method, model, record, features, labels,
+                              selected, manifest, hub, device, inference_k=k)
+            rows = [r for r in rows if row_key(r) != row_key(result)]
+            rows.append(result)
+            atomic_json(cell_folder/'rows.json', {'results': rows})
+            hub.push(cell_rel)
+            table_folder = collect_tables(hub, campaign)
         del model
         if str(device).startswith('cuda'):
             torch.cuda.empty_cache()

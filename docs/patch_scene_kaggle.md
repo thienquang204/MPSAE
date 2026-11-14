@@ -1,4 +1,4 @@
-# Kaggle: 24-point patch SAE benchmark
+# Kaggle: 60-point patch SAE inference benchmark
 
 Open `notebooks/patch_scene_kaggle.ipynb` on Kaggle. Push this code to the
 `refactor` branch before running the notebook. Enable Internet and select a
@@ -8,7 +8,8 @@ experiment outputs on Kaggle. No upload flags are passed.
 
 If you already have an open Kaggle notebook, use **File -> Import Notebook**
 and upload `notebooks/patch_scene_kaggle.ipynb`, then run its cells in order.
-Start with `ENCODER = "dinov2"` and `DATASET = "voc"`.
+The notebook defaults to `ENCODER = "all"` and `DATASET = "all"` so all three
+encoders and both datasets are included. Select one encoder/dataset for a shorter job.
 
 The notebook creates an isolated Python 3.11 environment with pinned packages
 and CUDA 12.6 PyTorch wheels, independently of Kaggle's notebook Python.
@@ -18,10 +19,22 @@ GPU guard does not support P100. T4 x2 uses GPU 0 only; VRAM is not pooled.
 ## Select a job
 
 Set `ENCODER` to `dinov2`, `siglip2`, or `clip`; set `DATASET` to `voc` or
-`ade20k`. Start with DINOv2/VOC. Each job performs three fresh patch SAE fits
-and four validation evaluations (dense, CSR, CSRv2, MPSAE). Six jobs complete
+`ade20k`, or use `all` for both selections. Each job uses three patch SAE fits
+at **train K=12** and ten validation evaluations: dense once, and CSR, CSRv2,
+MPSAE each at **inference K=3,12,48**. Six jobs complete
 the campaign. Run one job at a time initially; do not assume the entire
-campaign fits one Kaggle session. `all` is supported for sequential runs.
+campaign fits one Kaggle session. `all` runs jobs sequentially.
+
+The full campaign has **18 fits and 60 evaluations**, not 54 fits. If the previous
+24-point workspace remains, its features, model revisions, fits, dense references
+and K=12 evaluations are reused: **36 new evaluations, no new SAE training**.
+New inference K applies to both support and query codes. The K=12 checkpoint is
+unchanged; training losses, epochs, initialization and learning rates are unchanged.
+This measures robustness to inference sparsity, not training separately at each K.
+
+The previous config is preserved in `configs/patch_scene_kaggle_k12.yaml`. Use it
+with `--config` to resume/export the original 24-point campaign. The expanded
+campaign has a new report directory; the original reports remain available.
 
 The original image encoder is frozen. These are not the previously disabled
 backbone fine-tuning jobs. No ImageNet download or old SAE checkpoint is needed.
@@ -44,7 +57,7 @@ they are not used by the Kaggle notebook.
 |---|---|
 | Encoders | SigLIP 2-B/16, DINOv2-B/14, OpenAI CLIP-B/16 |
 | Input / SAE latent dimensions | 768 / 8192 |
-| Target train K / inference K | 12 / 12 |
+| Target train K / inference K | 12 / 3, 12, 48 |
 | SAE training | 10 epochs, batch 1024, Adam LR 4e-5 |
 | Training / support bank limits | 262144 / 65536 patches |
 | Search | exact FP32 cosine, 30 neighbors, temperature 0.02 |
@@ -75,7 +88,7 @@ Pixel normalization comes from each pinned checkpoint's processor.
 Training patches are sampled without replacement per image, uniformly over
 nonvoid patches. Some images can supply fewer patches than their quota. The
 support bank is sampled once from the training bank using the existing
-label-informed sampler and shared across all four evaluations.
+label-informed sampler and shared across all ten evaluations per job.
 
 ## Efficiency and memory
 
@@ -87,7 +100,7 @@ changing the config creates a separate campaign and cache identity.
 
 Search stores compact K-sparse codes but builds a dense transposed lookup as
 a GPU workspace: about 2 GiB for 65536 x 8192 float32 values. It scores only
-the 12 query coordinates, avoiding full 8192-dimensional query GEMMs. This is
+the selected query coordinates (3, 12 or 48), avoiding full 8192-dimensional query GEMMs. This is
 exact exhaustive search, not ANN. Equal scores use ascending gallery indices,
 including ties at the neighbor cutoff. The workspace is reported separately;
 do not claim the whole search index occupies only compact sparse-code storage.
@@ -116,9 +129,10 @@ The notebook also copies it to `/kaggle/working/patch-scene-results.zip` when
 the training cell exits (including a Python exception), and displays a download
 link in its final cell. In Kaggle's file browser, find that ZIP under
 `/kaggle/working` and select **Download**. It is available with partial results;
-you do not need to wait for all 24 evaluations.
+you do not need to wait for all 60 evaluations.
 
-Contents: `results.csv`, `results.tex`, `results.json`, `config.json`,
+Contents: `results.csv`, `comparisons.csv`, `results.tex`, `table_voc.tex`,
+`table_ade20k.tex`, `pixel_accuracy.tex`, `tables_preview.tex`, `results.json`, `config.json`,
 `sources.json` when available, and `README.txt`. The ZIP excludes feature
 caches and model/optimizer checkpoints to keep the download small. It is a
 results archive, not a training-resume backup.
@@ -138,10 +152,39 @@ Tables live at:
 <workspace>/campaigns/<campaign-id>/table/results.json
 ```
 
-Missing cells are `--`, never zero. The table becomes complete at 24 entries.
+Missing cells are `--`, never zero. The table becomes complete at 60 distinct entries.
 Per-cell artifacts avoid overwriting other encoder/dataset jobs. Jobs run in
 the same retained workspace are combined automatically. Results from separate
 sessions whose workspaces were discarded are not automatically combined.
+
+## Paper tables
+
+`results.tex` contains mIoU (%) for both datasets, grouped by encoder and inference K.
+`table_voc.tex` and `table_ade20k.tex` are separate dataset tables;
+`pixel_accuracy.tex` is a supplementary pixel-accuracy table. Captions and footnotes
+declare train K=12, the frozen encoder, single seed, and CSRv2's extra supervision.
+No published curves, figures, invented confidence intervals or significance claims
+are added. Use the full tables rather than choosing K after inspecting validation
+scores. The settings do not establish cross-dataset transfer: each SAE trains on
+its own dataset's training split.
+
+The best **sparse** method is bold per row only when all three methods have scores.
+Ties at two-decimal display precision are all bold. Dense scores repeat for comparison
+but count as only one evaluation per dataset/encoder. The delta column reports
+`MPSAE - max(CSR, CSRv2)` in percentage points, including negative values. It remains
+missing until all three scores are available. `comparisons.csv` includes this delta
+and the gap to dense; `results.csv` includes requested train/inference K, actual query
+and gallery nonzero counts, and per-method metrics. Requested K is an upper bound,
+not a promise that every code has exactly K nonzeros.
+
+Add `\usepackage{booktabs}` to the paper preamble, then `\input{results.tex}`.
+For a standalone PDF preview after unzipping on a machine with LaTeX installed:
+
+```bash
+pdflatex tables_preview.tex
+```
+
+Kaggle does not need LaTeX installed to generate/download these table sources.
 
 ## Local resume and session lifetime
 
@@ -172,4 +215,5 @@ python -m mpsae.patch_scene smoke --device cpu --workspace work/patch-smoke
 
 Smoke runs are always under `SMOKE_ONLY`; publishing them is prohibited.
 The main CSV contains mIoU/pixel accuracy in percent and measured mean nonzeros.
-The LaTeX table contains mIoU only. Single-seed results have no error bars.
+The main LaTeX table contains mIoU, with pixel accuracy in a separate table.
+Single-seed results have no error bars.

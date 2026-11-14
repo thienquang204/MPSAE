@@ -40,13 +40,19 @@ def resolve_sources(config, hub):
     relative = f'campaigns/{canonical_hash(config.identity())[:20]}/sources'
     folder = hub.pull(relative)
     sources = read_json(folder/'sources.json')
+    original = f'campaigns/{canonical_hash(config.source_identity())[:20]}/sources'
+    if sources is None:
+        # An inference-only sweep must reuse the original pinned model revisions.
+        sources = read_json(hub.pull(original)/'sources.json')
     if sources is None:
         api = HfApi()
         sources = {'models': {name: api.model_info(repo).sha for name, (repo, _) in ENCODERS.items()},
                    'datasets': {name: api.dataset_info(repo, revision=revision).sha
                                 for name, (repo, revision, _) in DATASETS.items()}}
-        atomic_json(folder/'sources.json', sources)
-        hub.push(relative)
+        atomic_json(hub.root/original/'sources.json', sources)
+        hub.push(original)
+    atomic_json(folder/'sources.json', sources)
+    hub.push(relative)
     return sources
 
 
