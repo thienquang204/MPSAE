@@ -1,4 +1,4 @@
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import math
 
 from ..config import TrainPreset
@@ -22,6 +22,8 @@ class Config:
     seed: int = 1227
     k: int = 12
     inference_k: tuple[int, ...] | None = None
+    train_k: tuple[int, ...] | None = None
+    encoders: tuple[str, ...] | None = None
     hidden_dim: int = 8192
     image_size: int = 448
     train_patches: int = 262144
@@ -47,16 +49,25 @@ class Config:
             x = getattr(self, key)
             if type(x) is not int or x < (0 if key in ('seed', 'workers') else 1):
                 raise ValueError(f'invalid {key}')
-        if self.k != 12 or self.hidden_dim != 8192:
-            raise ValueError('SAE training is fixed at K=12 and 8192 latents; use inference_k for evaluation')
-        if self.inference_k is not None:
-            if not isinstance(self.inference_k, (list, tuple)) or not self.inference_k:
-                raise ValueError('inference_k must be a nonempty list of distinct positive integers')
-            if any(type(k) is not int or not 1 <= k <= self.hidden_dim for k in self.inference_k):
-                raise ValueError('inference_k must contain integers in [1, hidden_dim]')
-            if len(set(self.inference_k)) != len(self.inference_k):
-                raise ValueError('inference_k must not contain duplicates')
-            object.__setattr__(self, 'inference_k', tuple(sorted(self.inference_k)))
+        if self.hidden_dim != 8192 or self.k > self.hidden_dim:
+            raise ValueError('This campaign uses 8192 latents; K must not exceed hidden_dim')
+        for key in ('train_k', 'inference_k'):
+            values = getattr(self, key)
+            if values is None:
+                continue
+            if not isinstance(values, (list, tuple)) or not values:
+                raise ValueError(f'{key} must be a nonempty list of distinct positive integers')
+            if any(type(k) is not int or not 1 <= k <= self.hidden_dim for k in values):
+                raise ValueError(f'{key} must contain integers in [1, hidden_dim]')
+            if len(set(values)) != len(values):
+                raise ValueError(f'{key} must not contain duplicates')
+            object.__setattr__(self, key, tuple(sorted(values)))
+        if self.encoders is not None:
+            if (not isinstance(self.encoders, (list, tuple)) or not self.encoders
+                    or any(e not in ENCODERS for e in self.encoders)
+                    or len(set(self.encoders)) != len(self.encoders)):
+                raise ValueError('encoders must be a nonempty list of distinct registered encoder names')
+            object.__setattr__(self, 'encoders', tuple(e for e in ENCODERS if e in self.encoders))
         if self.image_size % 112 or self.batch_size < 2:
             raise ValueError('image_size must be divisible by 14 and 16; batch_size >= 2')
         if not self.neighbors <= self.support_patches <= self.train_patches:
@@ -74,24 +85,56 @@ class Config:
         settings = asdict(self)
         # Preserve the original K=12 campaign ID and all training/cache identities.
         settings.pop('inference_k')
+        settings.pop('train_k')
+        settings.pop('encoders')
+        if self.training_ks != (self.k,):
+            settings['train_k'] = list(self.training_ks)
+        if self.encoder_names != tuple(ENCODERS):
+            settings['encoders'] = list(self.encoder_names)
         if self.inference_ks != (self.k,):
             settings['inference_k'] = list(self.inference_ks)
         return {'version': VERSION, 'settings': settings}
 
     @property
     def inference_ks(self):
-        return self.inference_k or (self.k,)
+        return self.inference_k or self.training_ks
+
+    @property
+    def training_ks(self):
+        return self.train_k or (self.k,)
+
+    @property
+    def encoder_names(self):
+        # None retains the historical three-encoder campaign identity.
+        return self.encoders or tuple(ENCODERS)
+
+    def for_training(self, k):
+        if k not in self.training_ks:
+            raise ValueError(f'train K={k} is not selected')
+        return replace(self, k=k, train_k=None, inference_k=self.inference_ks)
 
     def source_identity(self):
         identity = self.identity()
         identity['settings'].pop('inference_k', None)
+        identity['settings'].pop('train_k', None)
+        identity['settings'].pop('encoders', None)
+        # Legacy source receipts were keyed by the K=12 campaign. Neither the
+        # selected training budgets nor encoder subset should refresh revisions.
+        identity['settings']['k'] = 12
         return identity
 
     def plan(self):
+        cells = len(self.encoder_names)*len(DATASETS)
+        fits = cells*len(METHODS)*len(self.training_ks)
+        sparse = fits*len(self.inference_ks)
+        matched = cells*len(METHODS)*len(set(self.training_ks) & set(self.inference_ks))
         return {**self.identity(), 'campaign': canonical_hash(self.identity())[:20],
-                'encoders': ENCODERS, 'datasets': DATASETS, 'methods': METHODS,
-                'sae_fits': 18, 'sparse_evaluations': 18*len(self.inference_ks), 'dense_evaluations': 6,
-                'total_evaluations': 6+18*len(self.inference_ks), 'train_k': self.k,
+                'encoders': {e: ENCODERS[e] for e in self.encoder_names}, 'datasets': DATASETS, 'methods': METHODS,
+                'sae_fits': fits, 'sparse_evaluations': sparse, 'dense_evaluations': cells,
+                'matched_evaluations': matched, 'cross_k_evaluations': sparse-matched,
+                'total_evaluations': cells+sparse,
+                'train_k': self.training_ks[0] if len(self.training_ks) == 1 else list(self.training_ks),
+                'train_ks': list(self.training_ks),
                 'inference_k': list(self.inference_ks),
                 'backbone_trainable': False, 'figures': False,
                 'protocol': 'dataset-specific patch SAE training; Hummingbird-style retrieval',

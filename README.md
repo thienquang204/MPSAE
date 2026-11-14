@@ -29,7 +29,23 @@ ConvNeXt-Tiny and DINOv2-S/14, with selective linear probing. All downstream
 experiments (including SOP) and repeated retrieval timing are disabled for now.
 `.env` holds credentials; `configs/thesis.yaml` selects the experiments.
 
-Optional **patch SAE fine-tuning and segmentation** is available separately through
+The current **Kaggle segmentation campaign** uses SigLIP 2 and DINOv2 on VOC and
+ADE20K, with independent CSR/CSRv2/MPSAE fits at training K=3/12/48 and inference
+at every K=3/12/48. CLIP is excluded. This is 36 fits and 112 evaluations, including
+four dense references. Use two independent GPU workers, with local ZIP downloads:
+
+```bash
+python -m mpsae.patch_scene run --config configs/patch_scene_kaggle.yaml \
+  --workspace /kaggle/working/patch-scene-v2 --devices cuda:0 cuda:1
+```
+
+See [Kaggle setup, reuse and paper tables](docs/patch_scene_kaggle.md) and
+`notebooks/patch_scene_kaggle.ipynb`. No Hugging Face token or upload is required.
+The previous K=12 fits and compatible evaluations are reused from a retained
+workspace; new K=3/48 fits start from fresh SAE weights. Main tables compare matched
+training/inference K; separate tables include all cross-K conditions.
+
+The earlier **patch SAE fine-tuning and segmentation** workflow remains available through
 `python -m mpsae.scene plan` and `python -m mpsae.scene run`. It loads existing
 ResNet-50/ViT/DINOv2/ConvNeXt SAEs, uses Hugging Face PASCAL VOC masks, and compares dense and sparse
 patch retrieval before and after SAE-only fine-tuning. The backbone stays frozen;

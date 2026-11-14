@@ -33,8 +33,9 @@ def test_plan_sweep_preserves_original_training_identity():
     assert config.plan()['sae_fits'] == 18
     assert config.plan()['sparse_evaluations'] == 54
     assert config.plan()['dense_evaluations'] == 6
+    assert Config(k=48).training_ks == (48,)
     with pytest.raises(ValueError):
-        Config(k=48)
+        Config(k=8193)
     for invalid in ([], [0], [True], [1.5], [12, 12], [8193], 12, '3,12,48'):
         with pytest.raises(ValueError, match='inference_k'):
             Config(inference_k=invalid)
@@ -185,7 +186,8 @@ def test_kaggle_notebook_has_no_token_or_publish_requirement():
     assert 'HF_TOKEN' not in code and '--publish' not in code and '--repo' not in code
     assert 'patch-scene-results.zip' in code and 'finally:' in code
     assert 'ENCODER = "all"' in code and 'DATASET = "all"' in code
-    assert '== 60' in code and '[3, 12, 48]' in code
+    assert 'TRAIN_K = [3, 12, 48]' in code and '--devices' in code
+    assert 'cuda:0' in code and 'cuda:1' in code and 'yaml.safe_dump' in code
 
 
 def test_hub_restores_hashed_bundle(monkeypatch, tmp_path):

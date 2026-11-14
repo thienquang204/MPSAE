@@ -1,8 +1,11 @@
-# 3 encoders x 2 datasets x (1 dense + 3 methods x 3 inference K) = 60 entries.
-# Reuses the original 18 K=12 fits; only 36 new evaluations if the workspace is retained.
-# Frozen vision encoders. Fresh patch SAEs, not ImageNet SAE continuation.
+# 2 encoders x 2 datasets x 3 methods x 3 training K = 36 independent fits.
+# Each fit is evaluated at inference K=3,12,48: 108 sparse + 4 dense = 112 evaluations.
+# 36 matched-K + 72 cross-K evaluations; CLIP excluded.
+# Reuses the 12 prior fits / 40 evaluations for these encoders when their workspace remains.
 seed: 1227
-k: 12
+k: 12  # Legacy default; train_k below selects the actual independent fits.
+train_k: [3, 12, 48]
+encoders: [siglip2, dinov2]
 inference_k: [3, 12, 48]
 hidden_dim: 8192
 image_size: 448

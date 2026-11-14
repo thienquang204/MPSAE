@@ -44,11 +44,16 @@ def resolve_sources(config, hub):
     if sources is None:
         # An inference-only sweep must reuse the original pinned model revisions.
         sources = read_json(hub.pull(original)/'sources.json')
-    if sources is None:
+    sources = sources or {'models': {}, 'datasets': {}}
+    missing_models = [e for e in config.encoder_names if e not in sources['models']]
+    missing_data = [d for d in DATASETS if d not in sources['datasets']]
+    if missing_models or missing_data:
         api = HfApi()
-        sources = {'models': {name: api.model_info(repo).sha for name, (repo, _) in ENCODERS.items()},
-                   'datasets': {name: api.dataset_info(repo, revision=revision).sha
-                                for name, (repo, revision, _) in DATASETS.items()}}
+        for name in missing_models:
+            sources['models'][name] = api.model_info(ENCODERS[name][0]).sha
+        for name in missing_data:
+            repo, revision, _ = DATASETS[name]
+            sources['datasets'][name] = api.dataset_info(repo, revision=revision).sha
         atomic_json(hub.root/original/'sources.json', sources)
         hub.push(original)
     atomic_json(folder/'sources.json', sources)

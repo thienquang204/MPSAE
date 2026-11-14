@@ -12,7 +12,7 @@ from mpsae.patch_scene.artifacts import Hub
 from mpsae.patch_scene.report import expected_keys, write_tables
 
 
-def test_shipped_configs_keep_old_campaign_and_extend_only_inference():
+def test_shipped_configs_keep_old_campaigns_and_add_training_grid():
     from pathlib import Path
     root = Path(__file__).resolve().parents[1]
     old = load(root/'configs/patch_scene_kaggle_k12.yaml')
@@ -20,14 +20,19 @@ def test_shipped_configs_keep_old_campaign_and_extend_only_inference():
     assert old.plan()['campaign'] == '54d9e25955a1f70142da'
     assert new.source_identity() == old.identity()
     assert new.preset() == old.preset()
-    assert (new.k, new.inference_ks, len(expected_keys(new))) == (12, (3, 12, 48), 60)
+    previous = load(root/'configs/archive/patch_scene_kaggle_train12_three_encoders.yaml')
+    assert previous.plan()['campaign'] == 'b3cdc0e50c2cb89ce851'
+    assert (new.training_ks, new.inference_ks, len(expected_keys(new))) == ((3, 12, 48), (3, 12, 48), 112)
+    assert new.encoder_names == ('siglip2', 'dinov2')
+    assert (new.plan()['sae_fits'], new.plan()['matched_evaluations'], new.plan()['cross_k_evaluations']) == (36, 36, 72)
 
 
 def test_sweep_reuses_pinned_sources_without_network(monkeypatch, tmp_path):
     import huggingface_hub
     from mpsae.patch_scene.features import resolve_sources, feature_identity
     config = Config(inference_k=(3, 12, 48))
-    sources = {'models': {'dinov2': 'old-model-sha'}, 'datasets': {'voc': 'old-data-sha'}}
+    sources = {'models': {e: 'old-model-sha' for e in ('dinov2', 'siglip2', 'clip')},
+               'datasets': {d: 'old-data-sha' for d in ('voc', 'ade20k')}}
     original = tmp_path/'campaigns'/Config().plan()['campaign']/'sources/sources.json'
     atomic_json(original, sources)
     def no_network(*args, **kwargs):

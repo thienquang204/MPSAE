@@ -1,0 +1,22 @@
+# 3 encoders x 2 datasets x (1 dense + 3 methods x 3 inference K) = 60 entries.
+# Reuses the original 18 K=12 fits; only 36 new evaluations if the workspace is retained.
+# Frozen vision encoders. Fresh patch SAEs, not ImageNet SAE continuation.
+seed: 1227
+k: 12
+inference_k: [3, 12, 48]
+hidden_dim: 8192
+image_size: 448
+train_patches: 262144
+support_patches: 65536
+epochs: 10
+batch_size: 1024
+lr: 0.00004
+extraction_batch: 4
+workers: 2
+shard_images: 64
+query_block: 32
+neighbors: 30
+temperature: 0.02
+checkpoint_every: 128
+log_every: 20
+cache_dtype: float16
