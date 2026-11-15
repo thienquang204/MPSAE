@@ -36,7 +36,7 @@ def source(tmp_path):
 
 
 def test_stream_coverage_and_support_sampling(tmp_path):
-    from mpsae.scene.core import sample_patches
+    from mpsae.segmentation.core import sample_patches
     bank, hub, manifest, x, y = source(tmp_path)
     for epoch in [0, 1]:
         full = list(bank.batches(7, epoch, 8, 0, 'cpu'))
@@ -78,7 +78,7 @@ def png(array):
 
 def test_city_zip_split_mapping_and_rectangle(tmp_path):
     from mpsae.patch_scene.cityscapes import load_local, CitySpec, LABEL_IDS
-    from mpsae.scene.data import ImageRows
+    from mpsae.segmentation.data import ImageRows
     image_path = tmp_path/'leftImg8bit_trainvaltest.zip'
     mask_path = tmp_path/'gtFine_trainvaltest.zip'
     with ZipFile(image_path, 'w') as images, ZipFile(mask_path, 'w') as masks:
@@ -98,10 +98,10 @@ def test_city_zip_split_mapping_and_rectangle(tmp_path):
 
 def test_city_config_and_tables(tmp_path):
     from mpsae.patch_scene.report import write_tables, expected_keys, export_results
-    cfg = load(Path(__file__).resolve().parents[1]/'configs/archive/patch_scene_cityscapes.yaml')
-    assert cfg.all_train_patches and cfg.image_hw == (448,896)
-    assert cfg.dataset_names == ('cityscapes',) and cfg.epochs == 10
-    assert cfg.plan()['sae_fits'] == 18 and len(expected_keys(cfg)) == 56
+    cfg = load(Path(__file__).resolve().parents[1]/'configs/patch_scene_cityscapes.yaml')
+    assert cfg.all_train_patches and cfg.image_hw == (336,672)
+    assert cfg.dataset_names == ('cityscapes',) and cfg.epochs == 20
+    assert cfg.plan()['sae_fits'] == 18 and len(expected_keys(cfg)) == 20
     rows = [dict(dataset=d, encoder=e, method=m, train_k=t, inference_k=k, k=k,
                  seed=cfg.seed, complete=True, miou=.4, pixel_accuracy=.8)
             for d,e,m,t,k in expected_keys(cfg)]
@@ -116,28 +116,6 @@ def test_city_config_and_tables(tmp_path):
         assert not any('ade20k' in n for n in z.namelist())
 
 
-def test_downloader_restarts_when_range_is_ignored(tmp_path):
-    from mpsae.patch_scene.download_cityscapes import fetch
-    import hashlib
-    target = tmp_path/'test.zip'
-    target.with_suffix('.zip.partial').write_bytes(b'old partial')
-    payload = b'new complete archive'
-    calls = []
-    class Response:
-        status_code = 200
-        headers = {'Content-Length': str(len(payload))}
-        def __enter__(self): return self
-        def __exit__(self, *args): pass
-        def iter_content(self, **kwargs): yield payload
-    class Session:
-        def get(self, url, **kwargs):
-            calls.append(kwargs)
-            return Response()
-    fetch(Session(), 3, target, hashlib.md5(payload).hexdigest())
-    assert target.read_bytes() == payload
-    assert calls[0]['headers']['Range'].startswith('bytes=')
-    fetch(Session(), 3, target, hashlib.md5(payload).hexdigest())
-    assert len(calls) == 1  # completed valid file is never downloaded twice
 
 
 def test_city_source_is_local_and_no_other_dataset_is_requested(monkeypatch, tmp_path):

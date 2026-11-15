@@ -31,7 +31,7 @@ def tiny_dataset(root):
 
 def test_mat_orientation_split_labels_and_worker_serialization(tmp_path):
     import pickle
-    from mpsae.scene.data import ImageRows
+    from mpsae.segmentation.data import ImageRows
     images,labels = tiny_dataset(tmp_path)
     data,revision = load_local(tmp_path, expected=(3,1), fingerprint=True)
     assert revision and data['train']['id'] == ['nyuv2-0003','nyuv2-0001','nyuv2-0004']

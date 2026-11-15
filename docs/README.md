@@ -16,12 +16,12 @@ three commands that run everything. These pages are the detail behind it.
 
 ## Segmentation entry points
 
-- [Repository map](repository_layout.md): active code, compatibility code and archives.
-- [One-cell Kaggle guide](patch_scene_kaggle.md): VOC or NYUv2, automatic HF downloads.
+- [Repository map](repository_layout.md): maintained pipelines and configurations.
+- [One-cell Kaggle guide](patch_scene_kaggle.md): VOC, NYUv2 or Cityscapes, automatic HF downloads.
 - [VOC](voc_kaggle.md) and [NYUv2](nyuv2_kaggle.md): canonical config pointers.
 
 Only the SigLIP2/DINOv2 patch-SAE workflows are supported for new segmentation runs.
-Retired dataset/adaptation recipes are in `archive/`; retrieval instructions above
+Retired segmentation recipes were removed (available in Git history); retrieval instructions above
 continue to describe the existing image-level pipeline.
 
 ## The two rules everything follows

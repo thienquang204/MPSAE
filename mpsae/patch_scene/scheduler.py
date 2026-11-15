@@ -18,7 +18,7 @@ def _worker(index, device, config, sources, workspace, log_dir, inbox, outbox, s
         torch.set_num_threads(cpu_threads)
         if not smoke:
             torch.cuda.set_device(device)
-            from ..scene.server import doctor
+            from ..segmentation.doctor import doctor
             with (Path(log_dir)/f'worker-{index}-startup.log').open('a', encoding='utf-8') as log:
                 with contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
                     doctor(device)

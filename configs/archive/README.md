@@ -1,5 +1,5 @@
-# Historical material — not active experiment settings
+# Historical non-segmentation configurations
 
-Kept for provenance and old result interpretation. These recipes are not supported launch targets.
-Use `configs/patch_scene_voc.yaml` or `configs/patch_scene_nyuv2.yaml` for segmentation.
-Old ADE20K/Cityscapes/CLIP campaigns and pooled-checkpoint adaptation are retired.
+Only the disabled backbone-fine-tuning recipe is retained here.
+Active segmentation: ../patch_scene_voc.yaml, ../patch_scene_nyuv2.yaml,
+and ../patch_scene_cityscapes.yaml. Obsolete segmentation recipes are in Git history.

@@ -1,38 +1,33 @@
 # Repository map
 
-The maintained code is `graduate_thesis_refactor` (Git branch `refactor`). The
-neighboring `graduate_thesis` directory contains original scripts and local
-development staging copies such as `.nyu_work`; it is not the Kaggle source.
+The maintained repository is `graduate_thesis_refactor` (branch `refactor`).
+The neighboring `graduate_thesis` directory contains original scripts and local
+development staging folders; it is not the source cloned by Kaggle.
 
-| Area | Responsibility / status |
+| Area | Responsibility |
 |---|---|
-| `mpsae/model.py`, `methods.py`, `losses.py`, `ot.py` | Shared SAE/objectives; unchanged |
-| `mpsae/train.py`, `embed/`, `evaluate/`, `benchmark/`, `report/` | Existing image-level/retrieval pipeline; unchanged |
-| `mpsae/patch_scene/` | Supported VOC and NYUv2 patch-SAE campaigns |
-| `mpsae/segmentation/` | Shared metrics, patch labels, image preparation and batching |
-| `configs/patch_scene_voc.yaml` | Canonical preserved VOC patch benchmark |
-| `configs/patch_scene_nyuv2.yaml` | Canonical NYUv2 matched-K benchmark |
-| `configs/patch_scene_kaggle.yaml` | Compatibility alias to NYUv2; no copied hyperparameters |
-| `scripts/kaggle_segmentation.py` | Single Kaggle setup/download/train/export implementation |
-| `notebooks/patch_scene_kaggle.ipynb` | One-cell frontend; selects VOC or NYUv2 |
-| `configs/archive/`, `docs/archive/` | Historical recipes; not supported launch targets |
-| `mpsae/scene/` | Historical adaptation/report compatibility and server checks; new runs retired |
-| `mpsae/finetune/` | Previously disabled backbone fine-tuning; untouched |
-| `tests/` | Active and historical compatibility regression checks |
+| `mpsae/model.py`, `methods.py`, `losses.py`, `ot.py` | Shared SAE models and objectives |
+| `mpsae/patch_scene/` | VOC, NYUv2 and Cityscapes extraction, SAE training, evaluation, tables |
+| `mpsae/segmentation/` | Patch labels, data transforms, metrics, batching and environment check |
+| `configs/patch_scene_voc.yaml` | VOC: 18 fits, 56 evaluations, cross-K sweep |
+| `configs/patch_scene_nyuv2.yaml` | NYUv2: 18 fits, 20 matched-K evaluations |
+| `configs/patch_scene_cityscapes.yaml` | HF Cityscapes: 18 fits, 20 matched-K evaluations |
+| `configs/patch_scene_kaggle.yaml` | Compatibility alias to NYUv2, not a separate campaign |
+| `scripts/kaggle_segmentation.py` | Shared Kaggle install/download/run/export launcher |
+| `scripts/kaggle_*_cell.py` | Small copy-and-paste frontends |
+| `notebooks/patch_scene_kaggle.ipynb` | One-cell notebook frontend |
+| `requirements-patch-scene.txt` | Complete segmentation dependency list |
+| `mpsae/benchmark/`, `embed/`, `evaluate/`, `report/` | Existing image-level/retrieval pipeline |
+| `mpsae/finetune/`, `configs/archive/finetune_gradient_replay.yaml` | Previously disabled backbone experiments |
 
-Patch pipeline: dataset -> frozen encoder -> cached patch features -> SAE fit ->
-neighbor segmentation -> metrics and tables. All methods share the SAE/loss code.
-VOC retains its old sampling, 10 epochs and cross-K evaluation; NYUv2 retains full
-patch streaming, 20-epoch early stopping and matched-K evaluation.
+Frozen encoder -> cached patches -> SAE fit -> weighted neighbor segmentation
+-> CSV/LaTeX tables. Encoders: SigLIP2 and DINOv2; methods: CSR, CSRv2, MPSAE.
+All three campaigns explicitly use a 65536-reference retrieval bank. VOC samples
+SAE training patches; NYUv2 and Cityscapes stream all valid resized-image patches.
+See [the Kaggle guide](patch_scene_kaggle.md) for numerical settings and launch cells.
 
-Legacy dataset registries and low-level readers remain to interpret existing
-receipts and test compatibility. Public plan/run/smoke commands reject retired
-datasets and encoders before downloading or training. Historical export remains
-available with the archived configuration; no numerical IDs or caches are rewritten.
-Old `mpsae.scene` plot/publish/doctor remain, but its training/bootstrap commands
-are retired. Shared `scene.core`/`scene.datasets` imports forward to the common
-package so historical code can still read results.
-
-Do not delete directories based only on age: saved workspaces contain feature
-caches, checkpoints and run provenance. This cleanup does not delete results,
-datasets, old model checkpoints or the neighboring development staging folders.
+The old `mpsae.scene` pipeline, archived segmentation recipes, old installation
+scripts and their exclusive tests were deleted. Git history retains their source.
+Small legacy registry/serialization paths remain to preserve cache identities;
+the public runner permits only the three supported campaigns.
+No saved results, datasets, feature caches or checkpoints were deleted.

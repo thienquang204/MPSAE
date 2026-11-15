@@ -50,7 +50,7 @@ def main():
         print(json.dumps(config.plan(), indent=2))
         return
     if args.command == 'doctor':
-        from ..scene.server import doctor
+        from ..segmentation.doctor import doctor
         import transformers
         print(json.dumps({'transformers': transformers.__version__, **doctor(args.device)}, indent=2))
         return
@@ -87,7 +87,7 @@ def main():
             devices = validate_devices(devices, smoke=smoke)
         if not smoke:
             if len(devices) == 1:
-                from ..scene.server import doctor
+                from ..segmentation.doctor import doctor
                 doctor(devices[0])
             from .features import resolve_sources
             sources = resolve_sources(config, hub)

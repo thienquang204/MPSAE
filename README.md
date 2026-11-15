@@ -29,7 +29,7 @@ ConvNeXt-Tiny and DINOv2-S/14, with selective linear probing. All downstream
 experiments (including SOP) and repeated retrieval timing are disabled for now.
 `.env` holds credentials; `configs/thesis.yaml` selects the experiments.
 
-The supported **segmentation experiments are VOC and NYUv2**, both using frozen
+The supported **segmentation experiments are VOC, NYUv2 and Cityscapes**, using frozen
 SigLIP2/DINOv2 with fresh CSR/CSRv2/MPSAE patch SAEs. The canonical configs are:
 
 - `configs/patch_scene_voc.yaml`: preserved VOC settings, 10 epochs, train and
@@ -37,16 +37,26 @@ SigLIP2/DINOv2 with fresh CSR/CSRv2/MPSAE patch SAEs. The canonical configs are:
 - `configs/patch_scene_nyuv2.yaml`: all valid train patches at 336x448, up to 20
   epochs with training-loss early stopping, matched K=3/12/48, 18 fits and 20 evaluations.
 
+- `configs/patch_scene_cityscapes.yaml`: Hugging Face train/validation, 336x672,
+  full-patch SAE training, up to 20 epochs, matched K=3/12/48, 18 fits and 20 evaluations.
+
+NYUv2 MPSAE uses OT weight 0.5 for SigLIP2 and 2.0 for DINOv2.
+The SigLIP2-only subset is available through `scripts/kaggle_nyuv2_siglip2_cell.py`.
+
 Use the [one-cell Kaggle guide](docs/patch_scene_kaggle.md) or
-`notebooks/patch_scene_kaggle.ipynb`. Choose `DATASET="voc"` or `"nyuv2"`; datasets
+`notebooks/patch_scene_kaggle.ipynb`. Choose `DATASET="voc"`, `"nyuv2"` or `"cityscapes"`; datasets
 download automatically from Hugging Face. No manual upload or token is required.
 `scripts/kaggle_segmentation.py` owns the setup/run/export flow; the YAMLs own the
 parameters. `patch_scene_kaggle.yaml` is only an alias to the NYUv2 config.
 
-Cityscapes, ADE20K, CLIP segmentation and the older pooled-checkpoint adaptation
-campaign are retired from supported launch commands. Historical recipes and
-instructions are under `configs/archive/` and `docs/archive/`; saved results remain.
-See [the repository map](docs/repository_layout.md) for active and historical code.
+Obsolete segmentation recipes and the old `mpsae.scene` adaptation pipeline have
+been removed; their source remains in Git history. Saved experiment workspaces
+are not deleted. See [the repository map](docs/repository_layout.md).
+For a Linux RTX 3090 server, use [the local segmentation server guide](docs/segmentation_server.md):
+`bash scripts/setup_segmentation_server.sh`, then
+`.venv-segmentation/bin/python scripts/run_segmentation_server.py --workspace /workspace/segmentation`.
+Both datasets run sequentially, with persistent caches and local tables/ZIPs; no artifact uploads.
+
 The ImageNet/retrieval pipeline below is unchanged.
 
 ```bash

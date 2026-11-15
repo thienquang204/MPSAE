@@ -15,11 +15,13 @@ unchanged by the organizational cleanup. Choose the dataset in the cell below.
 | Epochs | 10, no early stopping | Up to 20; training-loss early stopping |
 | Fits / evaluations | 18 / 56 | 18 / 20 |
 
-Both use batch 1024, Adam LR 4e-5, a separate 65536-patch retrieval bank,
+All three campaigns use batch 1024, Adam LR 4e-5, a separate 65536-patch retrieval bank,
 30 neighbors and temperature 0.02. CSRv2 uses training-mask labels in its loss.
 NYUv2 early stopping begins at epoch 15 after a full epoch at target K, with
 patience 3 and relative improvement threshold 0.001; no test-based selection.
-The last completed epoch is evaluated. All settings live in the YAML files;
+NYUv2 MPSAE uses OT weight 0.5 for SigLIP2 and 2.0 for DINOv2; other campaigns
+use 2.0 for both. For only SigLIP2, use `scripts/kaggle_nyuv2_siglip2_cell.py`
+(9 fits and 10 evaluations). The last completed epoch is evaluated. All settings live in the YAML files;
 the launcher reads them rather than repeating their values in notebook checks.
 
 Enable **Internet** and **GPU T4 x2** in Kaggle. One GPU also works. Push the
@@ -27,7 +29,7 @@ updated code to the GitHub `refactor` branch first. Paste this single code cell:
 
 ```python
 # Enable Internet and GPU T4 x2 (one GPU also works). No Add Input or HF token needed.
-DATASET = "nyuv2"  # Change only this to "voc" for the preserved VOC benchmark.
+DATASET = "nyuv2"  # Options: "nyuv2", "voc", "cityscapes".
 
 from pathlib import Path
 import subprocess

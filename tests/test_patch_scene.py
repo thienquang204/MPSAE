@@ -219,7 +219,7 @@ def test_hub_restores_hashed_bundle(monkeypatch, tmp_path):
 def test_feature_shards_resume_without_reextracting_completed_images(monkeypatch, tmp_path, all_patches):
     from PIL import Image
     from mpsae.patch_scene import features as module
-    from mpsae.scene.datasets import VOC
+    from mpsae.segmentation.datasets import VOC
     cfg = Config(image_size=112, train_patches=16, support_patches=8, neighbors=2,
                  extraction_batch=2, shard_images=2, workers=0, all_train_patches=all_patches)
     spec = replace(VOC, train_rows=5, validation_rows=3)

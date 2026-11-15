@@ -30,3 +30,6 @@ __pycache__/
 
 # Golden fixtures are produced on a GPU box and are meant to be committed, so
 # they are deliberately not ignored here.
+
+# Local-only segmentation server environment.
+.venv-segmentation/
