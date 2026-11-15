@@ -54,8 +54,12 @@ def resolve_sources(config, hub):
             raise RuntimeError('NYUv2 source changed; use a new workspace to avoid mixing results')
         sources['datasets']['nyuv2'] = revision
     if 'cityscapes' in config.dataset_names:
-        from .cityscapes import load_local
-        _, revision = load_local(fingerprint=True)
+        if config.cityscapes_source == 'chris1':
+            from .cityscapes_hf import REVISION
+            revision = REVISION
+        else:
+            from .cityscapes import load_local
+            _, revision = load_local(fingerprint=True)
         previous = sources['datasets'].get('cityscapes')
         if previous is not None and previous != revision:
             raise RuntimeError('Cityscapes source changed; use a new workspace to avoid mixing results')
@@ -106,9 +110,14 @@ def prepare(config, encoder, dataset, sources, hub, device):
         spec = NYUSpec()
         data, _ = load_local()
     elif dataset == 'cityscapes':
-        from .cityscapes import CitySpec, load_local
-        spec = CitySpec()
-        data, _ = load_local()
+        if config.cityscapes_source == 'chris1':
+            from .cityscapes_hf import HFCitySpec, load_hf
+            spec = HFCitySpec()
+            data = load_hf(sources['datasets'][dataset])
+        else:
+            from .cityscapes import CitySpec, load_local
+            spec = CitySpec()
+            data, _ = load_local()
     else:
         spec = dataset_spec(dataset, subset)
         args = SimpleNamespace(dataset=dataset, dataset_repo=repo, dataset_config=subset)

@@ -14,11 +14,12 @@ DATASETS = {
     'voc': ('shijli/voc2012', 'fba53aa390b729cb2bb848de59e1439deea3e88f', 'segmentation'),
     'ade20k': ('zhoubolei/scene_parse_150', 'e660d866a1351c70bcf07925d2600b60bd6e3bc3', 'scene_parsing'),
 }
+CITYSCAPES_HF = ('Chris1/cityscapes', 'f5245e5b4ce9ec8c1c00e17921e176c566914a7c', 'labelIds')
 DATASETS['cityscapes'] = ('local-cityscapes', 'official-fine', 'fine')
 DATASETS['nyuv2'] = ('local-nyuv2', 'official-labeled', 'nyu40')
 
 # Historical registry entries remain for reading old receipts, not launching jobs.
-SUPPORTED_DATASETS = ('voc', 'nyuv2')
+SUPPORTED_DATASETS = ('voc', 'nyuv2', 'cityscapes')
 SUPPORTED_ENCODERS = ('siglip2', 'dinov2')
 
 METHODS = ('csr', 'csrv2', 'mpsae')
@@ -26,6 +27,7 @@ METHODS = ('csr', 'csrv2', 'mpsae')
 
 @dataclass(frozen=True)
 class Config:
+    cityscapes_source: str = 'official'
     seed: int = 1227
     k: int = 12
     inference_k: tuple[int, ...] | None = None
@@ -57,6 +59,8 @@ class Config:
     early_min_delta: float = 0.001
 
     def __post_init__(self):
+        if self.cityscapes_source not in ('official', 'chris1'):
+            raise ValueError('cityscapes_source must be official or chris1')
         if self.evaluation_mode not in ('sweep', 'matched'):
             raise ValueError('evaluation_mode must be sweep or matched')
         if type(self.all_train_patches) is not bool:
@@ -120,6 +124,8 @@ class Config:
 
     def identity(self):
         settings = asdict(self)
+        if self.cityscapes_source == 'official':
+            settings.pop('cityscapes_source')
         if self.evaluation_mode == 'sweep':
             settings.pop('evaluation_mode')  # keep historical campaign identities
         if self.image_width is None:
@@ -198,7 +204,7 @@ class Config:
         sparse = cells*len(METHODS)*len(self.evaluation_pairs)
         matched = cells*len(METHODS)*sum(t == k for t, k in self.evaluation_pairs)
         return {**self.identity(), 'campaign': canonical_hash(self.identity())[:20],
-                'encoders': {e: ENCODERS[e] for e in self.encoder_names}, 'datasets': {d: DATASETS[d] for d in self.dataset_names}, 'methods': METHODS,
+                'encoders': {e: ENCODERS[e] for e in self.encoder_names}, 'datasets': {d: (CITYSCAPES_HF if d == 'cityscapes' and self.cityscapes_source == 'chris1' else DATASETS[d]) for d in self.dataset_names}, 'methods': METHODS,
                 'sae_fits': fits, 'sparse_evaluations': sparse, 'dense_evaluations': cells,
                 'matched_evaluations': matched, 'cross_k_evaluations': sparse-matched,
                 'total_evaluations': cells+sparse,
@@ -244,8 +250,9 @@ def load(path):
 
 def require_supported(config):
     """Never silently launch retired datasets/encoders from historical configs."""
-    if (any(d not in SUPPORTED_DATASETS for d in config.dataset_names)
+    if (('cityscapes' in config.dataset_names and config.cityscapes_source != 'chris1')
+            or any(d not in SUPPORTED_DATASETS for d in config.dataset_names)
             or any(e not in SUPPORTED_ENCODERS for e in config.encoder_names)):
-        raise ValueError('Supported segmentation: VOC or NYUv2 with SigLIP2/DINOv2. '
+        raise ValueError('Supported segmentation: VOC, NYUv2 or Cityscapes with SigLIP2/DINOv2. '
                          'Use configs/patch_scene_voc.yaml or configs/patch_scene_nyuv2.yaml; '
                          'archived configurations are retained only for provenance/export.')

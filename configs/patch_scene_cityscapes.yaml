@@ -1,0 +1,36 @@
+# 18 separate SAE fits; 18 matched-K evaluations + 2 dense baselines = 20.
+# Chris1 pinned mirror: 2975 train / 500 validation; 19 classes, original labelIds.
+# Budgeted patch retrieval, NOT a full-bank Hummingbird/Franca reproduction.
+cityscapes_source: chris1
+seed: 1227
+datasets: [cityscapes]
+encoders: [siglip2, dinov2]
+k: 12
+train_k: [3, 12, 48]
+evaluation_mode: matched
+# Each checkpoint is evaluated ONLY at its own train K; no inference grid.
+image_size: 336
+image_width: 672
+all_train_patches: true
+train_patches: 0
+# Explicit reference-bank budget shared by dense and sparse methods.
+# Global randomized class-frequency sampling, matching the current NYUv2 protocol.
+support_patches: 65536
+hidden_dim: 8192
+epochs: 20
+batch_size: 1024
+lr: 0.00004
+# Monitor training loss only, after a full epoch at target K.
+early_stopping: true
+early_min_epochs: 15
+early_patience: 3
+early_min_delta: 0.001
+extraction_batch: 2
+workers: 2
+shard_images: 16
+query_block: 16
+neighbors: 30
+temperature: 0.02
+checkpoint_every: 512
+log_every: 100
+cache_dtype: float16

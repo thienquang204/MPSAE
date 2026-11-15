@@ -1,4 +1,4 @@
-"""Canonical Kaggle launcher for the supported VOC and NYUv2 patch-SAE campaigns.
+"""Canonical Kaggle launcher for the supported VOC, NYUv2 and Cityscapes patch-SAE campaigns.
 
 Notebook: runpy.run_path(..., init_globals={'DATASET': 'nyuv2'}, run_name='__main__').
 No hyperparameters are copied here: canonical YAMLs own all training settings.
@@ -39,8 +39,8 @@ def run(command, cwd=None):
 
 
 def main(dataset='nyuv2'):
-    if dataset not in ('nyuv2', 'voc'):
-        raise ValueError('Choose DATASET="nyuv2" or "voc"')
+    if dataset not in ('nyuv2', 'voc', 'cityscapes'):
+        raise ValueError('Choose DATASET="nyuv2", "voc" or "cityscapes"')
     from IPython.display import FileLink, display
     import pandas as pd
     repo = Path(__file__).resolve().parents[1]
@@ -80,6 +80,11 @@ def main(dataset='nyuv2'):
         run([python, '-u', '-m', 'mpsae.patch_scene.prepare_nyuv2', '--from-hf',
              '--destination', data_root], cwd=repo)
         extra = ['--nyuv2-root', str(data_root)]
+    if dataset == 'cityscapes':
+        # Download once before the two GPU workers open the same Parquet cache.
+        run([python, '-u', '-m', 'mpsae.patch_scene.cityscapes_hf'], cwd=repo)
+    print('Sampling: all_train_patches=', plan['settings'].get('all_train_patches', False),
+          'support_patches=', plan['settings']['support_patches'], flush=True)
     # VOC is fetched automatically from its pinned HF dataset by the feature loader.
     result_zip = working/f'{dataset.upper()}_results.zip'
     try:

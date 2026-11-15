@@ -26,6 +26,7 @@ def main():
     parser.add_argument('--workspace', default='work/patch-scene-v2')
     parser.add_argument('--encoder', choices=(*SUPPORTED_ENCODERS, 'all'), default='all')
     parser.add_argument('--dataset', choices=(*SUPPORTED_DATASETS, 'all'), default='all')
+    parser.add_argument('--cityscapes-root', help='Official local Cityscapes ZIPs/folders (not needed for Chris1)')
     parser.add_argument('--nyuv2-root', help='Folder with labeled NYUv2 MAT, splits.mat and classMapping40.mat')
     parser.add_argument('--device', default='cuda:0')
     parser.add_argument('--devices', nargs='+', help='Independent workers, e.g. cuda:0 cuda:1; overrides --device')
@@ -39,6 +40,8 @@ def main():
             require_supported(config)
         except ValueError as error:
             parser.error(str(error))
+    if args.cityscapes_root:
+        os.environ['MPSAE_CITYSCAPES_ROOT'] = str(Path(args.cityscapes_root).resolve())
     if args.nyuv2_root:
         os.environ['MPSAE_NYUV2_ROOT'] = str(Path(args.nyuv2_root).resolve())
     if args.cpu_threads < 1:

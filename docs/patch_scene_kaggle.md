@@ -1,4 +1,4 @@
-# Kaggle segmentation: VOC or NYUv2
+# Kaggle segmentation: VOC, NYUv2 or Cityscapes
 
 Supported experiments use frozen **SigLIP2 Base and DINOv2 Base** with fresh
 CSR/CSRv2/MPSAE patch SAEs. Training algorithms and retrieval calculations are
@@ -62,7 +62,7 @@ training, not just the small results ZIP. `/tmp` contains only the environment,
 downloaded encoder weights and HF dataset cache and is ephemeral.
 
 Each encoder is extracted once per dataset/config; independent jobs use up to two
-GPUs. No backbone fine-tuning, ImageNet training, CLIP, Cityscapes or ADE20K jobs
+GPUs. No backbone fine-tuning, ImageNet training, CLIP or ADE20K jobs
 are launched. NYUv2 GPU runtime/peak-memory estimates still require a real run.
 For local MAT input instead of the mirror:
 
@@ -72,3 +72,44 @@ python -m mpsae.patch_scene.prepare_nyuv2 --source /path/to/input --destination 
 
 Use `python -m mpsae.patch_scene plan --config configs/patch_scene_voc.yaml`
 or `configs/patch_scene_nyuv2.yaml` to inspect the exact campaign before running.
+
+
+## Cityscapes from Hugging Face
+
+Use `scripts/kaggle_cityscapes_cell.py` as one complete Kaggle cell (Internet on,
+GPU T4 x2 recommended). Push these files to the GitHub refactor branch first.
+The shared launcher accepts `DATASET="cityscapes"`; no manual data upload/token.
+Canonical configuration: `configs/patch_scene_cityscapes.yaml`.
+
+- Frozen SigLIP2 Base and DINOv2 Base; CSR, CSRv2, MPSAE.
+- Train each method separately at K=3,12,48; evaluate only its matched K.
+- 18 fits + 18 sparse evaluations + 2 dense evaluations = 20 total evaluations.
+- Chris1/cityscapes pinned at f5245e5b4ce9ec8c1c00e17921e176c566914a7c;
+  original 14 train and 3 validation Parquet shards, 2975/500 images; no test.
+- Source masks store original labelIds in identical RGB channels. Validate and
+  map the 19 evaluated classes to 0..18, all ignored IDs to 255. Reject actual
+  color masks. IDs are image-byte hashes; reject duplicates and split overlap.
+- Resize complete images to 336x672, preserving the 2:1 aspect ratio. All valid
+  patches at this resolution train the SAE; no 262144 candidate-pool cap.
+  This is not training on all native-resolution pixels/patches.
+- Like current NYUv2, retrieve from 65536 references, sampled with the existing
+  global randomized class-frequency rule. This is a declared memory-limited
+  protocol, NOT the per-image sampler/full-bank Hummingbird or Franca benchmark.
+  Dense and sparse comparisons share support selection. No hidden bank changes.
+- SAE max 20 epochs, batch 1024, LR 4e-5; training-loss early stopping after
+  epoch 15, patience 3, relative threshold .001. Frozen encoders; no validation
+  selection. Extraction batch 2 and 16-image shards bound CPU/GPU memory.
+- Native-resolution validation masks, weighted 30-NN, temperature .02; mIoU,
+  pixel accuracy and measured nnz, with CSV/LaTeX tables. No cross-K sweep.
+
+Original Parquets are read directly without another full Arrow dataset copy.
+Features are extracted once per encoder, cached and streamed across all fits.
+Two independent GPU workers share a task queue. One GPU is also supported.
+Cached sources are in /tmp; reusable experiment state is in
+`/kaggle/working/cityscapes`. Download `CITYSCAPES_results.zip` from the displayed
+link or the notebook Output panel. Save Version to retain notebook outputs.
+The ZIP includes tables and experiment settings, not model weights/feature caches.
+
+Real Cityscapes GPU runtime has not been measured. All-patch training is larger
+than NYUv2; do not assume completion within one Kaggle session. Resume using the
+same complete workspace and configuration, not the small results ZIP alone.
