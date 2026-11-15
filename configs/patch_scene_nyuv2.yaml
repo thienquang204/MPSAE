@@ -1,5 +1,7 @@
 # 18 separate SAE fits; 18 matched-K evaluations + 2 dense baselines = 20.
 # RGB-only NYU40, official 795 train / 654 test. Never tune on the test split.
+# Only SigLIP2 MPSAE: DINOv2 and other methods retain their loss coefficients.
+siglip2_mpsae_ot_weight: 0.5
 seed: 1227
 datasets: [nyuv2]
 encoders: [siglip2, dinov2]

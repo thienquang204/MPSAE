@@ -28,6 +28,7 @@ METHODS = ('csr', 'csrv2', 'mpsae')
 @dataclass(frozen=True)
 class Config:
     cityscapes_source: str = 'official'
+    siglip2_mpsae_ot_weight: float | None = None
     seed: int = 1227
     k: int = 12
     inference_k: tuple[int, ...] | None = None
@@ -59,6 +60,8 @@ class Config:
     early_min_delta: float = 0.001
 
     def __post_init__(self):
+        if self.siglip2_mpsae_ot_weight is not None and (isinstance(self.siglip2_mpsae_ot_weight, bool) or not math.isfinite(self.siglip2_mpsae_ot_weight) or self.siglip2_mpsae_ot_weight <= 0):
+            raise ValueError("siglip2_mpsae_ot_weight must be finite and positive")
         if self.cityscapes_source not in ('official', 'chris1'):
             raise ValueError('cityscapes_source must be official or chris1')
         if self.evaluation_mode not in ('sweep', 'matched'):
@@ -118,12 +121,17 @@ class Config:
         if self.cache_dtype not in ('float16', 'float32'):
             raise ValueError('cache_dtype must be float16 or float32')
 
-    def preset(self):
-        return TrainPreset(name=VERSION, hidden_dim=self.hidden_dim, epochs=self.epochs,
+    def preset(self, method=None, encoder=None):
+        preset = TrainPreset(name=VERSION, hidden_dim=self.hidden_dim, epochs=self.epochs,
                            batch_size=self.batch_size, lr=self.lr, cl_coef=0.1)
+        if method == "mpsae" and encoder == "siglip2" and self.siglip2_mpsae_ot_weight is not None:
+            preset = replace(preset, ot_weight=self.siglip2_mpsae_ot_weight)
+        return preset
 
     def identity(self):
         settings = asdict(self)
+        if self.siglip2_mpsae_ot_weight is None:
+            settings.pop("siglip2_mpsae_ot_weight")
         if self.cityscapes_source == 'official':
             settings.pop('cityscapes_source')
         if self.evaluation_mode == 'sweep':
@@ -183,6 +191,7 @@ class Config:
 
     def source_identity(self):
         identity = self.identity()
+        identity["settings"].pop("siglip2_mpsae_ot_weight", None)
         identity['settings'].pop('datasets', None)
         if self.early_stopping:
             # Training duration/stopping does not change extracted features.
@@ -220,7 +229,8 @@ class Config:
                 'support_candidate_limit': self.train_patches if not self.all_train_patches else None,
                 'protocol': 'dataset-specific patch SAE training; Hummingbird-style retrieval',
                 'csrv2_supervision': 'dominant nonvoid training-mask class',
-                'training_preset': asdict(self.preset())}
+                'training_preset': asdict(self.preset()),
+                'mpsae_ot_weights': {e: self.preset('mpsae', e).ot_weight for e in self.encoder_names}}
 
 
 def load(path):

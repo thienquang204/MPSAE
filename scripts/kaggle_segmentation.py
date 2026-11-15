@@ -38,7 +38,11 @@ def run(command, cwd=None):
         process.stdout.close()
 
 
-def main(dataset='nyuv2'):
+def main(dataset='nyuv2', encoders=None):
+    if encoders is not None:
+        encoders = list(encoders)
+        if not encoders or len(set(encoders)) != len(encoders) or any(e not in ('siglip2', 'dinov2') for e in encoders):
+            raise ValueError('ENCODERS must be a nonempty subset of siglip2/dinov2')
     if dataset not in ('nyuv2', 'voc', 'cityscapes'):
         raise ValueError('Choose DATASET="nyuv2", "voc" or "cityscapes"')
     from IPython.display import FileLink, display
@@ -69,9 +73,15 @@ def main(dataset='nyuv2'):
     base = [python, '-u', '-m', 'mpsae.patch_scene']
     for device in devices:
         run(base+['doctor', '--device', device], cwd=repo)
+    if encoders is not None:
+        selected_config = workspace/('config-' + '-'.join(encoders) + '.yaml')
+        run([python, '-c',
+             'import sys,yaml; from pathlib import Path; c=yaml.safe_load(Path(sys.argv[1]).read_text()); c["encoders"]=sys.argv[3:]; Path(sys.argv[2]).write_text(yaml.safe_dump(c, sort_keys=False))',
+             config, selected_config, *encoders], cwd=repo)
+        config = selected_config
     plan = json.loads(subprocess.check_output(base+['plan', '--config', str(config)], cwd=repo, text=True))
     assert set(plan['datasets']) == {dataset}
-    assert set(plan['encoders']) == {'siglip2', 'dinov2'}
+    assert set(plan['encoders']) == set(encoders or ['siglip2', 'dinov2'])
     print(json.dumps(plan, indent=2))
     (workspace/'run-plan.json').write_text(json.dumps(plan, indent=2), encoding='utf-8')
     extra = []
@@ -86,7 +96,8 @@ def main(dataset='nyuv2'):
     print('Sampling: all_train_patches=', plan['settings'].get('all_train_patches', False),
           'support_patches=', plan['settings']['support_patches'], flush=True)
     # VOC is fetched automatically from its pinned HF dataset by the feature loader.
-    result_zip = working/f'{dataset.upper()}_results.zip'
+    suffix = '_' + '_'.join(encoders) if encoders else ''
+    result_zip = working/f'{dataset.upper()}{suffix}_results.zip'
     try:
         run(base+['run', '--config', str(config), '--workspace', str(workspace),
             '--dataset', dataset, '--devices', *devices, '--cpu-threads', '2', *extra], cwd=repo)
@@ -111,4 +122,4 @@ def main(dataset='nyuv2'):
 
 
 if __name__ == '__main__':
-    main(globals().get('DATASET', 'nyuv2'))
+    main(globals().get('DATASET', 'nyuv2'), globals().get('ENCODERS'))

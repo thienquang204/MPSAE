@@ -15,7 +15,7 @@ from .config import VERSION
 
 
 def fit(config, method, features, labels, feature_identity, hub, device, *, preset=None, stop_after=None, training_source=None):
-    preset = preset or config.preset()
+    preset = preset or config.preset(method, feature_identity.get('encoder'))
     targets, label_stats = patch_targets(labels, classes=labels.shape[1])
     ranges = batch_ranges(len(features), preset.batch_size)
     if training_source is not None:

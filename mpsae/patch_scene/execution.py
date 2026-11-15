@@ -98,7 +98,7 @@ class TaskRunner:
         model, record = None, None
         try:
             if task.method != 'dense':
-                preset = replace(config.preset(), hidden_dim=max(64, 4*config.k, max(config.inference_ks)),
+                preset = replace(config.preset(task.method, task.encoder), hidden_dim=max(64, 4*config.k, max(config.inference_ks)),
                                  epochs=1, batch_size=16, k_aux=32, ot_microbatch=4) if self.smoke else None
                 source = None
                 if config.all_train_patches and not self.smoke:
