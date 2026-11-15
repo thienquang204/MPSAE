@@ -185,10 +185,10 @@ def test_kaggle_notebook_has_no_token_or_publish_requirement():
     assert 'UserSecretsClient' not in code and 'kaggle_secrets' not in code
     assert 'HF_TOKEN' not in code and '--publish' not in code and '--repo' not in code
     assert 'patch-scene-results.zip' in code and 'finally:' in code
-    assert 'patch_scene_cityscapes.yaml' in code and '--cityscapes-root' in code
-    assert '[3,12,48]' in code and '--devices' in code
-    assert 'cuda:0' in code and 'cuda:1' in code and 'getpass' in code
-    assert 'credentials.clear()' in code and 'all_train_patches' in code
+    assert 'patch_scene_nyuv2.yaml' in code and '--nyuv2-root' in code
+    assert '[[3,3],[12,12],[48,48]]' in code and '--devices' in code
+    assert 'range(min(2,count))' in code and 'getpass' not in code
+    assert 'prepare_nyuv2' in code and 'all_train_patches' in code
 
 
 def test_hub_restores_hashed_bundle(monkeypatch, tmp_path):

@@ -27,6 +27,24 @@ def verify(folder):
     return True
 
 
+def _stamp(folder):
+    """Cheap mutation check for previously verified, immutable feature bundles."""
+    manifest = read_json(folder/'bundle.json')
+    if manifest is None:
+        return None
+    values = []
+    for name in ['bundle.json', *sorted(manifest['files'])]:
+        path = folder/name
+        if not path.resolve().is_relative_to(folder.resolve()):
+            raise ValueError('invalid bundle path')
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            return None
+        values.append((name, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_ino))
+    return tuple(values)
+
+
 def save_torch(path, payload):
     import torch
     path = Path(path)
@@ -39,6 +57,7 @@ def save_torch(path, payload):
 class Hub:
     def __init__(self, root, repo=None, *, publish=False):
         self.root, self.repo, self.publish = Path(root), repo, publish
+        self._verified_features = {}
         self.files, self.revision = set(), None
         if repo:
             from huggingface_hub import HfApi
@@ -49,8 +68,14 @@ class Hub:
     def pull(self, relative):
         directory = self.root/relative
         prefix = f'scene-patch-v2/{relative}'
+        immutable = Path(relative).parts[0] in ('features', 'support')
+        before = _stamp(directory) if immutable else None
+        if before is not None and self._verified_features.get(str(relative)) == before:
+            return directory
         try:
             if verify(directory):
+                if immutable and before is not None and before == _stamp(directory):
+                    self._verified_features[str(relative)] = before
                 return directory
         except RuntimeError:
             if not (self.repo and f'{prefix}/bundle.json' in self.files):

@@ -80,7 +80,7 @@ def evaluate(config, encoder, dataset, method, model, fit_record, features, labe
     result = {'complete': True, 'identity': identity, 'dataset': dataset, 'encoder': encoder, 'method': method,
               'k': k, 'train_k': config.k if sparse else None, 'inference_k': k,
               'seed': config.seed, 'query_images': next_image,
-              **metrics(matrix, include_absent=dataset == 'ade20k'), 'mean_nnz': nnz_sum/patches,
+              **metrics(matrix, include_absent=dataset in ('ade20k', 'nyuv2')), 'mean_nnz': nnz_sum/patches,
               'gallery_mean_nnz': gallery_nnz, 'empty_patches': empties,
               'query_seconds': prior_seconds+time.perf_counter()-started,
               'timing_scope': 'query streaming, encoding, exact retrieval, upsampling, metrics and periodic backups',
@@ -91,6 +91,11 @@ def evaluate(config, encoder, dataset, method, model, fit_record, features, labe
     if dataset == 'cityscapes':
         from .cityscapes import CLASS_NAMES
         result['class_names'] = list(CLASS_NAMES)
+    if dataset == 'nyuv2':
+        from .nyuv2 import CLASS_NAMES
+        result['class_names'] = list(CLASS_NAMES)
+        result['evaluation_split'] = 'official test (654 images); no test-based selection'
+        result['input_modalities'] = ['RGB']
     atomic_json(folder/'result.json', result)
     hub.push(relative)
     del search

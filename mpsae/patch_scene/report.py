@@ -9,7 +9,7 @@ from ..io import read_json, atomic_json
 from .config import Config, ENCODERS, DATASETS, METHODS
 
 NAMES = {'siglip2': 'SigLIP 2', 'dinov2': 'DINOv2', 'clip': 'CLIP'}
-DATASET_NAMES = {'voc': 'VOC', 'ade20k': 'ADE20K', 'cityscapes': 'Cityscapes'}
+DATASET_NAMES = {'voc': 'VOC', 'ade20k': 'ADE20K', 'cityscapes': 'Cityscapes', 'nyuv2': 'NYUv2-40'}
 TABLE_FILES = ('results.csv', 'comparisons.csv', 'results.tex', 'table_voc.tex',
                'table_ade20k.tex', 'pixel_accuracy.tex', 'inference_sweep.tex',
                'sweep_voc.tex', 'sweep_ade20k.tex', 'tables_preview.tex', 'results.json')
@@ -25,7 +25,7 @@ def row_key(row):
 def expected_keys(config):
     return {(d, e, 'dense', None, None) for d in config.dataset_names for e in config.encoder_names} | {
         (d, e, m, train_k, k) for d in config.dataset_names for e in config.encoder_names
-        for m in METHODS for train_k in config.training_ks for k in config.inference_ks}
+        for m in METHODS for train_k, k in config.evaluation_pairs}
 
 
 def collect_tables(hub, campaign):
@@ -67,7 +67,9 @@ def export_results(workspace, campaign):
             f'Campaign: {campaign}\nCompleted evaluations: {result["completed"]}/{result["expected"]}\n'
             'results.tex: main mIoU table; table_<dataset>.tex: separate dataset tables.\n'
             'For multiple training budgets, main tables show matched train K = inference K.\n'
-            'inference_sweep.tex and sweep_<dataset>.tex: all train/inference combinations.\n'
+            + ('Matched-only evaluation: each SAE is tested at its own training K; no inference sweep.\n'
+               if result.get('evaluation_mode') == 'matched' else
+               'inference_sweep.tex and sweep_<dataset>.tex: all train/inference combinations.\n') +
             'pixel_accuracy.tex: supplementary pixel accuracy table.\n'
             'Use \\usepackage{booktabs} and \\input{results.tex} in your paper.\n'
             'Compile tables_preview.tex with pdflatex to preview all tables.\n'
@@ -77,7 +79,8 @@ def export_results(workspace, campaign):
             'Delta = MPSAE minus max(CSR, CSRv2) at the same encoder, dataset, train K and inference K.\n'
             '-- means missing; negative deltas are retained. No significance claim from a single seed.\n'
             f'Training K: {result["train_ks"]}; inference K: {result["inference_k"]}.\n'
-            'Each training budget has a separate checkpoint, reused across inference budgets.\n'
+            'Each training budget has a separate checkpoint.\n'
+            'NYUv2 uses RGB only, NYU40 labels, official 795 train / 654 test; no test-based selection.\n'
             'CSRv2 uses training-mask labels in its loss. Dataset-specific adaptation, not cross-dataset transfer.\n'
             'This is a results archive, not a training-resume backup.\n'
             'Model checkpoints and feature caches remain in the Kaggle workspace.\n')
@@ -110,7 +113,7 @@ def _comparison(lookup, dataset, encoder, train_k, k, metric):
 
 def _latex(lookup, config, *, datasets, metric='miou', label='patch-sae', matched=False):
     combined = len(datasets) > 1
-    pairs = [(t, k) for t in config.training_ks for k in config.inference_ks if not matched or t == k]
+    pairs = [(t, k) for t, k in config.evaluation_pairs if not matched or t == k]
     show_train = not matched and len(config.training_ks) > 1
     metric_name = 'mIoU' if metric == 'miou' else 'pixel accuracy'
     expected = {key for key in expected_keys(config) if key[0] in datasets
@@ -118,6 +121,8 @@ def _latex(lookup, config, *, datasets, metric='miou', label='patch-sae', matche
     count = len(set(lookup) & expected)
     status = f'Partial results ({count}/{len(expected)} evaluations). ' if count != len(expected) else ''
     title = ' / '.join(DATASET_NAMES[d] for d in datasets)
+    if datasets == ('nyuv2',):
+        title += ' official test, RGB only'
     protocol = (r'Matched budgets: $K_{\mathrm{train}}=K_{\mathrm{inf}}=K$.' if matched else
                 r'Each training checkpoint is evaluated across inference budgets.' if show_train else
                 f'SAEs trained at $K_{{\\mathrm{{train}}}}={config.training_ks[0]}$.')
@@ -186,7 +191,7 @@ def write_tables(rows, directory, config=None):
     comparisons, metrics = [], []
     for dataset in config.dataset_names:
         for encoder in config.encoder_names:
-            for train_k, k in ((t, k) for t in config.training_ks for k in config.inference_ks):
+            for train_k, k in config.evaluation_pairs:
                 dense, scores, baseline, delta = _comparison(lookup, dataset, encoder, train_k, k, 'miou')
                 comparisons.append({'dataset': dataset, 'encoder': encoder, 'train_k': train_k,
                     'inference_k': k, 'dense_miou_percent': dense,
@@ -211,18 +216,22 @@ def write_tables(rows, directory, config=None):
         metrics.append(out)
     _csv(directory/'results.csv', fields, metrics)
     _csv(directory/'comparisons.csv', list(comparisons[0]), comparisons)
-    matched = len(config.training_ks) > 1 and set(config.training_ks) <= set(config.inference_ks)
+    matched = config.evaluation_mode == 'matched' or (len(config.training_ks) > 1 and set(config.training_ks) <= set(config.inference_ks))
     (directory/'results.tex').write_text(_latex(lookup, config, datasets=config.dataset_names, matched=matched), encoding='utf-8')
-    (directory/'inference_sweep.tex').write_text(
-        _latex(lookup, config, datasets=config.dataset_names, label='patch-sae-sweep'), encoding='utf-8')
+    if config.evaluation_mode != 'matched':
+        (directory/'inference_sweep.tex').write_text(
+            _latex(lookup, config, datasets=config.dataset_names, label='patch-sae-sweep'), encoding='utf-8')
     for dataset in config.dataset_names:
         (directory/f'table_{dataset}.tex').write_text(
             _latex(lookup, config, datasets=(dataset,), label=f'patch-sae-{dataset}', matched=matched), encoding='utf-8')
-        (directory/f'sweep_{dataset}.tex').write_text(
-            _latex(lookup, config, datasets=(dataset,), label=f'patch-sae-sweep-{dataset}'), encoding='utf-8')
+        if config.evaluation_mode != 'matched':
+            (directory/f'sweep_{dataset}.tex').write_text(
+                _latex(lookup, config, datasets=(dataset,), label=f'patch-sae-sweep-{dataset}'), encoding='utf-8')
     (directory/'pixel_accuracy.tex').write_text(
         _latex(lookup, config, datasets=config.dataset_names, metric='pixel_accuracy', label='patch-sae-pa', matched=matched), encoding='utf-8')
-    preview = ['results.tex', 'pixel_accuracy.tex', 'inference_sweep.tex']
+    preview = ['results.tex', 'pixel_accuracy.tex']
+    if config.evaluation_mode != 'matched':
+        preview.append('inference_sweep.tex')
     (directory/'tables_preview.tex').write_text(
         '\\documentclass{article}\n\\usepackage[a4paper,margin=18mm]{geometry}\n'
         '\\usepackage{booktabs}\n\\begin{document}\n'+
@@ -232,5 +241,7 @@ def write_tables(rows, directory, config=None):
     atomic_json(directory/'results.json', {'complete': not missing, 'completed': len(lookup),
         'expected': len(expected), 'train_k': config.plan()['train_k'], 'train_ks': list(config.training_ks),
         'inference_k': list(config.inference_ks), 'main_table': 'matched_budgets' if matched else 'inference_sweep',
+        'evaluation_mode': config.evaluation_mode,
+        'evaluation_splits': config.plan()['evaluation_splits'],
         'missing': [dict(zip(('dataset', 'encoder', 'method', 'train_k', 'inference_k'), key)) for key in missing],
         'results': [lookup[key] for key in sorted(lookup)]})

@@ -1,2 +1,4 @@
 -r requirements-scene.txt
 transformers==4.57.1
+h5py==3.12.1
+scipy==1.14.1

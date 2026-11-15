@@ -29,25 +29,28 @@ ConvNeXt-Tiny and DINOv2-S/14, with selective linear probing. All downstream
 experiments (including SOP) and repeated retrieval timing are disabled for now.
 `.env` holds credentials; `configs/thesis.yaml` selects the experiments.
 
-The current **Kaggle segmentation campaign** uses **Cityscapes fine train/validation only**
-(2975/500 images), with frozen SigLIP 2 and DINOv2. CSR/CSRv2/MPSAE each train at
-K=3/12/48 and are evaluated at every K=3/12/48: **18 fits and 56 evaluations**.
-Every valid patch at **448x896** is used for SAE training via disk streaming,
-with 10 epochs, batch 1024 and Adam LR 4e-5. No ADE20K, VOC, coarse data or test
-split is selected. Old results and source checkpoints remain intact.
+The current **Kaggle segmentation campaign** uses **NYUv2-40, RGB only**:
+795 official training images and 654 official test images. Frozen SigLIP 2 and
+DINOv2; CSR/CSRv2/MPSAE each train separately at K=3/12/48 and are evaluated
+**only at their own training K**: **18 fits and 20 evaluations** including dense
+baselines. Every valid training patch at **336x448** is streamed for 10 epochs,
+batch 1024, Adam LR 4e-5. No test-based model selection. Cityscapes/ADE20K/VOC are
+not selected; their historical configs/results are retained.
 
 ```bash
-python -m mpsae.patch_scene run --config configs/patch_scene_cityscapes.yaml \
-  --workspace /kaggle/working/cityscapes --cityscapes-root /tmp/cityscapes-data \
+python -m mpsae.patch_scene.prepare_nyuv2 --source /kaggle/input --destination /kaggle/working/nyuv2/dataset
+python -m mpsae.patch_scene run --config configs/patch_scene_nyuv2.yaml \
+  --workspace /kaggle/working/nyuv2 --nyuv2-root /kaggle/working/nyuv2/dataset \
   --devices cuda:0 cuda:1
 ```
 
-See [all copyable Kaggle cells](docs/cityscapes_kaggle.md) and
-`notebooks/patch_scene_kaggle.ipynb`. The notebook downloads the two official ZIPs
-using your Cityscapes account, or reads attached private ZIPs/extracted folders.
-No Hugging Face token or result upload is required. Results are downloadable as
-CSV/JSON and LaTeX tables. Training uses the entire patch pool; the shared 65536
-patch retrieval support bank is a separate evaluation budget.
+See [seven copyable Kaggle cells](docs/nyuv2_kaggle.md) or
+`notebooks/patch_scene_kaggle.ipynb`. Attach `nyu_depth_v2_labeled.mat` (~2.8 GB);
+the two small metadata files are fetched automatically and hash-checked. No
+Hugging Face token or result upload is required. One mIoU comparison table,
+supplementary pixel accuracy, CSV/JSON and LaTeX are exported in a small results
+ZIP. No cross-K inference runs or plots. Feature extraction is reused across
+fits; the shared 65536-patch retrieval bank is separate from full SAE training.
 
 The earlier **patch SAE fine-tuning and segmentation** workflow remains available through
 `python -m mpsae.scene plan` and `python -m mpsae.scene run`. It loads existing

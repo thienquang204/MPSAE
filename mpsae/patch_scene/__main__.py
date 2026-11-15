@@ -27,6 +27,7 @@ def main():
     parser.add_argument('--encoder', choices=(*ENCODERS, 'all'), default='all')
     parser.add_argument('--dataset', choices=(*DATASETS, 'all'), default='all')
     parser.add_argument('--cityscapes-root', help='Local official Cityscapes ZIPs or extracted folders')
+    parser.add_argument('--nyuv2-root', help='Folder with labeled NYUv2 MAT, splits.mat and classMapping40.mat')
     parser.add_argument('--device', default='cuda:0')
     parser.add_argument('--devices', nargs='+', help='Independent workers, e.g. cuda:0 cuda:1; overrides --device')
     parser.add_argument('--cpu-threads', type=int, default=2, help='CPU threads per parallel GPU worker')
@@ -36,6 +37,8 @@ def main():
     config = load(args.config)
     if args.cityscapes_root:
         os.environ['MPSAE_CITYSCAPES_ROOT'] = str(Path(args.cityscapes_root).resolve())
+    if args.nyuv2_root:
+        os.environ['MPSAE_NYUV2_ROOT'] = str(Path(args.nyuv2_root).resolve())
     if args.cpu_threads < 1:
         parser.error('--cpu-threads must be positive')
     if args.command == 'plan':

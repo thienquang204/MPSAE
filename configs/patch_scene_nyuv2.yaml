@@ -1,0 +1,28 @@
+# 18 separate SAE fits; 18 matched-K evaluations + 2 dense baselines = 20.
+# RGB-only NYU40, official 795 train / 654 test. Never tune on the test split.
+seed: 1227
+datasets: [nyuv2]
+encoders: [siglip2, dinov2]
+k: 12
+train_k: [3, 12, 48]
+evaluation_mode: matched
+# Each checkpoint is evaluated ONLY at its own train K; no inference grid.
+image_size: 336
+image_width: 448
+all_train_patches: true
+train_patches: 0
+support_patches: 65536
+hidden_dim: 8192
+epochs: 10
+batch_size: 1024
+lr: 0.00004
+early_stopping: false
+extraction_batch: 4
+workers: 2
+shard_images: 32
+query_block: 16
+neighbors: 30
+temperature: 0.02
+checkpoint_every: 512
+log_every: 100
+cache_dtype: float16

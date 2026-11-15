@@ -5,7 +5,7 @@ from .features import save_npz
 
 def fixture(hub, config, encoder='dinov2', dataset='voc'):
     rng = np.random.default_rng(config.seed)
-    classes = 19 if dataset == 'cityscapes' else 3
+    classes = 40 if dataset == 'nyuv2' else 19 if dataset == 'cityscapes' else 3
     centers = rng.normal(size=(classes, 768)).astype('float32')
     target = np.arange(64) % classes
     features = centers[target] + 0.05*rng.normal(size=(64, 768)).astype('float32')

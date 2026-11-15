@@ -46,6 +46,13 @@ def resolve_sources(config, hub):
         sources = read_json(hub.pull(original)/'sources.json')
     sources = sources or {'models': {}, 'datasets': {}}
     missing_models = [e for e in config.encoder_names if e not in sources['models']]
+    if 'nyuv2' in config.dataset_names:
+        from .nyuv2 import load_local
+        _, revision = load_local(fingerprint=True)
+        previous = sources['datasets'].get('nyuv2')
+        if previous is not None and previous != revision:
+            raise RuntimeError('NYUv2 source changed; use a new workspace to avoid mixing results')
+        sources['datasets']['nyuv2'] = revision
     if 'cityscapes' in config.dataset_names:
         from .cityscapes import load_local
         _, revision = load_local(fingerprint=True)
@@ -94,7 +101,11 @@ def prepare(config, encoder, dataset, sources, hub, device):
             raise RuntimeError('feature identity mismatch')
         return relative, manifest
     repo, _, subset = DATASETS[dataset]
-    if dataset == 'cityscapes':
+    if dataset == 'nyuv2':
+        from .nyuv2 import NYUSpec, load_local
+        spec = NYUSpec()
+        data, _ = load_local()
+    elif dataset == 'cityscapes':
         from .cityscapes import CitySpec, load_local
         spec = CitySpec()
         data, _ = load_local()

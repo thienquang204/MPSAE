@@ -15,6 +15,7 @@ DATASETS = {
     'ade20k': ('zhoubolei/scene_parse_150', 'e660d866a1351c70bcf07925d2600b60bd6e3bc3', 'scene_parsing'),
 }
 DATASETS['cityscapes'] = ('local-cityscapes', 'official-fine', 'fine')
+DATASETS['nyuv2'] = ('local-nyuv2', 'official-labeled', 'nyu40')
 
 METHODS = ('csr', 'csrv2', 'mpsae')
 
@@ -24,6 +25,7 @@ class Config:
     seed: int = 1227
     k: int = 12
     inference_k: tuple[int, ...] | None = None
+    evaluation_mode: str = 'sweep'
     train_k: tuple[int, ...] | None = None
     encoders: tuple[str, ...] | None = None
     hidden_dim: int = 8192
@@ -51,6 +53,8 @@ class Config:
     early_min_delta: float = 0.001
 
     def __post_init__(self):
+        if self.evaluation_mode not in ('sweep', 'matched'):
+            raise ValueError('evaluation_mode must be sweep or matched')
         if type(self.all_train_patches) is not bool:
             raise ValueError('all_train_patches must be boolean')
         if self.image_width is not None and (type(self.image_width) is not int or self.image_width < 112 or self.image_width % 112):
@@ -95,6 +99,8 @@ class Config:
                     or len(set(self.encoders)) != len(self.encoders)):
                 raise ValueError('encoders must be a nonempty list of distinct registered encoder names')
             object.__setattr__(self, 'encoders', tuple(e for e in ENCODERS if e in self.encoders))
+        if self.evaluation_mode == 'matched' and self.inference_k is not None and self.inference_k != self.training_ks:
+            raise ValueError('matched evaluation requires inference_k omitted or equal to train_k')
         if self.image_size % 112 or self.batch_size < 2:
             raise ValueError('image_size must be divisible by 14 and 16; batch_size >= 2')
         if not self.neighbors <= self.support_patches or (not self.all_train_patches and self.support_patches > self.train_patches):
@@ -110,6 +116,8 @@ class Config:
 
     def identity(self):
         settings = asdict(self)
+        if self.evaluation_mode == 'sweep':
+            settings.pop('evaluation_mode')  # keep historical campaign identities
         if self.image_width is None:
             settings.pop('image_width')
         if not self.all_train_patches:
@@ -155,7 +163,13 @@ class Config:
     def for_training(self, k):
         if k not in self.training_ks:
             raise ValueError(f'train K={k} is not selected')
-        return replace(self, k=k, train_k=None, inference_k=self.inference_ks)
+        return replace(self, k=k, train_k=None,
+                       inference_k=(k,) if self.evaluation_mode == 'matched' else self.inference_ks)
+
+    @property
+    def evaluation_pairs(self):
+        return tuple((t, k) for t in self.training_ks for k in self.inference_ks
+                     if self.evaluation_mode != 'matched' or t == k)
 
     def source_identity(self):
         identity = self.identity()
@@ -168,6 +182,7 @@ class Config:
         identity['settings'].pop('inference_k', None)
         identity['settings'].pop('train_k', None)
         identity['settings'].pop('encoders', None)
+        identity['settings'].pop('evaluation_mode', None)
         # Legacy source receipts were keyed by the K=12 campaign. Neither the
         # selected training budgets nor encoder subset should refresh revisions.
         identity['settings']['k'] = 12
@@ -176,8 +191,8 @@ class Config:
     def plan(self):
         cells = len(self.encoder_names)*len(self.dataset_names)
         fits = cells*len(METHODS)*len(self.training_ks)
-        sparse = fits*len(self.inference_ks)
-        matched = cells*len(METHODS)*len(set(self.training_ks) & set(self.inference_ks))
+        sparse = cells*len(METHODS)*len(self.evaluation_pairs)
+        matched = cells*len(METHODS)*sum(t == k for t, k in self.evaluation_pairs)
         return {**self.identity(), 'campaign': canonical_hash(self.identity())[:20],
                 'encoders': {e: ENCODERS[e] for e in self.encoder_names}, 'datasets': {d: DATASETS[d] for d in self.dataset_names}, 'methods': METHODS,
                 'sae_fits': fits, 'sparse_evaluations': sparse, 'dense_evaluations': cells,
@@ -186,6 +201,9 @@ class Config:
                 'train_k': self.training_ks[0] if len(self.training_ks) == 1 else list(self.training_ks),
                 'train_ks': list(self.training_ks),
                 'inference_k': list(self.inference_ks),
+                'evaluation_mode': self.evaluation_mode,
+                'evaluation_pairs': [list(pair) for pair in self.evaluation_pairs],
+                'evaluation_splits': {d: 'test' if d == 'nyuv2' else 'validation' for d in self.dataset_names},
                 'backbone_trainable': False, 'figures': False,
                 'training_data': 'ALL valid training patches, disk streaming' if self.all_train_patches else 'sampled bank',
                 'input_hw': list(self.image_hw),
