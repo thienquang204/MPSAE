@@ -29,21 +29,25 @@ ConvNeXt-Tiny and DINOv2-S/14, with selective linear probing. All downstream
 experiments (including SOP) and repeated retrieval timing are disabled for now.
 `.env` holds credentials; `configs/thesis.yaml` selects the experiments.
 
-The current **Kaggle segmentation campaign** uses SigLIP 2 and DINOv2 on VOC and
-ADE20K, with independent CSR/CSRv2/MPSAE fits at training K=3/12/48 and inference
-at every K=3/12/48. CLIP is excluded. This is 36 fits and 112 evaluations, including
-four dense references. Use two independent GPU workers, with local ZIP downloads:
+The current **Kaggle segmentation campaign** uses **Cityscapes fine train/validation only**
+(2975/500 images), with frozen SigLIP 2 and DINOv2. CSR/CSRv2/MPSAE each train at
+K=3/12/48 and are evaluated at every K=3/12/48: **18 fits and 56 evaluations**.
+Every valid patch at **448x896** is used for SAE training via disk streaming,
+with 10 epochs, batch 1024 and Adam LR 4e-5. No ADE20K, VOC, coarse data or test
+split is selected. Old results and source checkpoints remain intact.
 
 ```bash
-python -m mpsae.patch_scene run --config configs/patch_scene_kaggle.yaml \
-  --workspace /kaggle/working/patch-scene-v2 --devices cuda:0 cuda:1
+python -m mpsae.patch_scene run --config configs/patch_scene_cityscapes.yaml \
+  --workspace /kaggle/working/cityscapes --cityscapes-root /tmp/cityscapes-data \
+  --devices cuda:0 cuda:1
 ```
 
-See [Kaggle setup, reuse and paper tables](docs/patch_scene_kaggle.md) and
-`notebooks/patch_scene_kaggle.ipynb`. No Hugging Face token or upload is required.
-The previous K=12 fits and compatible evaluations are reused from a retained
-workspace; new K=3/48 fits start from fresh SAE weights. Main tables compare matched
-training/inference K; separate tables include all cross-K conditions.
+See [all copyable Kaggle cells](docs/cityscapes_kaggle.md) and
+`notebooks/patch_scene_kaggle.ipynb`. The notebook downloads the two official ZIPs
+using your Cityscapes account, or reads attached private ZIPs/extracted folders.
+No Hugging Face token or result upload is required. Results are downloadable as
+CSV/JSON and LaTeX tables. Training uses the entire patch pool; the shared 65536
+patch retrieval support bank is a separate evaluation budget.
 
 The earlier **patch SAE fine-tuning and segmentation** workflow remains available through
 `python -m mpsae.scene plan` and `python -m mpsae.scene run`. It loads existing
@@ -71,17 +75,8 @@ is saved in `configs/archive/scene_voc_frozen_multi.yaml`.
 No old server files or ImageNet download are required. See the scene guide for
 driver/Python requirements and alternate repository/revision options.
 
-The same benchmark also supports **ADE20K (SceneParse150)**: 20,210 training and
-2,000 validation images, 150 classes, with raw label 0 ignored. It uses pinned HF
-Parquet files, the same K sweeps and SAE adaptation settings, and separate results:
-
-```bash
-bash scene_only.sh --config configs/scene_ade20k.yaml --workspace /workspace/scene-ade20k-v1 --publish
-```
-
-This adds 12 SAE adaptations and 160 evaluation points. The patch bank stays bounded;
-the first backbone extraction processes more images. See the scene guide for the
-label mapping, dataset revision, memory budget and publication details.
+ADE20K experiments are retired from the active workflow. Their historical
+configs are under `configs/archive/`; existing results are not deleted.
 
 ```bash
 cp .env.example .env                       # if .env does not exist yet

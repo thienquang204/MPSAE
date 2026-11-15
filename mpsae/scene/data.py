@@ -56,8 +56,9 @@ class ImageRows:
         if image.size != mask.size:
             raise ValueError('image and segmentation mask are misaligned')
         truth = self.spec.remap(mask)
-        image = image.resize((self.size, self.size), Image.Resampling.BILINEAR)
-        scaled = mask.resize((self.size, self.size), Image.Resampling.NEAREST)
+        height, width = (self.size, self.size) if isinstance(self.size, int) else self.size
+        image = image.resize((width, height), Image.Resampling.BILINEAR)
+        scaled = mask.resize((width, height), Image.Resampling.NEAREST)
         image = normalize(pil_to_tensor(image).float()/255, *self.normalize)
         return index, image, truth, self.spec.remap(scaled)
 

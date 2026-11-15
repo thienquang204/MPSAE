@@ -16,7 +16,7 @@ def test_shipped_configs_keep_old_campaigns_and_add_training_grid():
     from pathlib import Path
     root = Path(__file__).resolve().parents[1]
     old = load(root/'configs/patch_scene_kaggle_k12.yaml')
-    new = load(root/'configs/patch_scene_kaggle.yaml')
+    new = load(root/'configs/archive/patch_scene_kaggle_before_cityscapes.yaml')
     assert old.plan()['campaign'] == '54d9e25955a1f70142da'
     assert new.source_identity() == old.identity()
     assert new.preset() == old.preset()

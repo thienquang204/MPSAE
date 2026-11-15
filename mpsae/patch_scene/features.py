@@ -46,6 +46,13 @@ def resolve_sources(config, hub):
         sources = read_json(hub.pull(original)/'sources.json')
     sources = sources or {'models': {}, 'datasets': {}}
     missing_models = [e for e in config.encoder_names if e not in sources['models']]
+    if 'cityscapes' in config.dataset_names:
+        from .cityscapes import load_local
+        _, revision = load_local(fingerprint=True)
+        previous = sources['datasets'].get('cityscapes')
+        if previous is not None and previous != revision:
+            raise RuntimeError('Cityscapes source changed; use a new workspace to avoid mixing results')
+        sources['datasets']['cityscapes'] = revision
     missing_data = [d for d in config.dataset_names if d not in sources['datasets']]
     if missing_models or missing_data:
         api = HfApi()
@@ -65,13 +72,14 @@ def feature_identity(config, encoder, dataset, sources, device):
     return {'version': VERSION, 'encoder': encoder, 'model': ENCODERS[encoder][0],
             'model_revision': sources['models'][encoder], 'dataset': dataset,
             'dataset_revision': sources['datasets'][dataset],
-            'image_size': config.image_size, 'seed': config.seed,
-            'train_patches': config.train_patches, 'dtype': config.cache_dtype,
+            'image_size': list(config.image_hw) if config.image_width else config.image_size, 'seed': config.seed,
+            'train_patches': 'all_valid' if config.all_train_patches else config.train_patches, 'dtype': config.cache_dtype,
             'extraction_batch': config.extraction_batch, 'shard_images': config.shard_images,
             'precision': 'fp16_autocast' if str(device).startswith('cuda') else 'fp32',
-            'geometry': 'whole_image_square_bilinear;mask_nearest;no_center_crop',
+            'geometry': ('whole_image_rectangular_bilinear;mask_nearest;no_crop' if config.image_width else
+                         'whole_image_square_bilinear;mask_nearest;no_center_crop'),
             'tokens': 'last_layer_spatial_post_layernorm_no_cls_no_projection',
-            'sampling': 'uniform_valid_patch_equal_image_quota;no_replacement',
+            'sampling': 'all_valid_patches' if config.all_train_patches else 'uniform_valid_patch_equal_image_quota;no_replacement',
             'versions': {p: importlib.metadata.version(p) for p in
                          ('torch', 'transformers', 'numpy', 'pillow', 'datasets')}}
 
@@ -86,10 +94,15 @@ def prepare(config, encoder, dataset, sources, hub, device):
             raise RuntimeError('feature identity mismatch')
         return relative, manifest
     repo, _, subset = DATASETS[dataset]
-    spec = dataset_spec(dataset, subset)
-    args = SimpleNamespace(dataset=dataset, dataset_repo=repo, dataset_config=subset)
-    data = load_splits(args, {'repo': repo, 'revision': sources['datasets'][dataset]},
-                       Path(os.environ.get('HF_DATASETS_CACHE', str(hub.root/'hf_datasets'))))
+    if dataset == 'cityscapes':
+        from .cityscapes import CitySpec, load_local
+        spec = CitySpec()
+        data, _ = load_local()
+    else:
+        spec = dataset_spec(dataset, subset)
+        args = SimpleNamespace(dataset=dataset, dataset_repo=repo, dataset_config=subset)
+        data = load_splits(args, {'repo': repo, 'revision': sources['datasets'][dataset]},
+                           Path(os.environ.get('HF_DATASETS_CACHE', str(hub.root/'hf_datasets'))))
     counts = {'train': spec.train_rows, 'validation': spec.validation_rows}
     ids = {}
     for split in counts:
@@ -102,7 +115,7 @@ def prepare(config, encoder, dataset, sources, hub, device):
         raise ValueError('train/validation image IDs overlap')
     from torch.utils.data import DataLoader
     model, norm = load_encoder(encoder, sources['models'][encoder], device)
-    grid = (config.image_size//ENCODERS[encoder][1],)*2
+    grid = tuple(v//ENCODERS[encoder][1] for v in config.image_hw)
     entries = []
     for split, count in counts.items():
         pending, plans, batches = [], [], []
@@ -119,7 +132,7 @@ def prepare(config, encoder, dataset, sources, hub, device):
                             for i in range(offset, offset+stop-start, config.extraction_batch)])
             plans.append((start, stop, shard, folder))
         # A single worker pool per split, with batches respecting shard boundaries.
-        loader = DataLoader(ImageRows(data[split], pending, config.image_size, norm, spec),
+        loader = DataLoader(ImageRows(data[split], pending, config.image_hw, norm, spec),
                             batch_sampler=batches, num_workers=config.workers, collate_fn=collate,
                             pin_memory=str(device).startswith('cuda'))
         stream = iter(loader)
@@ -136,7 +149,7 @@ def prepare(config, encoder, dataset, sources, hub, device):
                             soft = label_distributions(mask, grid, classes=spec.classes)
                             valid = np.flatnonzero(soft.sum(1) > 0)
                             quota = config.train_patches//count + (i < config.train_patches % count)
-                            chosen = np.random.default_rng([config.seed, i]).permutation(valid)[:quota]
+                            chosen = valid if config.all_train_patches else np.random.default_rng([config.seed, i]).permutation(valid)[:quota]
                             x = x[chosen]
                             labels.append(soft[chosen])
                             image_indices.append(np.full(len(chosen), i, dtype=np.int32))
@@ -157,6 +170,7 @@ def prepare(config, encoder, dataset, sources, hub, device):
                          offsets=offsets, shapes=np.asarray(shapes, dtype=np.int32))
             atomic_json(folder/'metadata.json', {'identity': identity, 'split': split,
                 'start': start, 'stop': stop, 'ids': ids[split][start:stop],
+                'training_rows': sum(len(x) for x in features) if split == 'train' else None,
                 'max_storage_relative_squared_error': max_error})
             hub.push(shard)  # interruption loses at most one extraction shard
             entries.append({'split': split, 'start': start, 'stop': stop, 'path': shard})
@@ -173,6 +187,9 @@ def prepare(config, encoder, dataset, sources, hub, device):
 
 
 def training_bank(manifest, hub, config):
+    if config.all_train_patches:
+        from .stream import support_bank
+        return support_bank(manifest, hub, config)
     xs, ys = [], []
     for entry in manifest['shards']:
         if entry['split'] == 'train':

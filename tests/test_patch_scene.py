@@ -185,9 +185,10 @@ def test_kaggle_notebook_has_no_token_or_publish_requirement():
     assert 'UserSecretsClient' not in code and 'kaggle_secrets' not in code
     assert 'HF_TOKEN' not in code and '--publish' not in code and '--repo' not in code
     assert 'patch-scene-results.zip' in code and 'finally:' in code
-    assert 'ENCODER = "all"' in code and 'DATASET = "all"' in code
-    assert 'TRAIN_K = [3, 12, 48]' in code and '--devices' in code
-    assert 'cuda:0' in code and 'cuda:1' in code and 'yaml.safe_dump' in code
+    assert 'patch_scene_cityscapes.yaml' in code and '--cityscapes-root' in code
+    assert '[3,12,48]' in code and '--devices' in code
+    assert 'cuda:0' in code and 'cuda:1' in code and 'getpass' in code
+    assert 'credentials.clear()' in code and 'all_train_patches' in code
 
 
 def test_hub_restores_hashed_bundle(monkeypatch, tmp_path):
@@ -210,12 +211,13 @@ def test_hub_restores_hashed_bundle(monkeypatch, tmp_path):
     assert all(call['revision'] == 'fixed-commit' for call in calls)
 
 
-def test_feature_shards_resume_without_reextracting_completed_images(monkeypatch, tmp_path):
+@pytest.mark.parametrize('all_patches', [False, True])
+def test_feature_shards_resume_without_reextracting_completed_images(monkeypatch, tmp_path, all_patches):
     from PIL import Image
     from mpsae.patch_scene import features as module
     from mpsae.scene.datasets import VOC
     cfg = Config(image_size=112, train_patches=16, support_patches=8, neighbors=2,
-                 extraction_batch=2, shard_images=2, workers=0)
+                 extraction_batch=2, shard_images=2, workers=0, all_train_patches=all_patches)
     spec = replace(VOC, train_rows=5, validation_rows=3)
     data = {split: [{'id': f'{split}-{i}',
                     'image': Image.fromarray(np.full((17, 23, 3), 40+i*10, dtype='uint8')),
@@ -236,7 +238,10 @@ def test_feature_shards_resume_without_reextracting_completed_images(monkeypatch
     rel, manifest = module.prepare(cfg, 'dinov2', 'voc', sources, hub, 'cpu')
     assert sum(calls) == 8
     x, y, chosen = module.training_bank(manifest, hub, cfg)
-    assert x.shape == (16, 768) and len(chosen) == 8
+    assert x.shape == (8 if all_patches else 16, 768) and len(chosen) == 8
+    if all_patches:
+        from mpsae.patch_scene.stream import ShardTraining
+        assert ShardTraining(manifest, hub).rows == 320
     assert [i for i, _, _ in module.queries(manifest, hub)] == [0, 1, 2]
     # Simulate a session ending before the final shard/index committed.
     last = tmp_path/rel/'validation/000002'
@@ -252,7 +257,8 @@ def test_feature_shards_resume_without_reextracting_completed_images(monkeypatch
 
 
 @pytest.mark.parametrize('encoder', ['clip', 'dinov2', 'siglip2'])
-def test_real_transformers_spatial_adapter_without_download(encoder):
+@pytest.mark.parametrize('aspect', [1, 2])
+def test_real_transformers_spatial_adapter_without_download(encoder, aspect):
     transformers = pytest.importorskip('transformers')
     from mpsae.patch_scene.encoders import patch_tokens
     torch.set_num_threads(1)
@@ -272,6 +278,6 @@ def test_real_transformers_spatial_adapter_without_download(encoder):
         model = transformers.SiglipVisionModel(cfg)
         size, tokens = 32, 4
     model.eval()
-    actual = patch_tokens(model, torch.rand(1, 3, size, size), encoder)
-    assert actual.shape == (1, tokens, 768)
+    actual = patch_tokens(model, torch.rand(1, 3, size, size*aspect), encoder)
+    assert actual.shape == (1, tokens*aspect, 768)
     assert torch.isfinite(actual).all()

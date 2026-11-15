@@ -9,7 +9,7 @@ from ..io import read_json, atomic_json
 from .config import Config, ENCODERS, DATASETS, METHODS
 
 NAMES = {'siglip2': 'SigLIP 2', 'dinov2': 'DINOv2', 'clip': 'CLIP'}
-DATASET_NAMES = {'voc': 'VOC', 'ade20k': 'ADE20K'}
+DATASET_NAMES = {'voc': 'VOC', 'ade20k': 'ADE20K', 'cityscapes': 'Cityscapes'}
 TABLE_FILES = ('results.csv', 'comparisons.csv', 'results.tex', 'table_voc.tex',
                'table_ade20k.tex', 'pixel_accuracy.tex', 'inference_sweep.tex',
                'sweep_voc.tex', 'sweep_ade20k.tex', 'tables_preview.tex', 'results.json')
@@ -32,7 +32,7 @@ def collect_tables(hub, campaign):
     settings = read_json(hub.root/f'campaigns/{campaign}/settings/config.json')
     config = Config(**settings['settings']) if settings else Config()
     rows = []
-    for dataset in DATASETS:
+    for dataset in config.dataset_names:
         for encoder in config.encoder_names:
             folder = hub.pull(f'campaigns/{campaign}/cells/{dataset}-{encoder}')
             rows.extend((read_json(folder/'rows.json') or {}).get('results', []))
@@ -54,7 +54,7 @@ def export_results(workspace, campaign):
     result = read_json(table/'results.json')
     if not result or not result.get('results'):
         raise FileNotFoundError('No completed evaluation results to export')
-    sources = [(table/name, name) for name in TABLE_FILES]
+    sources = [(p, p.name) for p in sorted(table.iterdir()) if p.suffix in ('.csv', '.json', '.tex') and p.name != 'bundle.json']
     for folder, name in [('settings', 'config.json'), ('sources', 'sources.json')]:
         if (root/folder/name).is_file():
             sources.append((root/folder/name, name))
@@ -65,9 +65,9 @@ def export_results(workspace, campaign):
             handle.write(path, arcname=name)
         handle.writestr('README.txt',
             f'Campaign: {campaign}\nCompleted evaluations: {result["completed"]}/{result["expected"]}\n'
-            'results.tex: main mIoU table; table_voc.tex/table_ade20k.tex: separate dataset tables.\n'
+            'results.tex: main mIoU table; table_<dataset>.tex: separate dataset tables.\n'
             'For multiple training budgets, main tables show matched train K = inference K.\n'
-            'inference_sweep.tex and sweep_voc.tex/sweep_ade20k.tex: all train/inference combinations.\n'
+            'inference_sweep.tex and sweep_<dataset>.tex: all train/inference combinations.\n'
             'pixel_accuracy.tex: supplementary pixel accuracy table.\n'
             'Use \\usepackage{booktabs} and \\input{results.tex} in your paper.\n'
             'Compile tables_preview.tex with pdflatex to preview all tables.\n'
@@ -184,7 +184,7 @@ def write_tables(rows, directory, config=None):
                 raise ValueError(f'invalid {metric}: {value}')
         lookup[key] = row
     comparisons, metrics = [], []
-    for dataset in DATASETS:
+    for dataset in config.dataset_names:
         for encoder in config.encoder_names:
             for train_k, k in ((t, k) for t in config.training_ks for k in config.inference_ks):
                 dense, scores, baseline, delta = _comparison(lookup, dataset, encoder, train_k, k, 'miou')
@@ -196,9 +196,11 @@ def write_tables(rows, directory, config=None):
     fields = ['dataset', 'encoder', 'method', 'k', 'train_k', 'inference_k', 'seed',
               'miou_percent', 'pixel_accuracy_percent', 'gain_over_dense_pp', 'gain_over_best_baseline_pp',
               'mean_nnz', 'gallery_mean_nnz', 'query_images', 'query_seconds', 'search_workspace_bytes',
-              'peak_cuda_bytes', 'supervision']
+              'peak_cuda_bytes', 'supervision', 'training_patches', 'epochs_completed']
     for key, row in sorted(lookup.items()):
         out = {f: row.get(f) for f in fields}
+        for field in ('training_patches', 'epochs_completed'):
+            out[field] = row.get('training', {}).get(field)
         out.update(train_k=key[3], inference_k=key[4])
         out['miou_percent'], out['pixel_accuracy_percent'] = _score(row, 'miou'), _score(row, 'pixel_accuracy')
         dense = _score(lookup.get((key[0], key[1], 'dense', None, None)), 'miou')
@@ -213,19 +215,19 @@ def write_tables(rows, directory, config=None):
     (directory/'results.tex').write_text(_latex(lookup, config, datasets=config.dataset_names, matched=matched), encoding='utf-8')
     (directory/'inference_sweep.tex').write_text(
         _latex(lookup, config, datasets=config.dataset_names, label='patch-sae-sweep'), encoding='utf-8')
-    for dataset in DATASETS:
+    for dataset in config.dataset_names:
         (directory/f'table_{dataset}.tex').write_text(
             _latex(lookup, config, datasets=(dataset,), label=f'patch-sae-{dataset}', matched=matched), encoding='utf-8')
         (directory/f'sweep_{dataset}.tex').write_text(
             _latex(lookup, config, datasets=(dataset,), label=f'patch-sae-sweep-{dataset}'), encoding='utf-8')
     (directory/'pixel_accuracy.tex').write_text(
         _latex(lookup, config, datasets=config.dataset_names, metric='pixel_accuracy', label='patch-sae-pa', matched=matched), encoding='utf-8')
+    preview = ['results.tex', 'pixel_accuracy.tex', 'inference_sweep.tex']
     (directory/'tables_preview.tex').write_text(
         '\\documentclass{article}\n\\usepackage[a4paper,margin=18mm]{geometry}\n'
-        '\\usepackage{booktabs}\n\\begin{document}\n\\input{results.tex}\n\\clearpage\n'
-        '\\input{table_voc.tex}\n\\clearpage\n\\input{table_ade20k.tex}\n\\clearpage\n'
-        '\\input{pixel_accuracy.tex}\n\\clearpage\n\\input{sweep_voc.tex}\n\\clearpage\n'
-        '\\input{sweep_ade20k.tex}\n\\end{document}\n', encoding='utf-8')
+        '\\usepackage{booktabs}\n\\begin{document}\n'+
+        ''.join('\\input{'+name+'}\n\\clearpage\n' for name in preview)+
+        '\\end{document}\n', encoding='utf-8')
     missing = sorted(expected-set(lookup))
     atomic_json(directory/'results.json', {'complete': not missing, 'completed': len(lookup),
         'expected': len(expected), 'train_k': config.plan()['train_k'], 'train_ks': list(config.training_ks),

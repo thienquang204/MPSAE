@@ -20,7 +20,7 @@ class Task:
 
 def preparation_tasks(encoders, datasets):
     # Start the larger dataset early; workers take the next ready job dynamically.
-    return [Task('prepare', e, d) for d in sorted(datasets, key=lambda d: d != 'ade20k') for e in encoders]
+    return [Task('prepare', e, d) for d in datasets for e in encoders]
 
 
 def evaluation_tasks(config, preparation):
@@ -51,10 +51,12 @@ class TaskRunner:
         self.cached = None
 
     def prepare(self, task):
-        from .features import prepare, save_npz
+        from .features import prepare, save_npz, training_bank
         self.cached = None
         if not self.smoke:
-            prepare(self.config, task.encoder, task.dataset, self.sources, self.hub, self.device)
+            _, manifest = prepare(self.config, task.encoder, task.dataset, self.sources, self.hub, self.device)
+            if self.config.all_train_patches:
+                training_bank(manifest, self.hub, self.config)  # one writer before parallel consumers
             return
         from .smoke import fixture
         manifest, x, y, selected = fixture(self.hub, self.config, task.encoder, task.dataset)
@@ -98,16 +100,21 @@ class TaskRunner:
             if task.method != 'dense':
                 preset = replace(config.preset(), hidden_dim=max(64, 4*config.k, max(config.inference_ks)),
                                  epochs=1, batch_size=16, k_aux=32, ot_microbatch=4) if self.smoke else None
+                source = None
+                if config.all_train_patches and not self.smoke:
+                    from .stream import ShardTraining
+                    source = ShardTraining(manifest, self.hub)
+                    print(f'[full training] {source.rows:,} patches per epoch; streamed from disk', flush=True)
                 model, record = fit(config, task.method, features, labels, manifest['identity'],
-                                    self.hub, self.device, preset=preset)
+                                    self.hub, self.device, preset=preset, training_source=source)
             grid = sorted(config.inference_ks, key=lambda k: (k != config.k, k)) if model is not None else (None,)
             for k in grid:
                 print(f'[job {task.dataset}/{task.encoder}/{task.method}] train K={task.train_k}; inference K={k}', flush=True)
                 result = evaluate(config, task.encoder, task.dataset, task.method, model, record,
                                   features, labels, selected, manifest, self.hub, self.device, inference_k=k)
-                if record is not None and config.early_stopping:
+                if record is not None:
                     result['training'] = {key: record[key] for key in (
-                        'path', 'steps', 'epochs_completed', 'max_epochs', 'stop_reason', 'convergence')
+                        'path', 'steps', 'training_patches', 'epochs_completed', 'max_epochs', 'stop_reason', 'convergence')
                         if key in record}
                 emit(result)
         finally:

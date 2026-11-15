@@ -14,6 +14,8 @@ DATASETS = {
     'voc': ('shijli/voc2012', 'fba53aa390b729cb2bb848de59e1439deea3e88f', 'segmentation'),
     'ade20k': ('zhoubolei/scene_parse_150', 'e660d866a1351c70bcf07925d2600b60bd6e3bc3', 'scene_parsing'),
 }
+DATASETS['cityscapes'] = ('local-cityscapes', 'official-fine', 'fine')
+
 METHODS = ('csr', 'csrv2', 'mpsae')
 
 
@@ -26,6 +28,8 @@ class Config:
     encoders: tuple[str, ...] | None = None
     hidden_dim: int = 8192
     image_size: int = 448
+    image_width: int | None = None
+    all_train_patches: bool = False
     train_patches: int = 262144
     support_patches: int = 65536
     epochs: int = 10
@@ -47,6 +51,10 @@ class Config:
     early_min_delta: float = 0.001
 
     def __post_init__(self):
+        if type(self.all_train_patches) is not bool:
+            raise ValueError('all_train_patches must be boolean')
+        if self.image_width is not None and (type(self.image_width) is not int or self.image_width < 112 or self.image_width % 112):
+            raise ValueError('image_width must be divisible by 14 and 16')
         if self.datasets is not None:
             if not isinstance(self.datasets, (list, tuple)) or not self.datasets or any(d not in DATASETS for d in self.datasets) or len(set(self.datasets)) != len(self.datasets):
                 raise ValueError('datasets must be distinct registered dataset names')
@@ -65,7 +73,8 @@ class Config:
                     'workers', 'shard_images', 'query_block', 'neighbors',
                     'checkpoint_every', 'log_every'):
             x = getattr(self, key)
-            if type(x) is not int or x < (0 if key in ('seed', 'workers') else 1):
+            minimum = 0 if key in ('seed', 'workers') or (key == 'train_patches' and self.all_train_patches) else 1
+            if type(x) is not int or x < minimum:
                 raise ValueError(f'invalid {key}')
         if self.hidden_dim != 8192 or self.k > self.hidden_dim:
             raise ValueError('This campaign uses 8192 latents; K must not exceed hidden_dim')
@@ -88,7 +97,7 @@ class Config:
             object.__setattr__(self, 'encoders', tuple(e for e in ENCODERS if e in self.encoders))
         if self.image_size % 112 or self.batch_size < 2:
             raise ValueError('image_size must be divisible by 14 and 16; batch_size >= 2')
-        if not self.neighbors <= self.support_patches <= self.train_patches:
+        if not self.neighbors <= self.support_patches or (not self.all_train_patches and self.support_patches > self.train_patches):
             raise ValueError('require neighbors <= support_patches <= train_patches')
         if any(not math.isfinite(v) or v <= 0 for v in (self.lr, self.temperature)):
             raise ValueError('lr and temperature must be finite and positive')
@@ -101,6 +110,10 @@ class Config:
 
     def identity(self):
         settings = asdict(self)
+        if self.image_width is None:
+            settings.pop('image_width')
+        if not self.all_train_patches:
+            settings.pop('all_train_patches')
         if self.datasets is None:
             settings.pop('datasets')
         if not self.early_stopping:
@@ -119,8 +132,12 @@ class Config:
         return {'version': VERSION, 'settings': settings}
 
     @property
+    def image_hw(self):
+        return (self.image_size, self.image_width or self.image_size)
+
+    @property
     def dataset_names(self):
-        return self.datasets or tuple(DATASETS)
+        return self.datasets or ('voc', 'ade20k')  # historical configs only
 
     @property
     def inference_ks(self):
@@ -170,6 +187,9 @@ class Config:
                 'train_ks': list(self.training_ks),
                 'inference_k': list(self.inference_ks),
                 'backbone_trainable': False, 'figures': False,
+                'training_data': 'ALL valid training patches, disk streaming' if self.all_train_patches else 'sampled bank',
+                'input_hw': list(self.image_hw),
+                'support_candidate_limit': self.train_patches if not self.all_train_patches else None,
                 'protocol': 'dataset-specific patch SAE training; Hummingbird-style retrieval',
                 'csrv2_supervision': 'dominant nonvoid training-mask class',
                 'training_preset': asdict(self.preset())}

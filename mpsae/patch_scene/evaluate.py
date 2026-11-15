@@ -22,6 +22,8 @@ def evaluate(config, encoder, dataset, method, model, fit_record, features, labe
                 'temperature': config.temperature, 'query_block': config.query_block,
                 'search': 'fp32_exact_coordinate_lookup_v1' if sparse else 'fp32_exact_gemm_v1',
                 'tie_rule': 'score_desc_position_asc', 'ignore': 255}
+    if config.all_train_patches:
+        identity['support_sampler'] = 'full-frequency-score-v1'
     relative = f'evaluations/{canonical_hash(identity)[:20]}'
     folder = hub.pull(relative)
     result = read_json(folder/'result.json')
@@ -86,6 +88,9 @@ def evaluate(config, encoder, dataset, method, model, fit_record, features, labe
               'peak_cuda_bytes': torch.cuda.max_memory_allocated(device) if str(device).startswith('cuda') else None,
               'supervision': 'training-mask labels in SAE loss' if method == 'csrv2' else 'no class targets in SAE loss',
               'confusion': matrix.tolist()}
+    if dataset == 'cityscapes':
+        from .cityscapes import CLASS_NAMES
+        result['class_names'] = list(CLASS_NAMES)
     atomic_json(folder/'result.json', result)
     hub.push(relative)
     del search

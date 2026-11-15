@@ -1,3 +1,5 @@
+Historical protocol; superseded by Cityscapes.
+
 # ADE20K SAE rerun: up to 20 epochs
 
 Use `configs/patch_scene_ade20k_20ep.yaml` with `--dataset ade20k`.

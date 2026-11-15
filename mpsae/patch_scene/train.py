@@ -14,11 +14,14 @@ from .artifacts import save_torch
 from .config import VERSION
 
 
-def fit(config, method, features, labels, feature_identity, hub, device, *, preset=None, stop_after=None):
+def fit(config, method, features, labels, feature_identity, hub, device, *, preset=None, stop_after=None, training_source=None):
     preset = preset or config.preset()
     targets, label_stats = patch_targets(labels, classes=labels.shape[1])
     ranges = batch_ranges(len(features), preset.batch_size)
+    if training_source is not None:
+        ranges = range(training_source.steps(preset.batch_size))
     total = len(ranges)*preset.epochs
+    track_epochs = config.early_stopping or training_source is not None
     identity = {'version': VERSION, 'features': feature_identity,
                 'feature_sha256': array_hash(features), 'label_sha256': array_hash(labels),
                 'method': method, 'preset': asdict(preset), 'seed': config.seed, 'k': config.k,
@@ -26,6 +29,11 @@ def fit(config, method, features, labels, feature_identity, hub, device, *, pres
                 'initialization': 'fresh SAE; never load an image-level SAE',
                 'label_policy': label_stats['label_rule'] if method == 'csrv2' else 'not used by loss',
                 'selection': 'final epoch', 'precision': 'fp32_tf32_disabled'}
+    if training_source is not None:
+        identity['full_training'] = training_source.identity
+        identity['sampling'] = 'all valid patches once per epoch; shuffle shards then shuffle patches'
+        label_stats = {'label_rule': 'dominant nonvoid class; ties choose lowest class ID',
+                       'training_rows': training_source.rows}
     if config.early_stopping:
         identity['early_stopping'] = {
             'monitor': 'sample_weighted_epoch_training_objective',
@@ -70,8 +78,8 @@ def fit(config, method, features, labels, feature_identity, hub, device, *, pres
             return model.eval().requires_grad_(False), summary
     atomic_json(folder/'config.json', {'identity': identity, 'patch_label_statistics': label_stats})
     # Keep one bank resident; no image decoder/backbone remains during SAE training.
-    x = torch.as_tensor(features, device=device)
-    y = torch.as_tensor(targets, device=device)
+    x = torch.as_tensor(features, device=device) if training_source is None else None
+    y = torch.as_tensor(targets, device=device) if training_source is None else None
     started = time.perf_counter()
 
     def checkpoint(remote=True):
@@ -88,15 +96,24 @@ def fit(config, method, features, labels, feature_identity, hub, device, *, pres
         for epoch in range(step//len(ranges), preset.epochs):
             if tracker['stopped']:
                 break
-            order = np.random.default_rng([config.seed, epoch]).permutation(len(features))
-            for b, (start, stop) in enumerate(ranges):
-                if epoch*len(ranges)+b < step:
-                    continue
-                idx = torch.as_tensor(order[start:stop], device=device)
+            first_batch = max(0, step-epoch*len(ranges))
+            if training_source is not None:
+                batches = training_source.batches(config.seed, epoch, preset.batch_size, first_batch, device)
+            else:
+                order = np.random.default_rng([config.seed, epoch]).permutation(len(features))
+                def resident_batches():
+                    for b, (start, stop) in enumerate(ranges):
+                        if b < first_batch:
+                            continue
+                        idx = torch.as_tensor(order[start:stop], device=device)
+                        yield b, x[idx], y[idx]
+                batches = resident_batches()
+            for b, batch_x, batch_y in batches:
+                batch_rows = len(batch_x)
                 optimizer.zero_grad(set_to_none=True)
                 collect = step == 0 or (step+1) % config.log_every == 0 or step+1 == total
-                out = methods.compute_step(method, model, x[idx], k=config.k, preset=preset,
-                    step=step, total_steps=total, labels=y[idx] if method == 'csrv2' else None,
+                out = methods.compute_step(method, model, batch_x, k=config.k, preset=preset,
+                    step=step, total_steps=total, labels=batch_y if method == 'csrv2' else None,
                     collect_metrics=collect)
                 if not torch.isfinite(out.loss):
                     raise FloatingPointError('nonfinite training loss')
@@ -104,19 +121,19 @@ def fit(config, method, features, labels, feature_identity, hub, device, *, pres
                 if any(p.grad is not None and not torch.isfinite(p.grad).all() for p in model.parameters()):
                     raise FloatingPointError('nonfinite gradient')
                 optimizer.step()
-                if config.early_stopping:
-                    tracker['loss_sum'] += float(out.loss.detach()) * (stop-start)
-                    tracker['samples'] += stop-start
+                if track_epochs:
+                    tracker['loss_sum'] += float(out.loss.detach()) * batch_rows
+                    tracker['samples'] += batch_rows
                 step += 1
                 if collect:
                     print(f'[fit {method}] {step}/{total} K={out.training_k} loss={out.loss.item():.5f}', flush=True)
                     atomic_json(folder/'progress.json', {'step': step, 'total': total, 'loss': out.loss.item(),
                         'training_k': out.training_k, 'metrics': out.metrics})
-                if config.early_stopping and b+1 == len(ranges):
+                if track_epochs and b+1 == len(ranges):
                     mean_loss = tracker['loss_sum']/tracker['samples']
                     # CSRv2 changes its objective's K during the first 70% of training.
                     first_k = methods.plan_budget(method, config.k, preset, step=epoch*len(ranges), total_steps=total)
-                    eligible = epoch+1 >= config.early_min_epochs and first_k == config.k
+                    eligible = config.early_stopping and epoch+1 >= config.early_min_epochs and first_k == config.k
                     update_plateau(tracker, mean_loss, eligible, config.early_patience, config.early_min_delta)
                     tracker['history'].append({'epoch': epoch+1, 'mean_loss': mean_loss,
                         'eligible': eligible, 'bad_epochs': tracker['bad_epochs'],
@@ -134,8 +151,10 @@ def fit(config, method, features, labels, feature_identity, hub, device, *, pres
         checkpoint()
     summary = {'complete': True, 'identity': identity, 'path': relative,
                'checkpoint_sha256': sha256_file(path), 'steps': step,
-               'train_seconds': elapsed+time.perf_counter()-started}
-    if config.early_stopping:
+               'train_seconds': elapsed+time.perf_counter()-started,
+               'training_patches': training_source.rows if training_source is not None else len(features),
+               'epochs_completed': step//len(ranges), 'max_epochs': preset.epochs}
+    if track_epochs:
         summary.update(epochs_completed=step//len(ranges), max_epochs=preset.epochs,
                        stop_reason='training_loss_plateau' if tracker['stopped'] else 'max_epochs',
                        convergence=tracker)

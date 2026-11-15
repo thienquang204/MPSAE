@@ -2,6 +2,7 @@
 import argparse
 from pathlib import Path
 import json
+import os
 
 from ..io import atomic_json, canonical_hash, exclusive_lock, read_json
 from .config import load, ENCODERS, DATASETS, METHODS
@@ -25,6 +26,7 @@ def main():
     parser.add_argument('--workspace', default='work/patch-scene-v2')
     parser.add_argument('--encoder', choices=(*ENCODERS, 'all'), default='all')
     parser.add_argument('--dataset', choices=(*DATASETS, 'all'), default='all')
+    parser.add_argument('--cityscapes-root', help='Local official Cityscapes ZIPs or extracted folders')
     parser.add_argument('--device', default='cuda:0')
     parser.add_argument('--devices', nargs='+', help='Independent workers, e.g. cuda:0 cuda:1; overrides --device')
     parser.add_argument('--cpu-threads', type=int, default=2, help='CPU threads per parallel GPU worker')
@@ -32,6 +34,8 @@ def main():
     parser.add_argument('--publish', action='store_true', help='Back up shards, fits, evaluation progress and tables')
     args = parser.parse_args()
     config = load(args.config)
+    if args.cityscapes_root:
+        os.environ['MPSAE_CITYSCAPES_ROOT'] = str(Path(args.cityscapes_root).resolve())
     if args.cpu_threads < 1:
         parser.error('--cpu-threads must be positive')
     if args.command == 'plan':
