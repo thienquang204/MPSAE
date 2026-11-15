@@ -22,7 +22,13 @@ This is whole-image resizing preserving 4:3, not native-resolution patch trainin
 Frozen SigLIP 2 Base/16 and DINOv2 Base/14, independent CSR/CSRv2/MPSAE fitting at
 K=3,12,48; **each checkpoint is evaluated only at its own training K**.
 18 fits + 18 sparse evaluations + 2 dense evaluations (20 evaluations total).
-10 epochs, batch 1024, Adam LR 4e-5; original method losses are unchanged.
+Up to 20 epochs, batch 1024, Adam LR 4e-5; original method losses are unchanged.
+Early stopping monitors sample-weighted epoch training loss, starting at epoch 15
+and only after a full epoch at target K (including CSRv2 annealing). Patience is
+3 eligible epochs without a relative improvement greater than 0.1%. Evaluate
+the last completed epoch, not a test-selected checkpoint. The new training
+settings create separate fits; old 10-epoch fits are not resumed or overwritten.
+Existing compatible extracted features are reused.
 CSRv2 uses training-mask classes in its loss; CSR/MPSAE do not. All methods use
 the same train-only soft-label retrieval support selection (65536 patches per
 encoder), 30 neighbors, temperature 0.02 and native-resolution test masks.
@@ -113,7 +119,10 @@ plan = json.loads(subprocess.check_output(BASE+['plan','--config',str(CONFIG)], 
 assert set(plan['datasets']) == {'nyuv2'}
 assert set(plan['encoders']) == {'siglip2','dinov2'}
 assert plan['settings']['all_train_patches'] is True
-assert plan['settings']['epochs'] == 10 and not plan['settings'].get('early_stopping', False)
+assert plan['settings']['epochs'] == 20 and plan['settings']['early_stopping']
+assert plan['settings']['early_min_epochs'] == 15
+assert plan['settings']['early_patience'] == 3
+assert plan['settings']['early_min_delta'] == 0.001
 assert plan['input_hw'] == [336,448]
 assert plan['evaluation_mode'] == 'matched'
 assert plan['evaluation_pairs'] == [[3,3],[12,12],[48,48]]

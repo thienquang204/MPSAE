@@ -33,8 +33,9 @@ The current **Kaggle segmentation campaign** uses **NYUv2-40, RGB only**:
 795 official training images and 654 official test images. Frozen SigLIP 2 and
 DINOv2; CSR/CSRv2/MPSAE each train separately at K=3/12/48 and are evaluated
 **only at their own training K**: **18 fits and 20 evaluations** including dense
-baselines. Every valid training patch at **336x448** is streamed for 10 epochs,
-batch 1024, Adam LR 4e-5. No test-based model selection. Cityscapes/ADE20K/VOC are
+baselines. Every valid training patch at **336x448** is streamed for up to 20 epochs,
+batch 1024, Adam LR 4e-5. Training-loss early stopping starts at epoch 15
+after a full epoch at target K, with patience 3 and relative min-delta 0.001. No test-based model selection. Cityscapes/ADE20K/VOC are
 not selected; their historical configs/results are retained.
 
 ```bash

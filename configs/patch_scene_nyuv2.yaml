@@ -13,10 +13,14 @@ all_train_patches: true
 train_patches: 0
 support_patches: 65536
 hidden_dim: 8192
-epochs: 10
+epochs: 20
 batch_size: 1024
 lr: 0.00004
-early_stopping: false
+# Monitor training loss only, after a full epoch at target K.
+early_stopping: true
+early_min_epochs: 15
+early_patience: 3
+early_min_delta: 0.001
 extraction_batch: 4
 workers: 2
 shard_images: 32

@@ -67,7 +67,9 @@ def test_matched_grid_and_paper_export(tmp_path):
     plan = cfg.plan()
     assert (plan['sae_fits'],plan['total_evaluations'],plan['cross_k_evaluations']) == (18,20,0)
     assert plan['evaluation_pairs'] == [[3,3],[12,12],[48,48]]
-    assert cfg.all_train_patches and cfg.image_hw == (336,448) and cfg.epochs == 10
+    assert cfg.all_train_patches and cfg.image_hw == (336,448) and cfg.epochs == 20
+    assert cfg.early_stopping and cfg.early_min_epochs == 15
+    assert cfg.early_patience == 3 and cfg.early_min_delta == .001
     for k in cfg.training_ks:
         assert cfg.for_training(k).inference_ks == (k,)
     with pytest.raises(ValueError):
