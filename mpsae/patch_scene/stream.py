@@ -3,7 +3,7 @@ import numpy as np
 import torch
 
 from ..io import read_json, canonical_hash, atomic_json
-from ..scene.adapt import batch_ranges, patch_targets
+from ..segmentation.training import batch_ranges, patch_targets
 
 
 class ShardTraining:

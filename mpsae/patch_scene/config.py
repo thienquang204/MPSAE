@@ -17,6 +17,10 @@ DATASETS = {
 DATASETS['cityscapes'] = ('local-cityscapes', 'official-fine', 'fine')
 DATASETS['nyuv2'] = ('local-nyuv2', 'official-labeled', 'nyu40')
 
+# Historical registry entries remain for reading old receipts, not launching jobs.
+SUPPORTED_DATASETS = ('voc', 'nyuv2')
+SUPPORTED_ENCODERS = ('siglip2', 'dinov2')
+
 METHODS = ('csr', 'csrv2', 'mpsae')
 
 
@@ -214,6 +218,34 @@ class Config:
 
 
 def load(path):
+    """Load a canonical config or a simple relative alias, with cycle detection."""
     import yaml
-    with open(path, encoding='utf-8') as handle:
-        return Config(**(yaml.safe_load(handle) or {}))
+    from pathlib import Path
+    seen = set()
+    def resolve(current):
+        current = Path(current).resolve()
+        if current in seen:
+            raise ValueError('configuration alias cycle')
+        seen.add(current)
+        with current.open(encoding='utf-8') as handle:
+            values = yaml.safe_load(handle) or {}
+        if not isinstance(values, dict):
+            raise ValueError('configuration must be a mapping')
+        parent = values.pop('extends', None)
+        if parent is not None:
+            if not isinstance(parent, str) or Path(parent).is_absolute():
+                raise ValueError('extends must be a relative config path')
+            if values:
+                raise ValueError('config aliases cannot override settings; edit the canonical config')
+            return resolve(current.parent/parent)
+        return values
+    return Config(**resolve(path))
+
+
+def require_supported(config):
+    """Never silently launch retired datasets/encoders from historical configs."""
+    if (any(d not in SUPPORTED_DATASETS for d in config.dataset_names)
+            or any(e not in SUPPORTED_ENCODERS for e in config.encoder_names)):
+        raise ValueError('Supported segmentation: VOC or NYUv2 with SigLIP2/DINOv2. '
+                         'Use configs/patch_scene_voc.yaml or configs/patch_scene_nyuv2.yaml; '
+                         'archived configurations are retained only for provenance/export.')

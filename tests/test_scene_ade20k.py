@@ -24,8 +24,8 @@ def ade_config(**kw):
 
 def test_plan_keeps_budget_and_dataset_separation():
     root = Path(__file__).resolve().parents[1]
-    ade = load_config(root/'configs/scene_ade20k.yaml')
-    voc = load_config(root/'configs/scene_voc.yaml')
+    ade = load_config(root/'configs/archive/scene_ade20k.yaml')
+    voc = load_config(root/'configs/archive/scene_voc.yaml')
     assert ade.plan()['training_runs'] == 12 and ade.plan()['evaluations'] == 160
     for a, v in zip(ade.groups, voc.groups):
         p = a.plan()

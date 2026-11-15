@@ -9,7 +9,7 @@ from .. import methods
 from ..io import atomic_json, canonical_hash, read_json, append_jsonl, array_hash, sha256_file
 from ..model import SparseAutoencoder
 from ..evaluate.knn import fp32_matmul
-from ..scene.adapt import batch_ranges, patch_targets
+from ..segmentation.training import batch_ranges, patch_targets
 from .artifacts import save_torch
 from .config import VERSION
 

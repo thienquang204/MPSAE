@@ -121,7 +121,7 @@ def test_scripts_parse_and_help_without_install():
 
 
 @pytest.mark.skipif(not HAS_BASH, reason='Bash unavailable')
-def test_launcher_uses_restored_bootstrap_and_preserves_spaces(tmp_path):
+def test_retired_launcher_starts_no_jobs(tmp_path):
     (tmp_path / 'scene_only.sh').write_text((ROOT / 'scene_only.sh').read_text(encoding='utf-8'), encoding='utf-8')
     venv = tmp_path / 'eval env' / 'bin'
     venv.mkdir(parents=True)
@@ -130,9 +130,9 @@ def test_launcher_uses_restored_bootstrap_and_preserves_spaces(tmp_path):
     python.chmod(0o755)
     result = subprocess.run([BASH, 'scene_only.sh', '--venv', 'eval env', '--workspace', 'work with spaces'],
                              cwd=tmp_path, capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr
-    assert '<bootstrap>' in result.stdout and '<work with spaces>' in result.stdout
-    assert 'train' not in result.stdout
+    assert result.returncode == 2
+    assert 'retired' in result.stderr and 'No jobs were started' in result.stderr
+    assert '<bootstrap>' not in result.stdout
 
 
 @pytest.mark.skipif(not HAS_BASH, reason='Bash unavailable')
@@ -140,7 +140,7 @@ def test_launcher_stops_when_setup_fails(tmp_path):
     (tmp_path / 'scene_only.sh').write_text((ROOT / 'scene_only.sh').read_text(encoding='utf-8'), encoding='utf-8')
     (tmp_path / 'setup_scene_server.sh').write_text('#!/usr/bin/env bash\nexit 13\n', encoding='utf-8')
     result = subprocess.run([BASH, 'scene_only.sh', '--setup'], cwd=tmp_path, capture_output=True, text=True)
-    assert result.returncode == 13
+    assert result.returncode == 2  # retired launcher must not even invoke installation
     assert 'bootstrap' not in result.stdout
 
 

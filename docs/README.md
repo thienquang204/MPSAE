@@ -14,6 +14,16 @@ three commands that run everything. These pages are the detail behind it.
 | [`performance.md`](performance.md) | you need the optimized trainer, bounded retrieval timing or GPU profiling commands |
 | [`notes/mpsaev2_legacy_A.md`](notes/mpsaev2_legacy_A.md) | you need the historical annealing variants A and B, before fixed-K OT plus contrastive MPSAEv2 |
 
+## Segmentation entry points
+
+- [Repository map](repository_layout.md): active code, compatibility code and archives.
+- [One-cell Kaggle guide](patch_scene_kaggle.md): VOC or NYUv2, automatic HF downloads.
+- [VOC](voc_kaggle.md) and [NYUv2](nyuv2_kaggle.md): canonical config pointers.
+
+Only the SigLIP2/DINOv2 patch-SAE workflows are supported for new segmentation runs.
+Retired dataset/adaptation recipes are in `archive/`; retrieval instructions above
+continue to describe the existing image-level pipeline.
+
 ## The two rules everything follows
 
 **Settings follow the published papers. Algorithms follow the released code.**
@@ -28,8 +38,8 @@ released recipe with the reason it was forced. Every archive carries at least
 the label-key rename; the timm recipe adds two or three more and the MRL recipe
 two. They are all listed in [`data.md`](data.md).
 
-## Status
+## Validation scope
 
-The rewrite has not executed on a GPU yet. Tests that need torch skip on a
-machine without it, and the OT golden fixtures still need a one-off capture
-(`capture_golden.py`). The first real `--smoke` run is the actual test.
+Regression and synthetic end-to-end tests check the code paths. A passing test
+suite is not a reproduction claim or a measured GPU runtime/memory guarantee.
+Real experiment evidence belongs to the saved run receipts and result tables.

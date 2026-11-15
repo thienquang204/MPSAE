@@ -36,7 +36,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=('plan', 'restore', 'prepare', 'run', 'plot', 'publish',
                                             'bootstrap', 'doctor'))
-    parser.add_argument('--config', default='configs/scene_voc.yaml')
+    parser.add_argument('--config', default='configs/archive/scene_voc.yaml')
     parser.add_argument('--workspace', default='work/scene-v1')
     parser.add_argument('--source-root', default='work/direct-v1')
     parser.add_argument('--device', default='cuda:0')
@@ -49,6 +49,10 @@ def main():
     parser.add_argument('--publish', action='store_true', help='Back up completed SAE adaptations and reports to --repo')
     parser.add_argument('--expected-cuda', help='Doctor: require this torch CUDA runtime, e.g. 12.8')
     args = parser.parse_args()
+    if args.command not in ('plot', 'publish', 'doctor'):
+        parser.error('The pooled-checkpoint segmentation workflow is retired. '
+            'Use python -m mpsae.patch_scene with configs/patch_scene_voc.yaml or '
+            'configs/patch_scene_nyuv2.yaml. Historical plot/publish remain available.')
     if args.command not in ('plan', 'doctor'):
         # Must happen before importing huggingface_hub (it reads environment on import).
         from ..cli import load_dotenv

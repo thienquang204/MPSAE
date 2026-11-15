@@ -9,9 +9,9 @@ import numpy as np
 import torch
 
 from ..io import atomic_json, canonical_hash, read_json
-from ..scene.core import label_distributions, sample_patches
-from ..scene.data import ImageRows, collate
-from ..scene.datasets import dataset_spec, load_splits, row_ids
+from ..segmentation.core import label_distributions, sample_patches
+from ..segmentation.data import ImageRows, collate
+from ..segmentation.datasets import dataset_spec, load_splits, row_ids
 from .config import DATASETS, ENCODERS, VERSION
 from .encoders import load_encoder, patch_tokens
 

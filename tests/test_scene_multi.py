@@ -9,7 +9,7 @@ from mpsae.config import BACKBONES
 
 
 def test_expanded_plan():
-    config=load_config(Path(__file__).resolve().parents[1]/'configs/scene_voc.yaml')
+    config=load_config(Path(__file__).resolve().parents[1]/'configs/archive/scene_voc.yaml')
     assert isinstance(config, SceneSuite)
     assert config.plan()['evaluations']==160
     assert config.plan()['training_runs']==12
@@ -76,7 +76,7 @@ def test_multi_restore_requests_all_backbone_sidecars(tmp_path,monkeypatch):
     import huggingface_hub
     import mpsae.scene.run as runner
     from mpsae.scene.__main__ import restore
-    cfg=load_config(Path(__file__).resolve().parents[1]/'configs/scene_voc.yaml')
+    cfg=load_config(Path(__file__).resolve().parents[1]/'configs/archive/scene_voc.yaml')
     names=[f'direct-v1/runs/{c.slug}/{f}' for c in cfg.cells()
            for f in ('checkpoint.pt','summary.json','config.json')]
     monkeypatch.setattr(huggingface_hub,'HfApi',lambda:SimpleNamespace(dataset_info=lambda *a,**k:

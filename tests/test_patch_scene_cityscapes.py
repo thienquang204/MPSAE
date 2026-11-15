@@ -98,7 +98,7 @@ def test_city_zip_split_mapping_and_rectangle(tmp_path):
 
 def test_city_config_and_tables(tmp_path):
     from mpsae.patch_scene.report import write_tables, expected_keys, export_results
-    cfg = load(Path(__file__).resolve().parents[1]/'configs/patch_scene_cityscapes.yaml')
+    cfg = load(Path(__file__).resolve().parents[1]/'configs/archive/patch_scene_cityscapes.yaml')
     assert cfg.all_train_patches and cfg.image_hw == (448,896)
     assert cfg.dataset_names == ('cityscapes',) and cfg.epochs == 10
     assert cfg.plan()['sae_fits'] == 18 and len(expected_keys(cfg)) == 56

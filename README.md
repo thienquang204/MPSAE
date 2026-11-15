@@ -29,58 +29,25 @@ ConvNeXt-Tiny and DINOv2-S/14, with selective linear probing. All downstream
 experiments (including SOP) and repeated retrieval timing are disabled for now.
 `.env` holds credentials; `configs/thesis.yaml` selects the experiments.
 
-The current **Kaggle segmentation campaign** uses **NYUv2-40, RGB only**:
-795 official training images and 654 official test images. Frozen SigLIP 2 and
-DINOv2; CSR/CSRv2/MPSAE each train separately at K=3/12/48 and are evaluated
-**only at their own training K**: **18 fits and 20 evaluations** including dense
-baselines. Every valid training patch at **336x448** is streamed for up to 20 epochs,
-batch 1024, Adam LR 4e-5. Training-loss early stopping starts at epoch 15
-after a full epoch at target K, with patience 3 and relative min-delta 0.001. No test-based model selection. Cityscapes/ADE20K/VOC are
-not selected; their historical configs/results are retained.
+The supported **segmentation experiments are VOC and NYUv2**, both using frozen
+SigLIP2/DINOv2 with fresh CSR/CSRv2/MPSAE patch SAEs. The canonical configs are:
 
-```bash
-python -m mpsae.patch_scene.prepare_nyuv2 --source /kaggle/input --destination /kaggle/working/nyuv2/dataset
-python -m mpsae.patch_scene run --config configs/patch_scene_nyuv2.yaml \
-  --workspace /kaggle/working/nyuv2 --nyuv2-root /kaggle/working/nyuv2/dataset \
-  --devices cuda:0 cuda:1
-```
+- `configs/patch_scene_voc.yaml`: preserved VOC settings, 10 epochs, train and
+  inference K=3/12/48, 18 fits and 56 evaluations.
+- `configs/patch_scene_nyuv2.yaml`: all valid train patches at 336x448, up to 20
+  epochs with training-loss early stopping, matched K=3/12/48, 18 fits and 20 evaluations.
 
-See [seven copyable Kaggle cells](docs/nyuv2_kaggle.md) or
-`notebooks/patch_scene_kaggle.ipynb`. Attach `nyu_depth_v2_labeled.mat` (~2.8 GB);
-the two small metadata files are fetched automatically and hash-checked. No
-Hugging Face token or result upload is required. One mIoU comparison table,
-supplementary pixel accuracy, CSV/JSON and LaTeX are exported in a small results
-ZIP. No cross-K inference runs or plots. Feature extraction is reused across
-fits; the shared 65536-patch retrieval bank is separate from full SAE training.
+Use the [one-cell Kaggle guide](docs/patch_scene_kaggle.md) or
+`notebooks/patch_scene_kaggle.ipynb`. Choose `DATASET="voc"` or `"nyuv2"`; datasets
+download automatically from Hugging Face. No manual upload or token is required.
+`scripts/kaggle_segmentation.py` owns the setup/run/export flow; the YAMLs own the
+parameters. `patch_scene_kaggle.yaml` is only an alias to the NYUv2 config.
 
-The earlier **patch SAE fine-tuning and segmentation** workflow remains available through
-`python -m mpsae.scene plan` and `python -m mpsae.scene run`. It loads existing
-ResNet-50/ViT/DINOv2/ConvNeXt SAEs, uses Hugging Face PASCAL VOC masks, and compares dense and sparse
-patch retrieval before and after SAE-only fine-tuning. The backbone stays frozen;
-cached VOC training patches supply five epochs at batch 1024 and LR 1e-5.
-See [the protocol and commands](docs/scene_evaluation.md)
-and `configs/scene_voc.yaml`. This is an adapted Hummingbird-style decoder,
-testing frozen transfer and downstream adaptation; it is not part of the main campaign.
-
-On a **fresh Linux GPU server**, use the separate evaluation environment:
-
-```bash
-bash scene_only.sh --setup-only
-.venv-scene/bin/hf auth login
-bash scene_only.sh --workspace /workspace/scene-v1 --publish
-```
-
-The default adds 12 SAE adaptations and 78 fine-tuned evaluation points, alongside
-78 frozen points and four dense baselines. Compatible frozen results and feature caches
-are reused. It restores source checkpoints and VOC automatically. Rerun the last
-command to resume; `--publish` backs up each completed adapted checkpoint before
-evaluation, then the CSV/JSON and PDF/PNG figures. The original frozen configuration
-is saved in `configs/archive/scene_voc_frozen_multi.yaml`.
-No old server files or ImageNet download are required. See the scene guide for
-driver/Python requirements and alternate repository/revision options.
-
-ADE20K experiments are retired from the active workflow. Their historical
-configs are under `configs/archive/`; existing results are not deleted.
+Cityscapes, ADE20K, CLIP segmentation and the older pooled-checkpoint adaptation
+campaign are retired from supported launch commands. Historical recipes and
+instructions are under `configs/archive/` and `docs/archive/`; saved results remain.
+See [the repository map](docs/repository_layout.md) for active and historical code.
+The ImageNet/retrieval pipeline below is unchanged.
 
 ```bash
 cp .env.example .env                       # if .env does not exist yet

@@ -5,7 +5,7 @@ import json
 import os
 
 from ..io import atomic_json, canonical_hash, exclusive_lock, read_json
-from .config import load, ENCODERS, DATASETS, METHODS
+from .config import load, ENCODERS, DATASETS, METHODS, SUPPORTED_DATASETS, SUPPORTED_ENCODERS, require_supported
 from .artifacts import Hub
 
 
@@ -22,11 +22,10 @@ def run_cell(config, encoder, dataset, sources, hub, device, campaign, *, smoke=
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=('plan', 'run', 'export', 'restore-table', 'smoke', 'doctor'))
-    parser.add_argument('--config', default='configs/patch_scene_kaggle.yaml')
+    parser.add_argument('--config', default='configs/patch_scene_nyuv2.yaml')
     parser.add_argument('--workspace', default='work/patch-scene-v2')
-    parser.add_argument('--encoder', choices=(*ENCODERS, 'all'), default='all')
-    parser.add_argument('--dataset', choices=(*DATASETS, 'all'), default='all')
-    parser.add_argument('--cityscapes-root', help='Local official Cityscapes ZIPs or extracted folders')
+    parser.add_argument('--encoder', choices=(*SUPPORTED_ENCODERS, 'all'), default='all')
+    parser.add_argument('--dataset', choices=(*SUPPORTED_DATASETS, 'all'), default='all')
     parser.add_argument('--nyuv2-root', help='Folder with labeled NYUv2 MAT, splits.mat and classMapping40.mat')
     parser.add_argument('--device', default='cuda:0')
     parser.add_argument('--devices', nargs='+', help='Independent workers, e.g. cuda:0 cuda:1; overrides --device')
@@ -35,8 +34,11 @@ def main():
     parser.add_argument('--publish', action='store_true', help='Back up shards, fits, evaluation progress and tables')
     args = parser.parse_args()
     config = load(args.config)
-    if args.cityscapes_root:
-        os.environ['MPSAE_CITYSCAPES_ROOT'] = str(Path(args.cityscapes_root).resolve())
+    if args.command in ('run', 'smoke', 'plan'):
+        try:
+            require_supported(config)
+        except ValueError as error:
+            parser.error(str(error))
     if args.nyuv2_root:
         os.environ['MPSAE_NYUV2_ROOT'] = str(Path(args.nyuv2_root).resolve())
     if args.cpu_threads < 1:

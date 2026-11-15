@@ -182,13 +182,17 @@ def test_kaggle_notebook_has_no_token_or_publish_requirement():
     cells = json.loads(notebook.read_text(encoding='utf-8'))['cells']
     code = '\n'.join(''.join(c['source']) for c in cells if c['cell_type'] == 'code')
     ast.parse(code)
+    assert 'runpy.run_path' in code and 'kaggle_segmentation.py' in code
+    launcher = notebook.parents[1]/'scripts/kaggle_segmentation.py'
+    code = launcher.read_text(encoding='utf-8')
+    ast.parse(code)
     assert 'UserSecretsClient' not in code and 'kaggle_secrets' not in code
     assert 'HF_TOKEN' not in code and '--publish' not in code and '--repo' not in code
     assert 'patch-scene-results.zip' in code and 'finally:' in code
-    assert 'patch_scene_nyuv2.yaml' in code and '--nyuv2-root' in code
-    assert '[[3,3],[12,12],[48,48]]' in code and '--devices' in code
-    assert 'range(min(2,count))' in code and 'getpass' not in code
-    assert 'prepare_nyuv2' in code and 'all_train_patches' in code
+    assert 'configs/patch_scene_{dataset}.yaml' in code and '--nyuv2-root' in code
+    assert '--devices' in code and 'range(min(2, count))' in code
+    assert 'prepare_nyuv2' in code and '--from-hf' in code
+    assert 'epoch' not in code  # training settings come only from the canonical config
 
 
 def test_hub_restores_hashed_bundle(monkeypatch, tmp_path):

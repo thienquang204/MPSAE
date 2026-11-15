@@ -8,6 +8,22 @@ import urllib.request
 from ..io import sha256_file
 from .nyuv2 import METADATA_REVISION, METADATA_SHA256, load_local
 
+HF_REPO = 'andrew-healey/nyuv2'
+HF_REVISION = '742f4d8a35f024263c6a9f7f316954b06ec5a817'
+LABELED_SHA256 = '2d724b0c0ab358aa1ce5df855e5bd14a2279ab7202efe22f32a30d612dcb86aa'
+
+
+def download_labeled(destination):
+    """Pinned public mirror; keep the resumable download local to the workspace."""
+    from huggingface_hub import hf_hub_download
+    path = Path(hf_hub_download(repo_id=HF_REPO, repo_type='model',
+        filename='nyu_depth_v2_labeled.mat', revision=HF_REVISION,
+        local_dir=str(destination), token=False))
+    print('Verifying NYUv2 labeled MAT checksum...', flush=True)
+    if sha256_file(path) != LABELED_SHA256:
+        raise ValueError('NYUv2 labeled MAT checksum mismatch')
+    return path
+
 
 def fetch_metadata(name, destination):
     destination = Path(destination)
@@ -58,7 +74,10 @@ def prepare(source, destination):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--source', required=True, help='Attached dataset folder or labeled MAT file')
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument('--source', help='Attached dataset folder or labeled MAT file')
+    source.add_argument('--from-hf', action='store_true', help='Download the pinned public labeled MAT; no token needed')
     parser.add_argument('--destination', required=True, help='Writable small metadata/link directory')
     args = parser.parse_args()
-    prepare(args.source, args.destination)
+    source = download_labeled(Path(args.destination).parent/'hf_dataset') if args.from_hf else args.source
+    prepare(source, args.destination)

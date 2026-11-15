@@ -159,7 +159,7 @@ def test_frozen_config_identity_preserved():
     old = load_config(root/'configs/archive/scene_voc_frozen_multi.yaml')
     assert old.plan()['training_runs'] == 0 and old.plan()['evaluations'] == 82
     assert 'adaptation' not in old.groups[0].plan()['config']
-    current = load_config(root/'configs/scene_voc.yaml')
+    current = load_config(root/'configs/archive/scene_voc.yaml')
     assert current.plan()['training_runs'] == 12 and current.plan()['evaluations'] == 160
     assert current.groups[0].adaptation.lr == 1e-5
 

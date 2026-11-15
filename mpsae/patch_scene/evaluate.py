@@ -3,7 +3,7 @@ import numpy as np
 import torch
 
 from ..io import atomic_json, canonical_hash, read_json, array_hash
-from ..scene.core import confusion, metrics
+from ..segmentation.core import confusion, metrics
 from .features import queries
 from .retrieval import Search, codes
 from .config import VERSION
