@@ -38,7 +38,20 @@ def run(command, cwd=None):
         process.stdout.close()
 
 
-def main(dataset='nyuv2', encoders=None):
+def copy_current_results(archive, destination, campaign):
+    """Never relabel an earlier campaign's ZIP after a failed new run."""
+    if not archive.exists():
+        return False
+    with ZipFile(archive) as bundle:
+        if 'config.json' not in bundle.namelist():
+            return False
+        if json.loads(bundle.read('config.json')).get('campaign') != campaign:
+            return False
+    shutil.copy2(archive, destination)
+    return True
+
+
+def main(dataset='nyuv2', encoders=None, methods=None, include_dense=True, mmpot_weight=None):
     if encoders is not None:
         encoders = list(encoders)
         if not encoders or len(set(encoders)) != len(encoders) or any(e not in ('siglip2', 'dinov2') for e in encoders):
@@ -73,11 +86,15 @@ def main(dataset='nyuv2', encoders=None):
     base = [python, '-u', '-m', 'mpsae.patch_scene']
     for device in devices:
         run(base+['doctor', '--device', device], cwd=repo)
-    if encoders is not None:
-        selected_config = workspace/('config-' + '-'.join(encoders) + '.yaml')
+    if encoders is not None or methods is not None or not include_dense or mmpot_weight is not None:
+        selected_config = workspace/'config-kaggle.yaml'
+        overrides = {'include_dense': include_dense}
+        if encoders is not None: overrides['encoders'] = encoders
+        if methods is not None: overrides['methods'] = list(methods)
+        if mmpot_weight is not None: overrides['mpsae_ot_weight'] = mmpot_weight
         run([python, '-c',
-             'import sys,yaml; from pathlib import Path; c=yaml.safe_load(Path(sys.argv[1]).read_text()); c["encoders"]=sys.argv[3:]; Path(sys.argv[2]).write_text(yaml.safe_dump(c, sort_keys=False))',
-             config, selected_config, *encoders], cwd=repo)
+             'import sys,yaml,json; from pathlib import Path; c=yaml.safe_load(Path(sys.argv[1]).read_text()); c.update(json.loads(sys.argv[3])); Path(sys.argv[2]).write_text(yaml.safe_dump(c, sort_keys=False))',
+             config, selected_config, json.dumps(overrides)], cwd=repo)
         config = selected_config
     plan = json.loads(subprocess.check_output(base+['plan', '--config', str(config)], cwd=repo, text=True))
     assert set(plan['datasets']) == {dataset}
@@ -97,17 +114,19 @@ def main(dataset='nyuv2', encoders=None):
           'support_patches=', plan['settings']['support_patches'], flush=True)
     # VOC is fetched automatically from its pinned HF dataset by the feature loader.
     suffix = '_' + '_'.join(encoders) if encoders else ''
+    if methods is not None: suffix += '_' + '_'.join(methods)
+    if mmpot_weight is not None: suffix += '_ot' + str(mmpot_weight).replace('.', 'p')
     result_zip = working/f'{dataset.upper()}{suffix}_results.zip'
     try:
         run(base+['run', '--config', str(config), '--workspace', str(workspace),
             '--dataset', dataset, '--devices', *devices, '--cpu-threads', '2', *extra], cwd=repo)
     finally:
         archive = workspace/'patch-scene-results.zip'
-        if archive.exists():
-            shutil.copy2(archive, result_zip)
+        if copy_current_results(archive, result_zip, plan['campaign']):
             display(FileLink(result_zip.name))
     run(base+['export', '--config', str(config), '--workspace', str(workspace)], cwd=repo)
-    shutil.copy2(workspace/'patch-scene-results.zip', result_zip)
+    if not copy_current_results(workspace/'patch-scene-results.zip', result_zip, plan['campaign']):
+        raise RuntimeError('Results ZIP does not belong to the selected campaign')
     with ZipFile(result_zip) as archive:
         receipt = json.loads(archive.read('results.json'))
         comparison = pd.read_csv(archive.open('comparisons.csv'))
@@ -115,11 +134,15 @@ def main(dataset='nyuv2', encoders=None):
     print(f"Completed: {receipt['completed']}/{receipt['expected']}; complete={receipt['complete']}")
     # Main comparison is matched K for both datasets. VOC cross-K rows stay in CSV/ZIP.
     matched = comparison[comparison['train_k'] == comparison['inference_k']]
-    display(matched[['encoder', 'train_k', 'dense_miou_percent', 'csr_miou_percent',
-                     'csrv2_miou_percent', 'mpsae_miou_percent']].round(2))
+    columns = ['encoder', 'train_k']
+    if include_dense: columns.append('dense_miou_percent')
+    columns.extend(m + '_miou_percent' for m in (methods if methods is not None else ['csr', 'csrv2', 'mpsae']))
+    display(matched[columns].round(2))
     display(FileLink(result_zip.name))
     print('Results ZIP excludes checkpoints/caches. Save notebook outputs to retain workspace:', workspace)
 
 
 if __name__ == '__main__':
-    main(globals().get('DATASET', 'nyuv2'), globals().get('ENCODERS'))
+    main(globals().get('DATASET', 'nyuv2'), globals().get('ENCODERS'),
+         globals().get('METHODS'), globals().get('INCLUDE_DENSE', True),
+         globals().get('MMPOT_WEIGHT'))

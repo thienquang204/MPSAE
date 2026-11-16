@@ -115,3 +115,27 @@ The ZIP includes tables and experiment settings, not model weights/feature cache
 Real Cityscapes GPU runtime has not been measured. All-patch training is larger
 than NYUv2; do not assume completion within one Kaggle session. Resume using the
 same complete workspace and configuration, not the small results ZIP alone.
+
+
+## MPSAE only at a chosen MMPOT weight
+
+The Kaggle launcher also accepts `METHODS`, `INCLUDE_DENSE`, and `MMPOT_WEIGHT`:
+
+```python
+runpy.run_path(str(REPO / "scripts/kaggle_segmentation.py"),
+    init_globals={"DATASET": "nyuv2", "METHODS": ["mpsae"],
+                  "INCLUDE_DENSE": False, "MMPOT_WEIGHT": 0.1},
+    run_name="__main__")
+```
+
+This runs six fresh MPSAE fits (SigLIP2/DINOv2, K=3/12/48) and six matched-K
+ evaluations, with no CSR, CSRv2 or dense evaluation jobs. It keeps the canonical
+20-epoch maximum, early stopping, and all other NYUv2 settings. Features must
+still be extracted on a fresh notebook; compatible caches/fits are reused when
+present. Two available GPUs run independent jobs. The generated config is saved
+in `/kaggle/working/nyuv2/config-kaggle.yaml`; tracked YAML files are unchanged.
+Download `/kaggle/working/NYUV2_mpsae_ot0p1_results.zip`. CSV/JSON contain only
+selected result rows. Comparison exports retain their standard schema, with
+uncomputed baselines and gains left blank/`--`, never zero or fabricated scores.
+Selection changes the campaign ID, but preserves feature and fit cache identities.
+The default launcher still runs all methods and the dense reference.

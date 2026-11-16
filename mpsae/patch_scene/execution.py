@@ -2,7 +2,6 @@
 from dataclasses import dataclass, replace
 
 from ..io import atomic_json, read_json
-from .config import METHODS
 
 
 @dataclass(frozen=True)
@@ -27,7 +26,8 @@ def evaluation_tasks(config, preparation):
     e, d = preparation.encoder, preparation.dataset
     # Reuse the previous K=12 fits first, then start the larger new budgets.
     grid = sorted(config.training_ks, key=lambda k: (k != 12, -k))
-    return [Task('evaluate', e, d)] + [Task('fit', e, d, m, k) for k in grid for m in METHODS]
+    dense = [Task('evaluate', e, d)] if config.include_dense else []
+    return dense + [Task('fit', e, d, m, k) for k in grid for m in config.methods]
 
 
 def record_result(hub, campaign, result):

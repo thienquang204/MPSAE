@@ -76,7 +76,7 @@ def run_parallel(config, sources, hub, campaign, encoders, datasets, devices, *,
                  inboxes[i], outbox, smoke, cpu_threads), name=f'patch-scene-{i}') for i, d in enumerate(devices)]
     pending = preparation_tasks(encoders, datasets)
     busy, ready, completed = {}, set(), 0
-    total = len(pending)*(2+len(config.training_ks)*3)  # prepare + dense + fits
+    total = sum(1 + len(evaluation_tasks(config, task)) for task in pending)
     status_path = hub.root/f'campaigns/{campaign}/scheduler.json'
     started, heartbeat = time.monotonic(), time.monotonic()
 

@@ -27,6 +27,8 @@ METHODS = ('csr', 'csrv2', 'mpsae')
 
 @dataclass(frozen=True)
 class Config:
+    methods: tuple[str, ...] = METHODS
+    include_dense: bool = True
     cityscapes_source: str = 'official'
     mpsae_ot_weight: float | None = None
     siglip2_mpsae_ot_weight: float | None = None
@@ -61,6 +63,13 @@ class Config:
     early_min_delta: float = 0.001
 
     def __post_init__(self):
+        if (not isinstance(self.methods, (list, tuple)) or not self.methods
+                or any(m not in METHODS for m in self.methods)
+                or len(set(self.methods)) != len(self.methods)):
+            raise ValueError('methods must be a nonempty distinct subset of csr/csrv2/mpsae')
+        object.__setattr__(self, 'methods', tuple(m for m in METHODS if m in self.methods))
+        if type(self.include_dense) is not bool:
+            raise ValueError('include_dense must be boolean')
         if self.mpsae_ot_weight is not None and (isinstance(self.mpsae_ot_weight, bool) or not math.isfinite(self.mpsae_ot_weight) or self.mpsae_ot_weight <= 0):
             raise ValueError("mpsae_ot_weight must be finite and positive")
         if self.siglip2_mpsae_ot_weight is not None and (isinstance(self.siglip2_mpsae_ot_weight, bool) or not math.isfinite(self.siglip2_mpsae_ot_weight) or self.siglip2_mpsae_ot_weight <= 0):
@@ -135,6 +144,10 @@ class Config:
 
     def identity(self):
         settings = asdict(self)
+        if self.methods == METHODS:
+            settings.pop('methods')
+        if self.include_dense:
+            settings.pop('include_dense')
         if self.mpsae_ot_weight is None:
             settings.pop("mpsae_ot_weight")
         if self.siglip2_mpsae_ot_weight is None:
@@ -198,6 +211,8 @@ class Config:
 
     def source_identity(self):
         identity = self.identity()
+        identity['settings'].pop('methods', None)
+        identity['settings'].pop('include_dense', None)
         identity["settings"].pop("mpsae_ot_weight", None)
         identity["settings"].pop("siglip2_mpsae_ot_weight", None)
         identity['settings'].pop('datasets', None)
@@ -217,14 +232,14 @@ class Config:
 
     def plan(self):
         cells = len(self.encoder_names)*len(self.dataset_names)
-        fits = cells*len(METHODS)*len(self.training_ks)
-        sparse = cells*len(METHODS)*len(self.evaluation_pairs)
-        matched = cells*len(METHODS)*sum(t == k for t, k in self.evaluation_pairs)
+        fits = cells*len(self.methods)*len(self.training_ks)
+        sparse = cells*len(self.methods)*len(self.evaluation_pairs)
+        matched = cells*len(self.methods)*sum(t == k for t, k in self.evaluation_pairs)
         return {**self.identity(), 'campaign': canonical_hash(self.identity())[:20],
-                'encoders': {e: ENCODERS[e] for e in self.encoder_names}, 'datasets': {d: (CITYSCAPES_HF if d == 'cityscapes' and self.cityscapes_source == 'chris1' else DATASETS[d]) for d in self.dataset_names}, 'methods': METHODS,
-                'sae_fits': fits, 'sparse_evaluations': sparse, 'dense_evaluations': cells,
+                'encoders': {e: ENCODERS[e] for e in self.encoder_names}, 'datasets': {d: (CITYSCAPES_HF if d == 'cityscapes' and self.cityscapes_source == 'chris1' else DATASETS[d]) for d in self.dataset_names}, 'methods': self.methods,
+                'sae_fits': fits, 'sparse_evaluations': sparse, 'dense_evaluations': cells if self.include_dense else 0,
                 'matched_evaluations': matched, 'cross_k_evaluations': sparse-matched,
-                'total_evaluations': cells+sparse,
+                'total_evaluations': (cells if self.include_dense else 0)+sparse,
                 'train_k': self.training_ks[0] if len(self.training_ks) == 1 else list(self.training_ks),
                 'train_ks': list(self.training_ks),
                 'inference_k': list(self.inference_ks),

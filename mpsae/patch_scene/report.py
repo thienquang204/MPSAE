@@ -23,9 +23,9 @@ def row_key(row):
 
 
 def expected_keys(config):
-    return {(d, e, 'dense', None, None) for d in config.dataset_names for e in config.encoder_names} | {
+    return {(d, e, 'dense', None, None) for d in config.dataset_names for e in config.encoder_names if config.include_dense} | {
         (d, e, m, train_k, k) for d in config.dataset_names for e in config.encoder_names
-        for m in METHODS for train_k, k in config.evaluation_pairs}
+        for m in config.methods for train_k, k in config.evaluation_pairs}
 
 
 def collect_tables(hub, campaign):

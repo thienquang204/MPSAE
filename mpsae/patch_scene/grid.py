@@ -21,11 +21,13 @@ def grid_plan(config, grid):
     cells=len(config.encoder_names)*len(config.dataset_names)
     n=cells*len(config.training_ks)
     weights=[c.mpsae_ot_weight for c in grid]
+    sparse=n*(len([m for m in config.methods if m!='mpsae']) + (len(grid) if 'mpsae' in config.methods else 0))
+    dense=cells if config.include_dense else 0
     return {**config.plan(), 'ot_weights':weights, 'mpsae_ot_weights':{e:weights for e in config.encoder_names},
-            'sae_fits':n*(2+len(grid)),
-            'sparse_evaluations':n*(2+len(grid)), 'matched_evaluations':n*(2+len(grid)),
-            'cross_k_evaluations':0, 'dense_evaluations':cells,
-            'total_evaluations':n*(2+len(grid))+cells,
+            'sae_fits':sparse,
+            'sparse_evaluations':sparse, 'matched_evaluations':sparse,
+            'cross_k_evaluations':0, 'dense_evaluations':dense,
+            'total_evaluations':sparse+dense,
             'grid_campaigns':[c.plan() for c in grid],
             'count_scope':'unique fits/evaluations; dense, CSR and CSRv2 caches reused across weights'}
 
