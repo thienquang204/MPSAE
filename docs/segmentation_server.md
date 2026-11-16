@@ -31,9 +31,13 @@ same Python command with the same workspace. Do not run two launchers against
 that workspace concurrently. Completed work and compatible checkpoints resume.
 
 Default: NYUv2 followed by Cityscapes on `cuda:0`, two frozen encoders (SigLIP2
-and DINOv2), three SAE methods (CSR/CSRv2/MPSAE), independent training at K=3,12,48,
-matched-K evaluation. Each dataset has 18 fits and 20 evaluations including dense.
-NYUv2 SigLIP2 MPSAE weight is 0.5; DINOv2 and Cityscapes retain 2.0.
+and DINOv2), CSR/CSRv2 baselines and MPSAE trained independently at MMPOT weights
+0.5, 1.0, 2.0 for every encoder and K=3,12,48. Evaluation is matched K.
+Each dataset has 30 unique SAE fits and 32 evaluations including dense; both
+datasets total 60 fits and 64 evaluations. Baseline fits/evaluations and features
+are reused across weight campaigns in the same workspace. The server override
+applies to both encoders, superseding the NYUv2 SigLIP2-only default. Canonical
+single-weight YAMLs/Kaggle recipes retain their prior settings.
 Max 20 epochs, training-loss early stopping after epoch 15; canonical YAMLs own
 all numerical settings. Support bank remains 65536 references, with all valid
 resized-image patches used for SAE training. This is a memory-limited benchmark.
@@ -57,6 +61,7 @@ No automatic batch-size, precision or objective changes are made for the GPU.
   cityscapes/                     feature caches, checkpoints, campaign receipts
   logs/                           doctor.log, nyuv2.log, cityscapes.log
   results/<dataset>/<campaign>/   CSV, LaTeX, JSON and per-campaign results.zip
+  results/mmpot-grid/             comparison CSV, long CSV/JSON and LaTeX grid table
   segmentation-results.zip       combined results for this successful invocation
 ```
 
@@ -88,7 +93,7 @@ scp -P YOUR_SSH_PORT USER@SERVER:/workspace/segmentation/segmentation-results.zi
 .venv-segmentation/bin/python scripts/run_segmentation_server.py \
   --workspace /workspace/segmentation --datasets cityscapes
 
-# Only SigLIP2, both datasets (18 fits / 20 evaluations total):
+# Only SigLIP2, both datasets (30 fits / 32 evaluations total):
 .venv-segmentation/bin/python scripts/run_segmentation_server.py \
   --workspace /workspace/segmentation --encoders siglip2
 ```
@@ -99,3 +104,29 @@ estimates, not measured peak requirements. Full RTX 3090 GPU runtime is unmeasur
 all-patch Cityscapes training is larger than NYUv2 and may be a long-running job.
 The launcher does not reduce epochs, data coverage or evaluation points to fit
 a time limit. Use `--smoke` for a clearly separated synthetic CPU pipeline check.
+
+## MMPOT weight grid
+
+The normal run command now uses `--ot-weights 0.5 1.0 2.0` by default:
+
+```bash
+.venv-segmentation/bin/python scripts/run_segmentation_server.py \
+  --workspace /workspace/segmentation --ot-weights 0.5 1.0 2.0
+```
+
+A single value runs a smaller ablation, e.g. `--ot-weights 1.0`. Values must be
+distinct positive finite numbers. Each weight gets a separate MPSAE checkpoint.
+Data, pinned encoder revisions, support selection, reconstruction coefficients,
+transport mass, entropy and solver settings remain unchanged. Existing compatible
+fits from the previous single-weight runs can be reused.
+
+`results/mmpot-grid/grid_comparisons.csv` and `grid_results.tex` show MPSAE at
+lambda=0.5, 1, 2 side by side with Dense, CSR and CSRv2. `grid_results.csv` and
+`grid_results.json` record the MPSAE weight explicitly, with baselines included
+once. Partial tables show unavailable results as --. The collector checks that
+shared baseline rows agree instead of silently replacing conflicting results.
+
+All weights are reported; no winning setting is selected from NYUv2's official
+test split. Present test-set grid results as sensitivity analysis, not as an
+independently validated tuned result. Unique computation counts exclude repeated
+cached baseline rows in the per-weight campaign tables. GPU runtime is unmeasured.

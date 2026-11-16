@@ -123,13 +123,14 @@ def _latex(lookup, config, *, datasets, metric='miou', label='patch-sae', matche
     title = ' / '.join(DATASET_NAMES[d] for d in datasets)
     if datasets == ('nyuv2',):
         title += ' official test, RGB only'
+    weight_note = (f'MPSAE MMPOT weight: {config.mpsae_ot_weight:g}. ' if config.mpsae_ot_weight is not None else '')
     protocol = (r'Matched budgets: $K_{\mathrm{train}}=K_{\mathrm{inf}}=K$.' if matched else
                 r'Each training checkpoint is evaluated across inference budgets.' if show_train else
                 f'SAEs trained at $K_{{\\mathrm{{train}}}}={config.training_ks[0]}$.')
     lines = [r'% Requires \usepackage{booktabs}. Generated from measured results only.',
              r'\begin{table*}[t]', r'\centering', r'\small', r'\setlength{\tabcolsep}{5pt}',
              '\\caption{'+status+f'{title} patch retrieval segmentation: {metric_name} (\\%). '
-             + 'Frozen vision encoders. '+protocol+'}',
+             + 'Frozen vision encoders. '+weight_note+protocol+'}',
              '\\label{tab:'+label+'}', '\\begin{tabular}{'+('l' if combined else '')+'l'+('r' if show_train else '')+'rrrrrr}',
              r'\toprule', ('Dataset & ' if combined else '')
              + 'Encoder & '+(r'$K_{\mathrm{train}}$ & ' if show_train else '')

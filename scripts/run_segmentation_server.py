@@ -75,6 +75,7 @@ def main(argv=None):
     parser.add_argument('--workspace', default='work/segmentation-server', type=Path)
     parser.add_argument('--datasets', nargs='+', choices=('nyuv2','cityscapes'), default=['nyuv2','cityscapes'])
     parser.add_argument('--encoders', nargs='+', choices=('siglip2','dinov2'), default=['siglip2','dinov2'])
+    parser.add_argument('--ot-weights', nargs='+', type=float, default=[0.5,1.0,2.0], help='MPSAE MMPOT weights, for both encoders')
     parser.add_argument('--device', default='cuda:0')
     parser.add_argument('--cpu-threads', type=int, default=min(4, os.cpu_count() or 1))
     parser.add_argument('--plan', action='store_true', help='Print resolved settings without downloading/running')
@@ -85,7 +86,12 @@ def main(argv=None):
     from mpsae.patch_scene.config import load
     configs = {d: replace(load(ROOT/f'configs/patch_scene_{d}.yaml'), encoders=tuple(args.encoders))
                for d in args.datasets}
-    plans = {d: c.plan() for d,c in configs.items()}
+    from mpsae.patch_scene.grid import grid_configs, grid_plan, write_grid_tables
+    try:
+        grids = {d: grid_configs(c, args.ot_weights) for d,c in configs.items()}
+    except ValueError as error:
+        parser.error(str(error))
+    plans = {d: grid_plan(configs[d], grid) for d,grid in grids.items()}
     print(json.dumps(plans, indent=2), flush=True)
     if args.plan: return
     workspace = args.workspace.expanduser().resolve()
@@ -105,12 +111,10 @@ def main(argv=None):
         if not args.smoke:
             run(base+['doctor','--device',args.device], env, workspace/'logs/doctor.log')
         selected_outputs = []
+        grid_receipts = []
         for dataset, config in configs.items():
             root = workspace/dataset
             root.mkdir(exist_ok=True)
-            campaign = config.plan()['campaign']
-            config_file = root/f'config-{campaign}.yaml'
-            write_config(config, config_file)
             log = workspace/f'logs/{dataset}.log'
             extra = []
             if not args.smoke:
@@ -121,28 +125,35 @@ def main(argv=None):
                     extra = ['--nyuv2-root', str(data)]
                 else:
                     run([sys.executable,'-u','-m','mpsae.patch_scene.cityscapes_hf'], env, log)
-            output = workspace/'results'/dataset/campaign
-            actual_root = root/'SMOKE_ONLY' if args.smoke else root
-            receipt = None
-            try:
-                run(base+['smoke' if args.smoke else 'run','--config',config_file,
-                          '--workspace',root,'--device','cpu' if args.smoke else args.device,
-                          '--cpu-threads',str(args.cpu_threads),*extra], env, log)
-            finally:
-                receipt = export_local(actual_root, output, campaign)
-                if receipt:
-                    print(f'Local tables: {output} ({receipt["completed"]}/{receipt["expected"]})', flush=True)
-            if not receipt or not receipt['complete'] or receipt['expected'] != plans[dataset]['total_evaluations']:
-                raise RuntimeError(f'{dataset} did not complete its expected evaluations')
-            selected_outputs.append(output)
+            for config in grids[dataset]:
+                campaign = config.plan()['campaign']
+                config_file = root/f'config-{campaign}.yaml'
+                write_config(config, config_file)
+                output = workspace/'results'/dataset/campaign
+                actual_root = root/'SMOKE_ONLY' if args.smoke else root
+                receipt = None
+                try:
+                    run(base+['smoke' if args.smoke else 'run','--config',config_file,
+                              '--workspace',root,'--device','cpu' if args.smoke else args.device,
+                              '--cpu-threads',str(args.cpu_threads),*extra], env, log)
+                finally:
+                    receipt = export_local(actual_root, output, campaign)
+                    if receipt:
+                        grid_receipts.append((config, dataset, receipt))
+                        write_grid_tables(grid_receipts, configs, args.ot_weights, workspace/'results/mmpot-grid')
+                        print(f'Local tables: {output} ({receipt["completed"]}/{receipt["expected"]})', flush=True)
+                if not receipt or not receipt['complete'] or receipt['expected'] != config.plan()['total_evaluations']:
+                    raise RuntimeError(f'{dataset} did not complete its expected evaluations')
+                selected_outputs.append(output)
         bundle = workspace/'segmentation-results.zip'
         temporary = bundle.with_suffix('.zip.partial')
         with ZipFile(temporary, 'w', ZIP_DEFLATED) as archive:
-            for output in selected_outputs:
+            for output in [*selected_outputs, workspace/'results/mmpot-grid']:
                 for path in sorted(output.iterdir()):
                     if path.suffix != '.zip':
                         archive.write(path, path.relative_to(workspace/'results'))
-                archive.write(output/'results.zip', output.relative_to(workspace/'results')/'results.zip')
+                if (output/'results.zip').exists():
+                    archive.write(output/'results.zip', output.relative_to(workspace/'results')/'results.zip')
         os.replace(temporary, bundle)
         print(f'COMPLETE: {bundle}\nCSV/LaTeX tables: {workspace/"results"}', flush=True)
 

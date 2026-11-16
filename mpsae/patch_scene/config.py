@@ -28,6 +28,7 @@ METHODS = ('csr', 'csrv2', 'mpsae')
 @dataclass(frozen=True)
 class Config:
     cityscapes_source: str = 'official'
+    mpsae_ot_weight: float | None = None
     siglip2_mpsae_ot_weight: float | None = None
     seed: int = 1227
     k: int = 12
@@ -60,6 +61,8 @@ class Config:
     early_min_delta: float = 0.001
 
     def __post_init__(self):
+        if self.mpsae_ot_weight is not None and (isinstance(self.mpsae_ot_weight, bool) or not math.isfinite(self.mpsae_ot_weight) or self.mpsae_ot_weight <= 0):
+            raise ValueError("mpsae_ot_weight must be finite and positive")
         if self.siglip2_mpsae_ot_weight is not None and (isinstance(self.siglip2_mpsae_ot_weight, bool) or not math.isfinite(self.siglip2_mpsae_ot_weight) or self.siglip2_mpsae_ot_weight <= 0):
             raise ValueError("siglip2_mpsae_ot_weight must be finite and positive")
         if self.cityscapes_source not in ('official', 'chris1'):
@@ -126,10 +129,14 @@ class Config:
                            batch_size=self.batch_size, lr=self.lr, cl_coef=0.1)
         if method == "mpsae" and encoder == "siglip2" and self.siglip2_mpsae_ot_weight is not None:
             preset = replace(preset, ot_weight=self.siglip2_mpsae_ot_weight)
+        if method == "mpsae" and self.mpsae_ot_weight is not None:
+            preset = replace(preset, ot_weight=self.mpsae_ot_weight)
         return preset
 
     def identity(self):
         settings = asdict(self)
+        if self.mpsae_ot_weight is None:
+            settings.pop("mpsae_ot_weight")
         if self.siglip2_mpsae_ot_weight is None:
             settings.pop("siglip2_mpsae_ot_weight")
         if self.cityscapes_source == 'official':
@@ -191,6 +198,7 @@ class Config:
 
     def source_identity(self):
         identity = self.identity()
+        identity["settings"].pop("mpsae_ot_weight", None)
         identity["settings"].pop("siglip2_mpsae_ot_weight", None)
         identity['settings'].pop('datasets', None)
         if self.early_stopping:
