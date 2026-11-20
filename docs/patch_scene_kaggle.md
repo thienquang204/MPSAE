@@ -157,7 +157,11 @@ GPUs within each campaign. No Hugging Face token or output upload is needed.
   reference bank 65536, 30 neighbors, temperature .02. No early stopping.
 - Six masses mean 18 fits and 54 evaluations (18 matched, 36 cross-K).
 - The existing partial Greenkhorn solver is unchanged; 0<s<1 is enforced.
-  s=1 is deliberately unsupported, and no implicit loss normalization is added.
+  s=1 is supported through a separate balanced log-Sinkhorn branch; no implicit
+  loss normalization is added. Include `1.0` in `MMPOT_MASSES` (Kaggle) or
+  `--masses 0.9 1.0` (mass-sweep CLI) to compare the endpoint. The existing six
+  partial masses remain the default. Fits, tables and runtime provenance record
+  the selected solver, and existing partial results remain reusable.
 - Data/feature/source identities ignore s. Fit identities include s. Each new
   mass starts from the same seeded initialization, not another mass's checkpoint.
   Compatible existing s=.9 fits/evaluations can be reused, even from larger campaigns.

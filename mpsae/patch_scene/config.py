@@ -65,8 +65,8 @@ class Config:
 
     def __post_init__(self):
         if (isinstance(self.mpsae_ot_mass, bool) or not isinstance(self.mpsae_ot_mass, (float, int))
-                or not math.isfinite(self.mpsae_ot_mass) or not 0 < self.mpsae_ot_mass < 1):
-            raise ValueError('mpsae_ot_mass must be finite and strictly between 0 and 1')
+                or not math.isfinite(self.mpsae_ot_mass) or not 0 < self.mpsae_ot_mass <= 1):
+            raise ValueError('mpsae_ot_mass must be finite and satisfy 0 < s <= 1')
         object.__setattr__(self, 'mpsae_ot_mass', float(self.mpsae_ot_mass))
         if (not isinstance(self.methods, (list, tuple)) or not self.methods
                 or any(m not in METHODS for m in self.methods)
@@ -184,7 +184,11 @@ class Config:
             settings['encoders'] = list(self.encoder_names)
         if self.inference_ks != (self.k,):
             settings['inference_k'] = list(self.inference_ks)
-        return {'version': VERSION, 'settings': settings}
+        identity = {'version': VERSION, 'settings': settings}
+        if self.mpsae_ot_mass == 1:
+            from ..transport import BALANCED_SOLVER
+            identity['balanced_solver'] = BALANCED_SOLVER
+        return identity
 
     @property
     def image_hw(self):
@@ -220,6 +224,7 @@ class Config:
 
     def source_identity(self):
         identity = self.identity()
+        identity.pop('balanced_solver', None)
         identity["settings"].pop("mpsae_ot_mass", None)
         identity['settings'].pop('methods', None)
         identity['settings'].pop('include_dense', None)

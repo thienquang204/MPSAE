@@ -19,6 +19,10 @@ plan and of its three slack marginals. The minimiser is found with a greedy
 flows only through the cost, using the envelope theorem, which is why
 ``plan_gradient`` returns ``s*J - P*``.
 
+The exact ``s=1`` endpoint uses balanced log-domain Sinkhorn in
+``ot_balanced.py``. All three marginals equal 1/n and slack entropy is zero.
+Only that branch is new; the partial solver's numerical operations stay fixed.
+
 Numerics are preserved verbatim from the previous implementation
 (``mpsae_repair.py`` in commit 89806f5): the association order of the four
 additions in the scaling factor, the ``clamp(-60, 0)`` exponent guard, the
@@ -101,7 +105,7 @@ def _batched_gap_values(costs: torch.Tensor, plans: torch.Tensor, slacks: torch.
 
 
 def _validate(cost: torch.Tensor, mass: float, eta: float, max_iters: int, tol: float,
-              *, batched: bool = False) -> None:
+              *, batched: bool = False, allow_balanced: bool = False) -> None:
     """Reject invalid problems before an exponential kernel is formed.
 
     The solvers implement a nonnegative cost with a bounded exponent; they are
@@ -120,10 +124,13 @@ def _validate(cost: torch.Tensor, mass: float, eta: float, max_iters: int, tol: 
         if not bool(torch.isfinite(cost).all()):
             raise ValueError("nonfinite transport cost")
         raise ValueError("negative transport cost; the angular cost must be nonnegative")
-    if (not math.isfinite(mass) or not 0 < mass < 1 or not math.isfinite(eta) or eta <= 0
+    valid_mass = (not isinstance(mass, bool) and math.isfinite(mass)
+                  and (0 < mass <= 1 if allow_balanced else 0 < mass < 1))
+    if (not valid_mass or not math.isfinite(eta) or eta <= 0
             or not math.isfinite(tol) or tol <= 0
             or isinstance(max_iters, bool) or not isinstance(max_iters, int) or max_iters < 1):
-        raise ValueError("require finite 0 < mass < 1, positive eta and tol, "
+        bound = "0 < mass <= 1" if allow_balanced else "0 < mass < 1"
+        raise ValueError(f"require finite {bound}, positive eta and tol, "
                          "and a positive integer max_iters")
 
 
@@ -274,6 +281,12 @@ def _batched_matching_gap_from_costs(costs: torch.Tensor, *, mass: float, eta: f
     the same bounded refinement policy while avoiding per-group scalar reads
     and the unused envelope-delta clone in the production training loop.
     """
+    if mass == 1 and not isinstance(mass, bool):
+        from .ot_balanced import matching_gaps
+        losses, records, _ = matching_gaps(
+            costs, eta=eta, max_iters=max_iters, tol=tol, max_refine_iters=max_refine_iters,
+            require_feasible=require_feasible, collect_metrics=collect_metrics)
+        return losses, records
     if (isinstance(max_refine_iters, bool) or not isinstance(max_refine_iters, int)
             or max_refine_iters < max_iters):
         raise ValueError("max_refine_iters must be an integer >= max_iters")
@@ -360,7 +373,21 @@ def matching_gap_from_cost(cost: torch.Tensor, *, mass: float = 0.9, eta: float 
     materially negative gap, which can only mean the "optimal" plan was not
     optimal. Neither is clipped away.
     """
-    _validate(cost, mass, eta, max_iters, tol)
+    _validate(cost, mass, eta, max_iters, tol, allow_balanced=True)
+    if mass == 1:
+        from .ot_balanced import matching_gaps
+        if solved is not None:
+            raise ValueError("balanced MMOT must solve its equality constraints; solved is unsupported")
+        losses, records, plans = matching_gaps(
+            cost[None], eta=eta, max_iters=max_iters, tol=tol,
+            max_refine_iters=max_refine_iters, require_feasible=require_feasible,
+            collect_metrics=collect_metrics, solver_dtype=solver_dtype)
+        delta = None
+        if return_delta:
+            delta = -plans[0].clone()
+            d = torch.arange(len(cost), device=cost.device)
+            delta[d, d, d] += 1/len(cost)
+        return losses[0], records[0] if records else {}, delta
     if isinstance(max_refine_iters, bool) or not isinstance(max_refine_iters, int) \
             or max_refine_iters < max_iters:
         raise ValueError("max_refine_iters must be an integer >= max_iters")
@@ -430,6 +457,9 @@ def _aggregate_records(records: list[dict[str, float]]) -> dict[str, float]:
     stats["cost_max"] = max(record["cost_max"] for record in records)
     stats["mass_error_max"] = max(record["mass_error"] for record in records)
     stats["cap_violation_max"] = max(record["cap_violation"] for record in records)
+    for name in ("marginal_l1", "marginal_linf", "primal_dual_error"):
+        if name in records[0]:
+            stats[name + "_max"] = max(record[name] for record in records)
     stats["groups"] = len(records)
     return stats
 

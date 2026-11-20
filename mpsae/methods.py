@@ -120,6 +120,10 @@ def describe(method: str, k: int, preset: TrainPreset) -> dict[str, Any]:
                            "eta": preset.ot_eta, "microbatch": preset.ot_microbatch,
                            "max_iters": preset.ot_max_iters, "tol": preset.ot_tol,
                            "views": ["k", "2k", "4k"]}
+        if preset.ot_mass == 1:
+            from .transport import BALANCED_SOLVER
+            described["ot"].update(solver=BALANCED_SOLVER, constraints="balanced",
+                                   entropy="sum_p_logp_minus_p; zero_slacks")
     return described
 
 

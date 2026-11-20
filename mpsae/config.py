@@ -78,6 +78,8 @@ class TrainPreset:
     ot_tol: float = 1e-4
 
     def __post_init__(self) -> None:
+        from .transport import solver_name
+        solver_name(self.ot_mass)
         if self.hidden_dim < 4 or self.batch_size < 2 or self.epochs < 1:
             raise ValueError(f"{self.name}: degenerate preset")
         if self.ot_microbatch < 2:

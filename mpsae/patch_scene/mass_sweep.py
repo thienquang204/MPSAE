@@ -1,7 +1,7 @@
 """VOC MPSAE mass ablation; immutable plans, reusable fits and rebuildable reports.
 
 Run with --plan before launch; --export-only rebuilds tables/index without training.
-The partial-OT numerical solver is unchanged. Mass must be strictly below one.
+Partial masses retain the existing solver; s=1 uses balanced log-Sinkhorn.
 """
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -17,6 +17,7 @@ import sys
 from zipfile import ZipFile, ZIP_DEFLATED
 
 from ..io import atomic_json, append_jsonl, canonical_hash, exclusive_lock, read_json
+from ..transport import solver_name
 from .config import Config, load, require_supported
 from .report import expected_keys, row_key, NAMES, DATASET_NAMES
 
@@ -28,9 +29,9 @@ SOLVER = 'partial-greenkhorn-v1'  # names existing equations; no solver change
 def mass_configs(config, masses=DEFAULT_MASSES):
     if (not isinstance(masses, (list, tuple)) or not masses
             or any(isinstance(s, bool) or not isinstance(s, (int, float))
-                   or not math.isfinite(s) or not 0 < s < 1 for s in masses)
+                   or not math.isfinite(s) or not 0 < s <= 1 for s in masses)
             or len(set(masses)) != len(masses)):
-        raise ValueError('masses must be distinct finite numbers strictly between 0 and 1')
+        raise ValueError('masses must be distinct finite numbers satisfying 0 < s <= 1')
     require_supported(config)
     if config.dataset_names != ('voc',) or config.methods != ('mpsae',) or config.include_dense:
         raise ValueError('Mass ablation requires VOC, methods=[mpsae], include_dense=false')
@@ -43,7 +44,9 @@ def sweep_plan(configs):
     campaigns = [c.plan() for c in configs]
     identity = {'kind': 'mpsae-mass-v1', 'campaigns': [p['campaign'] for p in campaigns]}
     return {**identity, 'sweep_id': canonical_hash(identity)[:20],
-            'masses': [c.mpsae_ot_mass for c in configs], 'solver': SOLVER,
+            'masses': [c.mpsae_ot_mass for c in configs],
+            'solver': SOLVER if all(c.mpsae_ot_mass < 1 for c in configs) else
+                {str(c.mpsae_ot_mass): solver_name(c.mpsae_ot_mass) for c in configs},
             'sae_fits': sum(p['sae_fits'] for p in campaigns),
             'total_evaluations': sum(p['total_evaluations'] for p in campaigns),
             'matched_evaluations': sum(p['matched_evaluations'] for p in campaigns),
@@ -121,7 +124,8 @@ def campaign_records(workspace, config, campaign):
         record = dict(zip(('dataset', 'encoder', 'method', 'train_k', 'inference_k'), key))
         record.update(seed=config.seed, s=config.mpsae_ot_mass if method == 'mpsae' else None,
                       **{'lambda': config.preset(method, encoder).ot_weight if method == 'mpsae' else None},
-                      campaign_id=campaign, status=status, solver=SOLVER if method == 'mpsae' else None,
+                      campaign_id=campaign, status=status,
+                      solver=solver_name(config.mpsae_ot_mass) if method == 'mpsae' else None,
                       checkpoint_path=f'{relative_fit}/checkpoint.pt' if relative_fit else None,
                       checkpoint_sha256=row.get('identity', {}).get('fit'),
                       result_path=f"evaluations/{canonical_hash(row['identity'])[:20]}/result.json" if row.get('identity') else None,
@@ -226,7 +230,7 @@ def export_sweep(workspace, configs):
     return result, archive
 
 
-def _runtime():
+def _runtime(mass=0.9):
     try:
         revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
         dirty = bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT, text=True).strip())
@@ -234,7 +238,9 @@ def _runtime():
         revision, dirty = None, None
     from ..io import sha256_file
     return {'git_revision': revision, 'git_dirty': dirty, 'python': sys.version,
-            'solver': SOLVER, 'solver_sha256': sha256_file(ROOT/'mpsae/ot.py')}
+            'solver': solver_name(mass), 'solver_sha256': sha256_file(ROOT/'mpsae/ot.py'),
+            **({'balanced_solver_sha256': sha256_file(ROOT/'mpsae/ot_balanced.py')}
+               if mass == 1 else {})}
 
 
 def main(argv=None):
@@ -287,7 +293,7 @@ def main(argv=None):
             folder = actual/'campaigns'/campaign
             config_file = directory/f'config-{campaign}.yaml'
             config_file.write_text(yaml.safe_dump(c.identity()['settings'], sort_keys=False), encoding='utf-8')
-            runtime = _runtime()
+            runtime = _runtime(c.mpsae_ot_mass)
             if not (folder/'runtime.json').exists():
                 atomic_json(folder/'runtime.json', runtime)
             append_jsonl(folder/'attempts.jsonl', {**runtime, 'started_at': datetime.now(timezone.utc).isoformat()})

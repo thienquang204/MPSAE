@@ -35,7 +35,7 @@ def test_plan_preserves_cache_identities_and_baseline_presets():
         assert c.epochs == 10 and c.evaluation_mode == 'sweep'
     with pytest.raises(ValueError):
         mass_configs(base, [0.9, 0.9])
-    for value in (0, 1, -.1, True, float('nan'), float('inf'), '0.9'):
+    for value in (0, 1.01, -.1, True, float('nan'), float('inf'), '0.9'):
         with pytest.raises(ValueError, match='mass'):
             replace(base, mpsae_ot_mass=value)
     assert sweep_plan(mass_configs(base, list(reversed(DEFAULT_MASSES)))) == plan
@@ -116,6 +116,19 @@ def test_mass_solver_production_group_cpu():
             torch.testing.assert_close(scalar_grad, delta, atol=1e-7, rtol=1e-6)
 
 
+def test_balanced_mass_has_separate_fit_identity_and_solver_metadata(tmp_path):
+    from mpsae import methods
+    from mpsae.transport import BALANCED_SOLVER
+    base=selected()
+    partial,balanced=mass_configs(base,[.9,1.])
+    assert partial.identity()==base.identity()
+    assert balanced.source_identity()==base.source_identity()
+    assert partial.identity()!=balanced.identity()
+    assert methods.describe('mpsae',3,balanced.preset('mpsae','siglip2'))['ot']['solver']==BALANCED_SOLVER
+    campaign=fake_campaign(tmp_path,balanced)
+    assert all(r['solver']==BALANCED_SOLVER for r in campaign_records(tmp_path,balanced,campaign))
+
+
 def test_smoke_sweep_two_workers_all_masses_and_resume(tmp_path):
     pytest.importorskip('torch')
     import yaml
@@ -138,4 +151,6 @@ def test_smoke_sweep_two_workers_all_masses_and_resume(tmp_path):
     assert all(p.stat().st_mtime_ns == stamp for p,stamp in stamps.items())
     assert len(rebuild_index(root)[0]) == 12
     main(args+['--export-only'])
-    assert len(rebuild_index(root)[0]) == 12
+    main(args+['--masses','1.0'])
+    assert len(list((root/'fits').glob('*/checkpoint.pt')))==7
+    assert len(rebuild_index(root)[0])==14

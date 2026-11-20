@@ -457,3 +457,9 @@ missing measurements.
 Changing these selections creates a new plan ID. Use the newly generated
 `reports/<name>/<plan_id>/` directory (or its updated `latest.json` pointer).
 Historical PNG/PDF files are not rewritten merely by pulling source code.
+
+## Transport-mass ablations
+
+For an isolated, configurable MPSAE comparison of partial transport and the
+balanced `s=1` endpoint, see [retrieval_mass.md](retrieval_mass.md).
+Run `bash run_retrieval_mass.sh --plan` to inspect counts before training.
