@@ -1,6 +1,9 @@
 """Pinned Chris1 mirror; original train/validation Parquets, never viewer/test data."""
 import io
 import hashlib
+import shutil
+import threading
+import time
 from bisect import bisect_right
 from pathlib import Path
 import numpy as np
@@ -34,6 +37,60 @@ def parquet_files(revision=REVISION):
             for split, count in [('train', 14), ('validation', 3)]}
 
 
+def _download_status(cache, names, revision, started):
+    """Report filesystem state, not an inferred network transfer rate."""
+    repository = cache/'datasets--Chris1--cityscapes'
+    snapshot = repository/'snapshots'/revision
+    complete = sum((snapshot/name).is_file() for name in names)
+    partials = []
+    for path in (repository/'blobs').glob('*.incomplete'):
+        try:
+            partials.append(path.stat().st_size)
+        except FileNotFoundError:  # downloader may have just renamed the file
+            pass
+    existing = cache
+    while not existing.exists() and existing.parent != existing:
+        existing = existing.parent
+    free = shutil.disk_usage(existing).free/2**30
+    return (f'[cityscapes download] elapsed={time.monotonic()-started:.0f}s '
+            f'cached={complete}/{len(names)} partial_files={len(partials)} '
+            f'partial_logical_GiB={sum(partials)/2**30:.2f} free_GiB={free:.1f}')
+
+
+def download_snapshot(names, revision=REVISION, *, heartbeat_seconds=30):
+    from huggingface_hub import snapshot_download, constants
+    cache = Path(constants.HF_HUB_CACHE)
+    started = time.monotonic()
+    stop = threading.Event()
+    print(f'[cityscapes download] {REPO}@{revision}; {len(names)} train/validation shards; '
+          f'2 workers; cache={cache}', flush=True)
+    print('[cityscapes download] Status every 30s. Partial sizes are logical file sizes, '
+          'not bytes transferred; unchanged sizes alone do not establish a stalled download.', flush=True)
+    def status():
+        try:
+            print(_download_status(cache, names, revision, started), flush=True)
+        except OSError as error:
+            print(f'[cityscapes download] Cannot inspect cache: {error}', flush=True)
+    def monitor():
+        while not stop.wait(heartbeat_seconds):
+            status()
+    status()
+    thread = threading.Thread(target=monitor, name='cityscapes-download-status', daemon=True)
+    thread.start()
+    try:
+        root = Path(snapshot_download(REPO, repo_type='dataset', revision=revision,
+                    allow_patterns=names, max_workers=2))
+        print('[cityscapes download] All selected shards available; checking Parquet metadata next.', flush=True)
+        return root
+    except Exception:
+        print('[cityscapes download] Download failed. Completed cache files are retained. '
+              'Check the following traceback for network, disk or permission errors before retrying.', flush=True)
+        raise
+    finally:
+        stop.set()
+        thread.join(timeout=1)
+
+
 class ParquetRows:
     """Read source Parquets directly, avoiding a second full Arrow copy on Kaggle SSD."""
     column_names = ('id', 'image', 'mask')
@@ -63,12 +120,18 @@ class ParquetRows:
         if index == 'id':
             if self._ids is None:
                 ids = []
+                started = logged = time.monotonic()
+                print(f'[cityscapes IDs] Hashing image bytes for {len(self)} rows (CPU/disk); no GPU work yet.', flush=True)
                 for path, group in self.groups:
                     with pq.ParquetFile(path) as file:
                         for batch in file.iter_batches(batch_size=8, row_groups=[group], columns=['image']):
                             ids.extend(hashlib.sha256(row['image']['bytes']).hexdigest()
                                        for row in batch.to_pylist())
+                    if time.monotonic()-logged >= 30:
+                        print(f'[cityscapes IDs] {len(ids)}/{len(self)} rows; elapsed={time.monotonic()-started:.0f}s', flush=True)
+                        logged = time.monotonic()
                 self._ids = ids
+                print(f'[cityscapes IDs] Complete: {len(ids)} rows in {time.monotonic()-started:.1f}s', flush=True)
             return self._ids
         if not isinstance(index, (int, np.integer)) or not 0 <= index < len(self):
             raise IndexError(index)
@@ -89,17 +152,16 @@ class ParquetRows:
 
 
 def load_hf(revision=REVISION):
-    from huggingface_hub import snapshot_download
     files = parquet_files(revision)
     names = {split: [f'data/{url.rsplit("/", 1)[1]}' for url in urls] for split, urls in files.items()}
     # One source copy on disk; no test split, raw ZIP extraction, or Arrow conversion.
-    root = Path(snapshot_download(REPO, repo_type='dataset', revision=revision,
-                allow_patterns=[name for paths in names.values() for name in paths], max_workers=2))
+    root = download_snapshot([name for paths in names.values() for name in paths], revision)
     data = {split: ParquetRows([root/name for name in paths]) for split, paths in names.items()}
     spec = HFCitySpec()
     for split, expected in [('train', spec.train_rows), ('validation', spec.validation_rows)]:
         if len(data[split]) != expected:
             raise ValueError(f'Cityscapes {split}: expected {expected}, got {len(data[split])}')
+        print(f'[cityscapes validation] {split}: {len(data[split])} rows; decoding first image/mask.', flush=True)
         row = data[split][0]
         if row['image'].size != (2048, 1024) or row['mask'].size != row['image'].size:
             raise ValueError('Unexpected Cityscapes source geometry')

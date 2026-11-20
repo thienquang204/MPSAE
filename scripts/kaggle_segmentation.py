@@ -51,7 +51,16 @@ def copy_current_results(archive, destination, campaign):
     return True
 
 
-def main(dataset='nyuv2', encoders=None, methods=None, include_dense=True, mmpot_weight=None):
+def main(dataset='nyuv2', encoders=None, methods=None, include_dense=True, mmpot_weight=None, mmpot_masses=None):
+    if mmpot_masses is not None:
+        # Validate the selection before installation/downloads. Core module validates masses.
+        if dataset != 'voc':
+            raise ValueError('The mass-ablation launcher currently targets VOC')
+        if methods is None: methods = ['mpsae']
+        if list(methods) != ['mpsae']:
+            raise ValueError('Mass ablation requires METHODS=["mpsae"]')
+        if encoders is None: encoders = ['siglip2']
+        include_dense = False
     if encoders is not None:
         encoders = list(encoders)
         if not encoders or len(set(encoders)) != len(encoders) or any(e not in ('siglip2', 'dinov2') for e in encoders):
@@ -96,6 +105,27 @@ def main(dataset='nyuv2', encoders=None, methods=None, include_dense=True, mmpot
              'import sys,yaml,json; from pathlib import Path; c=yaml.safe_load(Path(sys.argv[1]).read_text()); c.update(json.loads(sys.argv[3])); Path(sys.argv[2]).write_text(yaml.safe_dump(c, sort_keys=False))',
              config, selected_config, json.dumps(overrides)], cwd=repo)
         config = selected_config
+    if mmpot_masses is not None:
+        command = [python, '-u', '-m', 'mpsae.patch_scene.mass_sweep',
+                   '--config', str(config), '--workspace', str(workspace),
+                   '--masses', *[str(s) for s in mmpot_masses],
+                   '--encoders', *encoders,
+                   '--devices', *devices, '--cpu-threads', '2']
+        sweep_plan = json.loads(subprocess.check_output(command+['--plan'], cwd=repo, text=True))
+        print(json.dumps(sweep_plan, indent=2))
+        archive = workspace/'ablations'/sweep_plan['sweep_id']/'mass-sweep-results.zip'
+        target = working/f"VOC_mpsae_mass_{sweep_plan['sweep_id']}_results.zip"
+        try:
+            run(command, cwd=repo)
+        finally:
+            if archive.exists():
+                shutil.copy2(archive, target)
+                display(FileLink(target.name))
+        table = archive.parent/'matched_comparisons.csv'
+        display(pd.read_csv(table).round(3))
+        print('Experiment register:', workspace/'experiment-index.csv')
+        print('Preserve the complete workspace to resume:', workspace)
+        return
     plan = json.loads(subprocess.check_output(base+['plan', '--config', str(config)], cwd=repo, text=True))
     assert set(plan['datasets']) == {dataset}
     assert set(plan['encoders']) == set(encoders or ['siglip2', 'dinov2'])
@@ -145,4 +175,4 @@ def main(dataset='nyuv2', encoders=None, methods=None, include_dense=True, mmpot
 if __name__ == '__main__':
     main(globals().get('DATASET', 'nyuv2'), globals().get('ENCODERS'),
          globals().get('METHODS'), globals().get('INCLUDE_DENSE', True),
-         globals().get('MMPOT_WEIGHT'))
+         globals().get('MMPOT_WEIGHT'), globals().get('MMPOT_MASSES'))

@@ -31,6 +31,7 @@ class Config:
     include_dense: bool = True
     cityscapes_source: str = 'official'
     mpsae_ot_weight: float | None = None
+    mpsae_ot_mass: float = 0.9
     siglip2_mpsae_ot_weight: float | None = None
     seed: int = 1227
     k: int = 12
@@ -63,6 +64,10 @@ class Config:
     early_min_delta: float = 0.001
 
     def __post_init__(self):
+        if (isinstance(self.mpsae_ot_mass, bool) or not isinstance(self.mpsae_ot_mass, (float, int))
+                or not math.isfinite(self.mpsae_ot_mass) or not 0 < self.mpsae_ot_mass < 1):
+            raise ValueError('mpsae_ot_mass must be finite and strictly between 0 and 1')
+        object.__setattr__(self, 'mpsae_ot_mass', float(self.mpsae_ot_mass))
         if (not isinstance(self.methods, (list, tuple)) or not self.methods
                 or any(m not in METHODS for m in self.methods)
                 or len(set(self.methods)) != len(self.methods)):
@@ -140,10 +145,14 @@ class Config:
             preset = replace(preset, ot_weight=self.siglip2_mpsae_ot_weight)
         if method == "mpsae" and self.mpsae_ot_weight is not None:
             preset = replace(preset, ot_weight=self.mpsae_ot_weight)
+        if method == "mpsae":
+            preset = replace(preset, ot_mass=self.mpsae_ot_mass)
         return preset
 
     def identity(self):
         settings = asdict(self)
+        if self.mpsae_ot_mass == 0.9:
+            settings.pop("mpsae_ot_mass")  # preserve historical default campaign IDs
         if self.methods == METHODS:
             settings.pop('methods')
         if self.include_dense:
@@ -211,6 +220,7 @@ class Config:
 
     def source_identity(self):
         identity = self.identity()
+        identity["settings"].pop("mpsae_ot_mass", None)
         identity['settings'].pop('methods', None)
         identity['settings'].pop('include_dense', None)
         identity["settings"].pop("mpsae_ot_weight", None)
@@ -253,6 +263,7 @@ class Config:
                 'protocol': 'dataset-specific patch SAE training; Hummingbird-style retrieval',
                 'csrv2_supervision': 'dominant nonvoid training-mask class',
                 'training_preset': asdict(self.preset()),
+                'mpsae_ot_mass': self.mpsae_ot_mass,
                 'mpsae_ot_weights': {e: self.preset('mpsae', e).ot_weight for e in self.encoder_names}}
 
 

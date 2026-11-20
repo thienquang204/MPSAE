@@ -139,3 +139,69 @@ selected result rows. Comparison exports retain their standard schema, with
 uncomputed baselines and gains left blank/`--`, never zero or fabricated scores.
 Selection changes the campaign ID, but preserves feature and fit cache identities.
 The default launcher still runs all methods and the dense reference.
+
+
+## VOC transported-mass ablation (SigLIP2 / MPSAE)
+
+Copy `scripts/kaggle_voc_mass_cell.py` into one fresh Kaggle cell after pushing
+this update to the `refactor` branch. Enable Internet and GPU T4 x2. This installs
+the environment once, downloads VOC once, and runs independent jobs on up to two
+GPUs within each campaign. No Hugging Face token or output upload is needed.
+
+- `MMPOT_MASSES = [0.5, 0.6, 0.7, 0.8, 0.9, 0.95]` varies transported mass s.
+- `MMPOT_WEIGHT = None` retains the VOC default lambda=2.0. A positive float
+  overrides lambda, held fixed for the whole mass sweep. This is NOT s.
+- SigLIP2 only, MPSAE only; no CSR, CSRv2, dense or DINOv2 jobs.
+- Existing VOC settings: train K=3,12,48; each checkpoint evaluates K=3,12,48;
+  10 epochs, batch 1024, LR 4e-5, up to 262144 sampled training patches,
+  reference bank 65536, 30 neighbors, temperature .02. No early stopping.
+- Six masses mean 18 fits and 54 evaluations (18 matched, 36 cross-K).
+- The existing partial Greenkhorn solver is unchanged; 0<s<1 is enforced.
+  s=1 is deliberately unsupported, and no implicit loss normalization is added.
+- Data/feature/source identities ignore s. Fit identities include s. Each new
+  mass starts from the same seeded initialization, not another mass's checkpoint.
+  Compatible existing s=.9 fits/evaluations can be reused, even from larger campaigns.
+
+The launcher prints the immutable sweep ID and displays a download link named
+`VOC_mpsae_mass_<sweep_id>_results.zip`. Results are also saved under:
+
+```text
+/kaggle/working/voc/
+  experiment-index.csv                  all campaign conditions, including historical runs
+  experiment-index.json                 same, with provenance and scan errors
+  campaigns/<campaign_id>/              per-mass settings/results/checkpoints referenced
+  ablations/<sweep_id>/
+    plan.json                           immutable experiment list and resolved settings
+    results.csv                         all mass/train-K/inference-K results and statuses
+    results.json                        full provenance and last logged OT diagnostics
+    matched_results.csv                 matched K subset, including accuracy/nnz
+    matched_comparisons.csv              mIoU by mass, with lambda and seed explicit
+    matched_comparisons.tex              paper table (no best-mass selection)
+    mass-sweep-results.zip              combined results, even when partially completed
+```
+
+The register is rebuilt from all saved campaigns after each mass, so restarting
+or running a different mass list does not erase older experiments. Complete,
+pending, incomplete and failed entries are distinguished; missing values stay
+blank, never zero. Checkpoint and result paths are relative to the workspace.
+The ZIP also includes the experiment index and per-campaign settings/runtime/
+attempt receipts. It excludes actual checkpoints, image data and feature caches.
+Keep the full workspace to resume training; the ZIP preserves result/history
+information but is not a training backup. Solver diagnostics are last logged
+values, not a guarantee of optimality throughout training. Existing reused fits
+may not have execution Git metadata from their original training invocation.
+
+For an existing server environment, run from the repository root:
+
+```bash
+python -m mpsae.patch_scene.mass_sweep --plan
+python -m mpsae.patch_scene.mass_sweep --workspace work/voc --devices cuda:0
+# With two GPUs: --devices cuda:0 cuda:1
+# Rebuild the same sweep tables/index without downloading/training:
+python -m mpsae.patch_scene.mass_sweep --workspace work/voc --export-only
+```
+
+Use the same `--config`, `--masses` and `--weight` to rebuild a customized sweep.
+The default CLI selects VOC/SigLIP2/MPSAE. `--encoders dinov2` is available for
+explicit extensions. Re-running with unchanged settings resumes compatible work.
+Do not run two launchers concurrently in the same workspace.

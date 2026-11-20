@@ -73,3 +73,46 @@ def test_source_resolution_does_not_require_local_zip(monkeypatch, tmp_path):
     config = load(Path(__file__).resolve().parents[1]/'configs/patch_scene_cityscapes.yaml')
     result = resolve_sources(config, Hub(tmp_path))
     assert result['datasets']['cityscapes'] == REVISION
+
+
+def test_download_heartbeat_retains_pinned_protocol(monkeypatch, tmp_path, capsys):
+    import threading
+    import huggingface_hub
+    from mpsae.patch_scene import cityscapes_hf as module
+    names = ['data/train-00000-of-00014.parquet']
+    monkeypatch.setattr(huggingface_hub.constants, 'HF_HUB_CACHE', str(tmp_path))
+    heartbeat = threading.Event()
+    calls = []
+    def status(*args):
+        calls.append(args)
+        if len(calls) >= 2:
+            heartbeat.set()
+        return '[cityscapes download] heartbeat'
+    monkeypatch.setattr(module, '_download_status', status)
+    def download(repo, **kwargs):
+        assert repo == module.REPO
+        assert kwargs == dict(repo_type='dataset', revision=REVISION, allow_patterns=names, max_workers=2)
+        assert heartbeat.wait(2), 'No heartbeat while download was blocked'
+        return str(tmp_path)
+    monkeypatch.setattr(huggingface_hub, 'snapshot_download', download)
+    assert module.download_snapshot(names, heartbeat_seconds=0.01) == tmp_path
+    assert 'All selected shards available' in capsys.readouterr().out
+    def fail(*args, **kwargs):
+        raise OSError('disk full')
+    monkeypatch.setattr(huggingface_hub, 'snapshot_download', fail)
+    with pytest.raises(OSError, match='disk full'):
+        module.download_snapshot(names, heartbeat_seconds=0.01)
+    assert 'Download failed' in capsys.readouterr().out
+
+
+def test_download_status_counts_cached_files_and_partials(tmp_path):
+    import time
+    from mpsae.patch_scene.cityscapes_hf import _download_status
+    repo = tmp_path/'datasets--Chris1--cityscapes'
+    snapshot = repo/'snapshots'/REVISION/'data'
+    snapshot.mkdir(parents=True)
+    (snapshot/'a.parquet').write_bytes(b'complete')
+    (repo/'blobs').mkdir()
+    (repo/'blobs'/'b.incomplete').write_bytes(b'partial')
+    status = _download_status(tmp_path, ['data/a.parquet', 'data/b.parquet'], REVISION, time.monotonic())
+    assert 'cached=1/2' in status and 'partial_files=1' in status and 'free_GiB=' in status
