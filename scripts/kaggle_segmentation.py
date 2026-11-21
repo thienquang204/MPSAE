@@ -51,7 +51,14 @@ def copy_current_results(archive, destination, campaign):
     return True
 
 
-def main(dataset='nyuv2', encoders=None, methods=None, include_dense=True, mmpot_weight=None, mmpot_masses=None):
+def main(dataset='nyuv2', encoders=None, methods=None, include_dense=True, mmpot_weight=None,
+         mmpot_masses=None, mmpot_mass=None, mmpot_weights=None, train_ks=None):
+    if mmpot_weights is not None and (mmpot_weight is not None or mmpot_masses is not None):
+        raise ValueError('Use MMPOT_WEIGHTS with fixed MMPOT_MASS; omit MMPOT_WEIGHT and MMPOT_MASSES')
+    if mmpot_masses is not None and mmpot_mass is not None:
+        raise ValueError('Choose either fixed MMPOT_MASS or MMPOT_MASSES')
+    if mmpot_weights is not None and methods is not None and 'mpsae' not in methods:
+        raise ValueError('A weight ablation requires mpsae in METHODS')
     if mmpot_masses is not None:
         # Validate the selection before installation/downloads. Core module validates masses.
         if dataset != 'voc':
@@ -95,12 +102,18 @@ def main(dataset='nyuv2', encoders=None, methods=None, include_dense=True, mmpot
     base = [python, '-u', '-m', 'mpsae.patch_scene']
     for device in devices:
         run(base+['doctor', '--device', device], cwd=repo)
-    if encoders is not None or methods is not None or not include_dense or mmpot_weight is not None:
+    if (encoders is not None or methods is not None or not include_dense or mmpot_weight is not None
+            or mmpot_mass is not None or mmpot_weights is not None or train_ks is not None):
         selected_config = workspace/'config-kaggle.yaml'
         overrides = {'include_dense': include_dense}
         if encoders is not None: overrides['encoders'] = encoders
         if methods is not None: overrides['methods'] = list(methods)
         if mmpot_weight is not None: overrides['mpsae_ot_weight'] = mmpot_weight
+        if mmpot_mass is not None: overrides['mpsae_ot_mass'] = mmpot_mass
+        if train_ks is not None:
+            overrides.update(train_k=list(train_ks), inference_k=list(train_ks))
+        if mmpot_weights is not None:
+            overrides.update(evaluation_mode='matched', inference_k=None)
         run([python, '-c',
              'import sys,yaml,json; from pathlib import Path; c=yaml.safe_load(Path(sys.argv[1]).read_text()); c.update(json.loads(sys.argv[3])); Path(sys.argv[2]).write_text(yaml.safe_dump(c, sort_keys=False))',
              config, selected_config, json.dumps(overrides)], cwd=repo)
@@ -126,7 +139,14 @@ def main(dataset='nyuv2', encoders=None, methods=None, include_dense=True, mmpot
         print('Experiment register:', workspace/'experiment-index.csv')
         print('Preserve the complete workspace to resume:', workspace)
         return
-    plan = json.loads(subprocess.check_output(base+['plan', '--config', str(config)], cwd=repo, text=True))
+    weight_command = None
+    if mmpot_weights is not None:
+        weight_command = [python, '-u', '-m', 'mpsae.patch_scene.weight_sweep',
+                          '--config', str(config), '--workspace', str(workspace),
+                          '--weights', *[str(w) for w in mmpot_weights],
+                          '--devices', *devices, '--cpu-threads', '2']
+    plan_command = weight_command+['--plan'] if weight_command else base+['plan', '--config', str(config)]
+    plan = json.loads(subprocess.check_output(plan_command, cwd=repo, text=True))
     assert set(plan['datasets']) == {dataset}
     assert set(plan['encoders']) == set(encoders or ['siglip2', 'dinov2'])
     print(json.dumps(plan, indent=2))
@@ -143,9 +163,25 @@ def main(dataset='nyuv2', encoders=None, methods=None, include_dense=True, mmpot
     print('Sampling: all_train_patches=', plan['settings'].get('all_train_patches', False),
           'support_patches=', plan['settings']['support_patches'], flush=True)
     # VOC is fetched automatically from its pinned HF dataset by the feature loader.
+    if weight_command is not None:
+        archive = workspace/'ablations'/plan['sweep_id']/'weight-sweep-results.zip'
+        result_zip = working/f"{dataset.upper()}_ot_weights_{plan['sweep_id']}_results.zip"
+        try:
+            run(weight_command+extra, cwd=repo)
+        finally:
+            if archive.exists():
+                shutil.copy2(archive, result_zip)
+                display(FileLink(result_zip.name))
+        receipt = json.loads((archive.parent/'grid_results.json').read_text())
+        print(f"Completed: {receipt['completed']}/{receipt['expected']} unique evaluations; complete={receipt['complete']}")
+        display(pd.read_csv(archive.parent/'grid_comparisons.csv').round(3))
+        print('Experiment register:', workspace/'experiment-index.csv')
+        print('Preserve the complete workspace to resume:', workspace)
+        return
     suffix = '_' + '_'.join(encoders) if encoders else ''
     if methods is not None: suffix += '_' + '_'.join(methods)
     if mmpot_weight is not None: suffix += '_ot' + str(mmpot_weight).replace('.', 'p')
+    if mmpot_mass is not None: suffix += '_s' + str(mmpot_mass).replace('.', 'p')
     result_zip = working/f'{dataset.upper()}{suffix}_results.zip'
     try:
         run(base+['run', '--config', str(config), '--workspace', str(workspace),
@@ -175,4 +211,5 @@ def main(dataset='nyuv2', encoders=None, methods=None, include_dense=True, mmpot
 if __name__ == '__main__':
     main(globals().get('DATASET', 'nyuv2'), globals().get('ENCODERS'),
          globals().get('METHODS'), globals().get('INCLUDE_DENSE', True),
-         globals().get('MMPOT_WEIGHT'), globals().get('MMPOT_MASSES'))
+         globals().get('MMPOT_WEIGHT'), globals().get('MMPOT_MASSES'),
+         globals().get('MMPOT_MASS'), globals().get('MMPOT_WEIGHTS'), globals().get('TRAIN_KS'))

@@ -5,6 +5,7 @@ import math
 from pathlib import Path
 
 from ..io import atomic_json
+from ..transport import solver_name
 from .report import expected_keys, NAMES, DATASET_NAMES
 
 
@@ -43,7 +44,11 @@ def write_grid_tables(receipts, configs, weights, directory):
     lookup={}; campaigns=[]
     for config,dataset,receipt in receipts:
         weight=config.mpsae_ot_weight
-        campaigns.append({'dataset':dataset,'weight':weight,'campaign':config.plan()['campaign']})
+        if dataset not in configs or config.plan()['campaign'] not in {
+                c.plan()['campaign'] for c in grid_configs(configs[dataset], weights)}:
+            raise ValueError('Receipt settings differ from the requested weight grid')
+        campaigns.append({'dataset':dataset,'weight':weight,'mass':config.mpsae_ot_mass,
+                          'solver':solver_name(config.mpsae_ot_mass),'campaign':config.plan()['campaign']})
         for row in receipt['results']:
             w=weight if row['method']=='mpsae' else None
             key=(row['dataset'],row['encoder'],row['method'],row.get('train_k'),row.get('inference_k'),w)
@@ -54,13 +59,16 @@ def write_grid_tables(receipts, configs, weights, directory):
                 for field in ('identity','miou','pixel_accuracy','mean_nnz','gallery_mean_nnz'):
                     if old.get(field)!=row.get(field):
                         raise ValueError(f'Inconsistent shared baseline/result: {key}, {field}')
-            lookup[key]={**row,'mmpot_weight':w}
+            lookup[key]={**row,'mmpot_weight':w,
+                         'mmpot_mass':config.mpsae_ot_mass if w is not None else None,
+                         'solver':solver_name(config.mpsae_ot_mass) if w is not None else None,
+                         'seed':config.seed}
     ordered=sorted(lookup,key=lambda key:tuple('' if x is None else str(x) for x in key))
     rows=[lookup[key] for key in ordered]
     atomic_json(directory/'grid_results.json',{'complete':len(rows)==len(expected),
         'completed':len(rows),'expected':len(expected),'weights':weights,'campaigns':campaigns,
         'selection':'Report all weights. No best-weight selection on NYUv2 official test.', 'results':rows})
-    fields=['dataset','encoder','method','train_k','inference_k','mmpot_weight','miou_percent',
+    fields=['dataset','encoder','method','train_k','inference_k','seed','mmpot_mass','mmpot_weight','solver','miou_percent',
             'pixel_accuracy_percent','mean_nnz','gallery_mean_nnz']
     with (directory/'grid_results.csv').open('w',newline='',encoding='utf-8') as file:
         writer=csv.DictWriter(file,fieldnames=fields);writer.writeheader()
@@ -71,7 +79,7 @@ def write_grid_tables(receipts, configs, weights, directory):
     for dataset,config in configs.items():
         for encoder in config.encoder_names:
             for k in config.training_ks:
-                out={'dataset':dataset,'encoder':encoder,'k':k}
+                out={'dataset':dataset,'encoder':encoder,'k':k,'seed':config.seed,'mmpot_mass':config.mpsae_ot_mass}
                 for method in ('dense','csr','csrv2','mpsae'):
                     for w in weights if method=='mpsae' else [None]:
                         train=infer=None if method=='dense' else k
@@ -82,13 +90,13 @@ def write_grid_tables(receipts, configs, weights, directory):
     with (directory/'grid_comparisons.csv').open('w',newline='',encoding='utf-8') as file:
         writer=csv.DictWriter(file,fieldnames=list(comparisons[0]));writer.writeheader();writer.writerows(comparisons)
     lines=[r'% Requires \usepackage{booktabs}; scores are mIoU (%).',r'\begin{table*}[t]',r'\centering',
-        r'\caption{MMPOT-weight ablation at matched training/inference sparsity. All weights are reported; no test-set model selection.}',
-        r'\begin{tabular}{llr'+'r'*(3+len(weights))+'}',r'\toprule',
-        'Dataset & Encoder & $K$ & Dense & CSR & CSRv2 & '+' & '.join(f'MPSAE ($\\lambda={w:g}$)' for w in weights)+r' \\',r'\midrule']
+        r'\caption{Transport-loss weight ablation at matched training/inference sparsity. $s=1$ uses balanced MMOT; $s<1$ uses partial MMPOT. All weights are reported; no test-set model selection.}',
+        r'\begin{tabular}{llrr'+'r'*(3+len(weights))+'}',r'\toprule',
+        'Dataset & Encoder & $K$ & $s$ & Dense & CSR & CSRv2 & '+' & '.join(f'MPSAE ($\\lambda={w:g}$)' for w in weights)+r' \\',r'\midrule']
     for row in comparisons:
-        scores=[row[f] for f in list(row)[3:]]
-        lines.append(' & '.join([DATASET_NAMES[row['dataset']],NAMES[row['encoder']],str(row['k']),
+        scores=[row[f] for f in ['dense','csr','csrv2',*[f'mpsae_lambda_{w:g}' for w in weights]]]
+        lines.append(' & '.join([DATASET_NAMES[row['dataset']],NAMES[row['encoder']],str(row['k']),f"{row['mmpot_mass']:g}",
                                 *['--' if s is None else f'{s:.2f}' for s in scores]])+r' \\')
     lines += [r'\bottomrule',r'\end{tabular}',
-        r'\par\smallskip\footnotesize NYUv2: official test; Cityscapes: validation. Single seed; CSRv2 uses training labels. Shared support bank; baselines evaluated once. -- denotes pending results.',r'\end{table*}']
+        r'\par\smallskip\footnotesize VOC and Cityscapes: validation; NYUv2: official test. Single seed; CSRv2 uses training labels. Shared support bank; baselines evaluated once. -- denotes unavailable results.',r'\end{table*}']
     (directory/'grid_results.tex').write_text('\n'.join(lines)+'\n',encoding='utf-8')

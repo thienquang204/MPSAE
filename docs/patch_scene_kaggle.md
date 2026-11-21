@@ -209,3 +209,77 @@ Use the same `--config`, `--masses` and `--weight` to rebuild a customized sweep
 The default CLI selects VOC/SigLIP2/MPSAE. `--encoders dinov2` is available for
 explicit extensions. Re-running with unchanged settings resumes compatible work.
 Do not run two launchers concurrently in the same workspace.
+
+
+## Multiple methods and loss weights, including balanced MMOT (s=1)
+
+Copy the complete contents of `scripts/kaggle_segmentation_weights_cell.py`
+into one new Kaggle code cell, after pushing this update to the `refactor` branch.
+Enable Internet and one GPU or T4 x2. The cell installs its environment once,
+prepares the selected dataset once, and keeps results locally; no HF token or
+result upload is required. Edit only the settings at the top:
+
+```python
+DATASET = 'voc'                       # also 'nyuv2' or 'cityscapes'
+ENCODERS = ['siglip2']                # or ['siglip2', 'dinov2']
+METHODS = ['csr', 'csrv2', 'mpsae']
+TRAIN_KS = [3, 12, 48]
+MMPOT_MASS = 1.0                     # transported mass s, NOT the loss weight
+MMPOT_WEIGHTS = [0.5, 1.0, 2.0]     # coefficients lambda before the transport loss
+INCLUDE_DENSE = True
+```
+
+For MPSAE this is `L_other + lambda * L_transport`. Exact `s=1` uses the shared
+balanced log-domain Sinkhorn solver (`balanced-log-sinkhorn-v1`), with uniform
+equality marginals and zero slack entropy. It does not approximate s with 0.999
+or send full mass to the partial solver. `0<s<1` retains the existing partial
+Greenkhorn path. The objective, encoder, optimization settings, patch selection,
+and retrieval protocol are otherwise unchanged. The balanced matching-gap
+gradient is the diagonal reference plan minus the solved transport plan.
+
+CSR and CSRv2 have no MMOT term: they are fitted/evaluated once per encoder/K and
+reused across weights. Each MPSAE weight/K starts its own seeded fit, and only an
+exact compatible fit may resume. A previous partial-transport MPSAE checkpoint
+cannot be resumed as balanced MMOT. All methods share the same cached features
+and support bank; the two-GPU scheduler runs independent jobs, not DDP, so batch
+size remains 1024. Existing default experiments/configuration files are unchanged.
+
+The weight grid uses **matched K only**, including on VOC. With three K values
+and three weights, SigLIP2 alone requires **15 fits, 16 unique evaluations**
+(3 CSR + 3 CSRv2 + 9 MPSAE + 1 dense). Both encoders require 30 fits and 32
+evaluations. For MPSAE alone, set `METHODS=['mpsae']` and `INCLUDE_DENSE=False`:
+9 fits/evaluations per encoder. `TRAIN_KS` must be at most 64 for this grid;
+the existing larger-K loss-weight policy is not overridden. VOC keeps 10 epochs;
+NYUv2/Cityscapes keep their canonical 20-epoch maximum and early stopping.
+
+Do not combine `MMPOT_WEIGHTS` with the singular `MMPOT_WEIGHT` or the different
+`MMPOT_MASSES` ablation. Changing datasets only requires editing `DATASET`.
+
+Download the displayed `<DATASET>_ot_weights_<sweep_id>_results.zip` link. It
+contains **all selected weights**, not just the latest campaign:
+
+- `plan.json`: dataset, encoders, methods, K, s, weights, solver and full settings.
+- `grid_results.csv`: long table with s, lambda, seed, solver, mIoU, pixel accuracy
+  and measured query/gallery nnz. Baselines appear once, with no transport weight.
+- `grid_comparisons.csv` and `grid_results.tex`: matched-K mIoU comparison table.
+- `experiment-index.csv/json`: all historical campaign statuses and fit paths.
+- `campaigns/`: per-campaign settings, source provenance, runtime and results.
+
+The combined archive is refreshed after each weight, also on an interrupted or
+failed campaign. Unavailable results stay blank/`--`. Downloading the ordinary
+`patch-scene-results.zip` still gives only one campaign; use the new combined ZIP.
+Checkpoints and feature caches stay in `/kaggle/working/<dataset>` and are excluded
+from the ZIP. Retain that complete workspace to resume across Kaggle sessions.
+
+For an existing environment, the same driver works outside Kaggle:
+
+```bash
+python -m mpsae.patch_scene.weight_sweep --config configs/patch_scene_voc.yaml \
+  --workspace work/voc --encoders siglip2 --methods csr csrv2 mpsae \
+  --train-k 3 12 48 --mass 1 --weights 0.5 1 2 --devices cuda:0 cuda:1 --plan
+# Remove --plan to run. Use --export-only to rebuild this grid without training.
+```
+
+For NYUv2, first use `prepare_nyuv2 --from-hf --destination <folder>` and pass
+`--nyuv2-root <folder>`; the Kaggle launcher does this automatically. Retain all
+weights in the report; do not select the best one on NYUv2's official test split.
