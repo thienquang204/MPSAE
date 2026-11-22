@@ -130,3 +130,5 @@ All weights are reported; no winning setting is selected from NYUv2's official
 test split. Present test-set grid results as sensitivity analysis, not as an
 independently validated tuned result. Unique computation counts exclude repeated
 cached baseline rows in the per-weight campaign tables. GPU runtime is unmeasured.
+
+For the Kaggle-equivalent mass AND loss-weight grid on a fresh server, use the [one-file server launcher](segmentation_server_onefile.md). It supports VOC, NYUv2 and Cityscapes with optional two-GPU execution and a combined local results ZIP.
