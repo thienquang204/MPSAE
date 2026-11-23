@@ -21,7 +21,7 @@ def restore_threads():
 
 def test_config_plan_default_and_flexible_selection():
     config=MassConfig.load(ROOT/'configs/retrieval_mass.yaml')
-    assert config.plan()['fits']==8 and config.plan()['evaluations']==8
+    assert config.plan()['fits']==16 and config.plan()['evaluations']==16
     for cell,mass in config.cells():
         preset=config.spec(cell,mass).preset
         assert (preset.batch_size,preset.epochs,preset.lr)==(1024,10,4e-5)
@@ -29,7 +29,7 @@ def test_config_plan_default_and_flexible_selection():
     expanded=replace(config,backbones=('convnext_tiny','dinov2_vits14'),
                      train_k={'convnext_tiny':[12,48],'dinov2_vits14':[12]},
                      evaluation_mode='sweep',inference_k={'convnext_tiny':[3,12,48], 'dinov2_vits14':[3,12]})
-    assert expanded.plan()['fits']==6 and expanded.plan()['evaluations']==16
+    assert expanded.plan()['fits']==12 and expanded.plan()['evaluations']==32
     assert expanded.plan()['sweep_id']!=config.plan()['sweep_id']
     for kwargs in ({'masses':(True,)},{'masses':(0.,)},{'masses':(1.01,)},
                    {'masses':(.9,.9)},{'backbones':('unknown',)}, {'lr':float('nan')},

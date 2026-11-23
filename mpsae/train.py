@@ -13,7 +13,7 @@ from an incompatible state.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from copy import deepcopy
 from pathlib import Path
 import re
@@ -36,7 +36,7 @@ _SHA256 = re.compile(r"[0-9a-f]{64}")
 
 @dataclass
 class FitSettings:
-    """Knobs that do not change the objective."""
+    """Execution settings and an explicit, identity-tracked batch-size override."""
 
     device: str = "cuda:0"
     residency: str = "auto"
@@ -49,8 +49,11 @@ class FitSettings:
     #: discards the checkpoint rather than resuming from it: ``--force train``
     #: means "do it again", not "do the rest of it".
     force: bool = False
+    batch_size_override: int | None = None  # explicit ablation only; defaults unchanged
 
     def __post_init__(self) -> None:
+        if self.batch_size_override is not None and (type(self.batch_size_override) is not int or self.batch_size_override < 2):
+            raise ValueError('batch_size_override must be an integer >= 2')
         for name in ("checkpoint_every", "log_every"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
@@ -71,9 +74,14 @@ def total_updates(bundle: Bundle, preset: TrainPreset, *, max_steps: int = 0) ->
 
 
 def fit_identity(cell: Cell, bundle: Bundle, preset: TrainPreset, *,
-                 total_steps: int, per_epoch: int, code_version: str) -> dict[str, Any]:
+                 total_steps: int, per_epoch: int, code_version: str,
+                 batch_size_override: int | None = None) -> dict[str, Any]:
     """Everything that must match for a checkpoint to be resumable."""
     preset = training_preset(cell.method, preset, k=cell.k)
+    if batch_size_override is not None:
+        if type(batch_size_override) is not int or batch_size_override < 2:
+            raise ValueError('batch_size_override must be an integer >= 2')
+        preset = replace(preset, batch_size=batch_size_override)
     identity = {
         "format": CHECKPOINT_FORMAT,
         "code_version": code_version,
@@ -219,6 +227,8 @@ def _fit(cell: Cell, bundle: Bundle, out_dir: str | Path, settings: FitSettings,
 
     spec = spec or BACKBONES[cell.backbone]
     preset = training_preset(cell.method, spec.preset, k=cell.k)
+    if settings.batch_size_override is not None:
+        preset = replace(preset, batch_size=settings.batch_size_override)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     log = get_logger(f"fit {cell.slug}")
@@ -229,7 +239,8 @@ def _fit(cell: Cell, bundle: Bundle, out_dir: str | Path, settings: FitSettings,
     if per_epoch < 1 or total < 1:
         raise ValueError("cannot fit an empty training split")
     identity = fit_identity(cell, bundle, preset, total_steps=total,
-                            per_epoch=per_epoch, code_version=code_version)
+                            per_epoch=per_epoch, code_version=code_version,
+                            batch_size_override=settings.batch_size_override)
     signature = canonical_hash(identity)
     summary_path = out_dir / "summary.json"
     checkpoint_path = out_dir / "checkpoint.pt"

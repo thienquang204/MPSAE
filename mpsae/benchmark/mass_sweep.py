@@ -170,7 +170,7 @@ def _source_fit(cell, requested, source_root):
     return out, summary
 
 
-def run(config, args):
+def run(config, args, *, bundles=None):
     root = args.workspace.resolve()/('SMOKE_ONLY' if args.smoke else '')
     plan = config.plan()
     plan['scientific'] = not args.smoke
@@ -218,7 +218,8 @@ def run(config, args):
             first,s = selected[0]
             bundle = None
             try:
-                bundle = (_synthetic(config.spec(first,s,smoke=True)) if args.smoke else
+                bundle = (bundles[backbone] if bundles is not None else
+                          _synthetic(config.spec(first,s,smoke=True)) if args.smoke else
                           load_bundle(BACKBONES[backbone], args.embeddings_dir, args.cache_dir))
                 if not args.smoke:
                     if (bundle.train.rows,bundle.validation.rows) != (1_281_167,50_000):
@@ -235,10 +236,11 @@ def run(config, args):
                         spec = config.spec(cell,mass,smoke=args.smoke)
                         fits = FitSettings(device=args.device, max_steps=2 if args.smoke else 0,
                             residency=args.residency, log_every=args.log_every,
-                            checkpoint_every=args.checkpoint_every)
+                            checkpoint_every=args.checkpoint_every, batch_size_override=config.batch_size)
                         per_epoch,total = total_updates(bundle,spec.preset,max_steps=fits.max_steps)
                         identity = fit_identity(cell,bundle,spec.preset,total_steps=total,
-                                                per_epoch=per_epoch,code_version=__version__)
+                                                per_epoch=per_epoch,code_version=__version__,
+                                                batch_size_override=config.batch_size)
                         fit_id = canonical_hash(identity)
                         out = root/'fits'/fit_id
                         reused = (None if args.smoke or not args.reuse_source or
@@ -312,7 +314,7 @@ def run(config, args):
                 if not args.continue_on_error or not isinstance(error,Exception):
                     raise
             finally:
-                if bundle is not None:
+                if bundle is not None and bundles is None:
                     for split in (bundle.train,bundle.validation):
                         mapping=getattr(split.features,'_mmap',None)
                         if mapping is not None:
@@ -332,7 +334,7 @@ def _budgets(items):
     return result
 
 
-def main(argv=None):
+def argument_parser():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config',default='configs/retrieval_mass.yaml')
     parser.add_argument('--workspace',type=Path,default=Path('work/retrieval-mass'))
@@ -345,6 +347,7 @@ def main(argv=None):
     parser.add_argument('--masses',nargs='+',type=float)
     parser.add_argument('--seeds',nargs='+',type=int)
     parser.add_argument('--epochs',type=int)
+    parser.add_argument('--batch-size',type=int)
     parser.add_argument('--lr',type=float)
     parser.add_argument('--ot-weight',type=float)
     parser.add_argument('--ot-eta',type=float)
@@ -364,6 +367,11 @@ def main(argv=None):
     parser.add_argument('--plan',action='store_true')
     parser.add_argument('--export-only',action='store_true')
     parser.add_argument('--smoke',action='store_true')
+    return parser
+
+
+def main(argv=None):
+    parser = argument_parser()
     args=parser.parse_args(argv)
     payload=MassConfig.load(args.config).__dict__.copy()
     if args.backbones:
@@ -374,7 +382,7 @@ def main(argv=None):
         payload['train_k'].update(_budgets(args.train_k))
     if args.inference_k:
         payload.update(evaluation_mode='sweep',inference_k=_budgets(args.inference_k))
-    for name in ('masses','seeds','epochs','lr','ot_weight','ot_eta','ot_microbatch'):
+    for name in ('masses','seeds','epochs','lr','batch_size','ot_weight','ot_eta','ot_microbatch'):
         if getattr(args,name) is not None:
             payload[name]=getattr(args,name)
     config=MassConfig(**payload)

@@ -3,7 +3,7 @@ backbones: [ff2048, vit_b16]
 train_k:
   ff2048: [8, 32]
   vit_b16: [12, 48]
-masses: [0.9, 1.0]  # partial Greenkhorn / balanced log-Sinkhorn
+masses: [0.2, 0.4, 0.6, 1.0]  # partial Greenkhorn / balanced log-Sinkhorn
 seeds: [1227]
 evaluation_mode: matched
 inference_k: {}     # set evaluation_mode: sweep and give per-backbone K lists

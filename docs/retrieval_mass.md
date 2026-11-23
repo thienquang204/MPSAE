@@ -1,5 +1,8 @@
 # ImageNet transport-mass ablation
 
+For the combined mass study and batch-4096 ResNet-50 weight study with plots,
+tables and a one-file RTX 5090 setup, use [retrieval_studies.md](retrieval_studies.md).
+
 This independent runner trains MPSAE with selectable transport masses, then
 uses the existing exact ImageNet 1-NN evaluator on the sparse latent codes.
 The main retrieval configurations, CSR and CSRv2 are unaffected. All results
@@ -8,8 +11,8 @@ stay on local disk; nothing is uploaded to Hugging Face.
 ## Default experiment
 
 `configs/retrieval_mass.yaml` selects ResNet-50 (`ff2048`) at K=8,32 and
-ViT-B/16 (`vit_b16`) at K=12,48, with s=0.9,1.0 and seed 1227: **8 fits and
-8 matched-K evaluations**. Compatible existing source fits/results are reused.
+ViT-B/16 (`vit_b16`) at K=12,48, with s=0.2,0.4,0.6,1.0 and seed 1227: **16 fits and
+16 matched-K evaluations**. Compatible existing source fits/results are reused.
 
 The SAE recipe remains 10 epochs, batch size 1024, Adam with LR 4e-5, hidden
 dimension 8192, OT entropy coefficient 0.2 and OT groups of 32 examples. The
@@ -83,7 +86,7 @@ explicit ablation sweep evaluates every selected checkpoint. Changing only
 inference K reuses fits. For a YAML sweep, set `evaluation_mode: sweep` and
 provide `inference_k` for every backbone. Matched mode requires an empty map.
 
-Other overrides: `--epochs`, `--lr`, `--ot-weight`, `--ot-eta`,
+Other overrides: `--epochs`, `--lr`, `--batch-size`, `--ot-weight`, `--ot-eta`,
 `--ot-microbatch`, `--device`, `--residency`, `--encode-batch-size`,
 `--gallery-chunk`, `--query-block`. Training changes create different fit
 identities. An explicit weight conflicting with the K>64 recipe is rejected.

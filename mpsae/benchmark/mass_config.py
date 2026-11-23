@@ -31,6 +31,7 @@ class MassConfig:
     ot_weight: float | None = None
     ot_eta: float = .2
     ot_microbatch: int = 32
+    batch_size: int | None = None
 
     def __post_init__(self):
         if (not isinstance(self.backbones, (tuple, list)) or not self.backbones
@@ -62,6 +63,8 @@ class MassConfig:
         object.__setattr__(self, 'seeds', integers(self.seeds, 'seeds', minimum=0))
         if self.epochs is not None:
             integers([self.epochs], 'epochs')
+        if self.batch_size is not None:
+            integers([self.batch_size], 'batch_size', minimum=2)
         integers([self.ot_microbatch], 'ot_microbatch', minimum=2)
         for name in ('lr', 'ot_weight', 'ot_eta'):
             v = getattr(self, name)
@@ -100,6 +103,8 @@ class MassConfig:
             if getattr(self, name) is not None:
                 changes[name] = getattr(self, name)
         preset = training_preset('mpsae', replace(original.preset, **changes), k=cell.k)
+        if self.batch_size is not None:
+            preset = replace(preset, batch_size=self.batch_size)
         if not smoke:
             return replace(original, preset=preset)
         budgets = tuple(sorted(set((*self.train_k[cell.backbone], *self.budgets(cell)))))
@@ -110,6 +115,8 @@ class MassConfig:
 
     def plan(self):
         settings = json.loads(json.dumps(asdict(self)))
+        if self.batch_size is None:
+            settings.pop('batch_size')  # historical sweep identities stay valid
         recipes = [{'backbone': c.backbone, 'train_k': c.k, 'seed': c.seed,
                     's': s, 'solver': solver_name(s), 'inference_k': list(self.budgets(c)),
                     'preset': asdict(self.spec(c, s).preset)} for c, s in self.cells()]
