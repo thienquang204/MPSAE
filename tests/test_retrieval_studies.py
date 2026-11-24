@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def settings():
-    return yaml.safe_load((ROOT/'configs/retrieval_studies.yaml').read_text())
+    return yaml.safe_load((ROOT/'configs/retrieval_studies_26.yaml').read_text())
 
 
 def test_requested_grid_and_no_extra_1024_weight_runs():

@@ -234,6 +234,9 @@ def run(config, args, *, bundles=None):
                             rows[key] = {**rows[key],'status':'running','error':None}
                         export(root,plan,rows)
                         spec = config.spec(cell,mass,smoke=args.smoke)
+                        if args.smoke and bundles is not None:
+                            dim = bundle.train.features.shape[1]
+                            spec = replace(spec, dim=dim, preset=replace(spec.preset, hidden_dim=max(64, 4*dim)))
                         fits = FitSettings(device=args.device, max_steps=2 if args.smoke else 0,
                             residency=args.residency, log_every=args.log_every,
                             checkpoint_every=args.checkpoint_every, batch_size_override=config.batch_size)
@@ -286,6 +289,9 @@ def run(config, args, *, bundles=None):
                                 raise RuntimeError('Measured sparse-code nnz exceeds the requested K')
                             rows[key].update(status='complete',top1_percent=point['top1'],
                                 gallery_mean_nnz=point['nnz_mean'],empty_queries=point['empty_queries'],
+                                query_mean_nnz=point.get('query_nnz_mean'),
+                                gallery_nnz_histogram=point.get('gallery_nnz_histogram'),
+                                query_nnz_histogram=point.get('query_nnz_histogram'),
                                 fit_id=fit_id,signature=signature,checkpoint_sha256=checkpoint_hash,
                                 checkpoint_path=str(out/'checkpoint.pt'),evaluation_id=eid,
                                 reused_source_fit=bool(reused),reused_source_evaluation=reused_eval,

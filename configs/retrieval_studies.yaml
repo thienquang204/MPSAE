@@ -13,3 +13,23 @@ optimizer_batches: [4096]
 optimizer_weights: [0.1, 0.5, 1.0, 2.0, 2.5]
 ot_eta: 0.2
 ot_microbatch: 32
+inference:
+  mass:
+    ff2048:
+      8: [2, 8, 64]
+      32: [2, 32, 64]
+    vit_b16:
+      12: [2, 12, 96]
+      48: [2, 48, 96]
+  optimizer:
+    ff2048:
+      8: [2, 8]
+      32: [2, 32]
+extreme:
+  enabled: true
+  mass: 1.0
+  weight: 2.0
+  batch_size: 1024
+  inference_k:
+    ff2048: [2, 8]
+    vit_b16: [2, 12]

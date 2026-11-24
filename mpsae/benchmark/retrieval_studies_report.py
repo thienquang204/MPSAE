@@ -6,10 +6,10 @@ import statistics
 import shutil
 from zipfile import ZipFile, ZIP_DEFLATED
 
-from ..io import atomic_json, read_json
+from ..io import atomic_json, read_json, canonical_hash
 
 NAMES = {'ff2048': 'ResNet-50', 'vit_b16': 'ViT-B/16'}
-KEYS = ['study', 'backbone', 'train_k', 's', 'lambda', 'batch_size', 'epochs']
+KEYS = ['study', 'backbone', 'train_k', 'inference_k', 's', 'lambda', 'batch_size', 'epochs']
 
 
 def write_csv(path, rows, fields):
@@ -34,6 +34,7 @@ def summarize(rows, seeds):
                         'top1_mean': statistics.mean(scores) if scores else None,
                         'top1_std': statistics.stdev(scores) if len(scores)>1 else None,
                         'gallery_mean_nnz': statistics.mean(r['gallery_mean_nnz'] for r in complete) if complete else None,
+                        'empty_queries': statistics.mean(r['empty_queries'] for r in complete) if complete else None,
                         'updates': complete[0].get('training_identity', {}).get('schedule', {}).get('total_steps') if complete else None})
     return summary
 
@@ -49,7 +50,7 @@ def figures(directory, summary, scientific):
         for study, xkey, xlabel, filename in (
                 ('mass', 's', 'Transport mass $s$', 'mass_accuracy'),
                 ('optimizer', 'lambda', r'OT weight $\lambda$', 'weight_accuracy')):
-            selected = [r for r in summary if r['study'] == study]
+            selected = [r for r in summary if r['study'] == study and r['train_k'] == r['inference_k']]
             if not selected:
                 continue
             backbones = sorted({r['backbone'] for r in selected})
@@ -90,7 +91,7 @@ def export(root, plan, rows):
     summary = summarize(rows, plan['settings']['seeds'])
     unique = {}
     for row in rows:
-        key = (row['backbone'], row['train_k'], row['seed'], row['s'], row['lambda'], row['batch_size'], row['epochs'])
+        key = (row['backbone'], row['train_k'], row['inference_k'], row['seed'], row['s'], row['lambda'], row['batch_size'], row['epochs'])
         if row['status'] == 'complete':
             previous = unique.get(key)
             if previous and any(previous.get(k) != row.get(k) for k in ('signature', 'checkpoint_sha256', 'top1_percent')):
@@ -100,18 +101,31 @@ def export(root, plan, rows):
               'completed': len(unique), 'expected': plan['unique_evaluations'], 'plan': plan, 'results': rows,
               'run_state': read_json(directory/'run-state.json')}
     atomic_json(directory/'results.json', result)
-    fields = [*KEYS, 'inference_k', 'seed', 'status', 'top1_percent', 'gallery_mean_nnz', 'empty_queries',
+    fields = [*KEYS, 'seed', 'status', 'top1_percent', 'gallery_mean_nnz', 'query_mean_nnz', 'empty_queries',
+              'gallery_nnz_histogram', 'query_nnz_histogram',
               'train_seconds', 'signature', 'checkpoint_path', 'checkpoint_sha256', 'solver', 'error']
     write_csv(directory/'results.csv', rows, fields)
-    summary_fields = [*KEYS, 'top1_mean', 'top1_std', 'gallery_mean_nnz', 'updates', 'n', 'expected_seeds']
+    summary_fields = [*KEYS, 'top1_mean', 'top1_std', 'gallery_mean_nnz', 'empty_queries', 'updates', 'n', 'expected_seeds']
     write_csv(directory/'summary.csv', summary, summary_fields)
-    for study in ('mass', 'optimizer'):
+    sparsity = []
+    for row in rows:
+        if row['inference_k'] != 2:
+            continue
+        record = {k: row[k] for k in (*KEYS, 'seed', 'status')}
+        for split in ('gallery', 'query'):
+            counts = row.get(f'{split}_nnz_histogram') if row['status'] == 'complete' else None
+            for n in range(3):
+                record[f'{split}_nnz{n}_percent'] = 100*counts[n]/sum(counts) if counts and sum(counts) else None
+        sparsity.append(record)
+    write_csv(directory/'k2_sparsity.csv', sparsity, [*KEYS, 'seed', 'status',
+        *[f'{split}_nnz{n}_percent' for split in ('gallery', 'query') for n in range(3)]])
+    for study in ('mass', 'optimizer', 'extreme'):
         chosen = [r for r in summary if r['study'] == study]
         if not chosen:
             continue
         write_csv(directory/f'{study}_summary.csv', chosen, summary_fields)
-        lines = [r'% Requires \usepackage{booktabs}.', r'\begin{tabular}{lrrrrrrr}', r'\toprule',
-                 r'Backbone & $K$ & $s$ & $\lambda$ & Batch & 1-NN (\%) & nnz & Seeds \\', r'\midrule']
+        lines = [r'% Requires \usepackage{booktabs}.', r'\begin{tabular}{lrrrrrrrr}', r'\toprule',
+                 r'Backbone & $K_{tr}$ & $K_{inf}$ & $s$ & $\lambda$ & Batch & 1-NN (\%) & nnz & Seeds \\', r'\midrule']
         if not plan['scientific']:
             lines.insert(0, '% SYNTHETIC SMOKE TEST -- NOT BENCHMARK RESULTS')
         for r in chosen:
@@ -119,18 +133,26 @@ def export(root, plan, rows):
             if r['top1_std'] is not None:
                 score += r' $\pm$ '+f"{r['top1_std']:.2f}"
             nnz = '--' if r['gallery_mean_nnz'] is None else f"{r['gallery_mean_nnz']:.2f}"
-            lines.append(f"{NAMES[r['backbone']]} & {r['train_k']} & {r['s']:g} & {r['lambda']:g} & "
+            lines.append(f"{NAMES[r['backbone']]} & {r['train_k']} & {r['inference_k']} & {r['s']:g} & {r['lambda']:g} & "
                          f"{r['batch_size']} & {score} & {nnz} & {r['n']}/{r['expected_seeds']} " + r'\\')
         lines += [r'\bottomrule', r'\end{tabular}',
                   '% Mean and sample SD across seeds; -- means unavailable. No best-setting selection.',
                   '% Epochs are fixed, optimizer updates depend on batch size. nnz is measured on the gallery.']
         (directory/f'{study}_table.tex').write_text('\n'.join(lines)+'\n', encoding='utf-8')
-    figures(directory, summary, plan['scientific'])
+    signature = canonical_hash({'summary': summary, 'scientific': plan['scientific'], 'format': 'cross-k-v1'})
+    drawn = read_json(directory/'figure-state.json') or {}
+    if drawn.get('signature') != signature or not all((directory/n).exists() for n in drawn.get('files', [])):
+        figures(directory, summary, plan['scientific'])
+        from .study_figures import extended_figures
+        extended_figures(directory, summary, plan['scientific'])
+        atomic_json(directory/'figure-state.json', {'signature': signature,
+            'files': [p.name for p in directory.iterdir() if p.suffix in ('.pdf', '.png')]})
     (directory/'README.txt').write_text(
         f"Unique completed conditions: {result['completed']}/{result['expected']}.\n"
         'MPSAE only. Mass study: ResNet-50/ViT-B/16. Weight study: ResNet-50.\n'
         'See plan.json for actual settings. No published curves or test-based selection.\n'
-        'Plots: mass_accuracy and weight_accuracy, PDF/300-dpi PNG. Tables: *_table.tex.\n'
+        'Plots: matched accuracy, inference sweeps, nnz, empty queries, heatmaps and K=2 comparison; PDF/300-dpi PNG.\n'
+        'Tables: *_table.tex. Training K and inference K are separate columns and aggregation keys.\n'
         'Missing values are not zeros. Larger batches have fewer updates at equal epochs.\n'
         'No model weights or embeddings in this ZIP. Keep the workspace/source files to resume.\n', encoding='utf-8')
     archive = directory/'retrieval-studies-results.zip'

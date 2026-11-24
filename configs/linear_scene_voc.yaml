@@ -1,0 +1,32 @@
+# Seven linear-probe evaluations. Independent of the existing kNN evaluator.
+scene:
+  datasets: [voc]
+  encoders: [siglip2]
+  methods: [csr, csrv2, mpsae]
+  include_dense: true
+  seed: 1227
+  train_k: [2, 12]
+  evaluation_mode: matched
+  image_size: 448
+  train_patches: 262144
+  support_patches: 65536  # Legacy cache setting; NOT the probe training set.
+  hidden_dim: 8192
+  epochs: 10
+  batch_size: 1024
+  lr: 0.00004
+  mpsae_ot_mass: 1.0
+  mpsae_ot_weight: 2.0
+  extraction_batch: 4
+  workers: 2
+  shard_images: 64
+  cache_dtype: float16
+  checkpoint_every: 512
+  log_every: 100
+probe:
+  epochs: 20
+  batch_size: 4096
+  lr: 0.001
+  weight_decay: 0.0
+  encode_batch: 1024
+  seed: 1227
+  residency: auto

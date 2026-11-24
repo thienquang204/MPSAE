@@ -290,6 +290,9 @@ def _evaluate_at_cached(cell: Cell, bundle: Bundle, model, spec: Backbone, setti
                 "mean_neighbour_score": scored.get("mean_neighbour_score"),
                 "nnz_mean": gallery["stats"]["nnz_mean"],
                 "nnz_min": gallery["stats"]["nnz_min"],
+                "query_nnz_mean": queries["stats"]["nnz_mean"],
+                "gallery_nnz_histogram": gallery["stats"].get("nnz_histogram"),
+                "query_nnz_histogram": queries["stats"].get("nnz_histogram"),
                 "empty_gallery_codes": gallery["stats"]["empty_codes"],
                 "encode_seconds": gallery["stats"]["seconds"] + queries["stats"]["seconds"],
             }

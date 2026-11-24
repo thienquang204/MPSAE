@@ -328,6 +328,7 @@ def _encode(sae, features: Any, row_ids: np.ndarray, k: int, *, device: torch.de
     autocast = (torch.autocast(device_type="cuda", dtype=torch.float16)
                 if device.type == "cuda" else nullcontext())
     nnz_sum, nnz_min, empty, below_k = 0, k, 0, 0
+    histogram = np.zeros(3, dtype=np.int64) if k == 2 else None
     was_training = sae.training
     sae.eval()
     progress = Progress(rows, stage=progress_stage, what=f"rows (K={k})")
@@ -346,6 +347,8 @@ def _encode(sae, features: Any, row_ids: np.ndarray, k: int, *, device: torch.de
                 nnz_min = min(nnz_min, int(nnz.min()))
                 empty += int(np.count_nonzero(nnz == 0))
                 below_k += int(np.count_nonzero(nnz < k))
+                if histogram is not None:
+                    histogram += np.bincount(nnz, minlength=3)
                 indices[start:stop] = code_indices.cpu().numpy()
                 values[start:stop] = host_values
                 progress.advance(stop - start)
@@ -363,6 +366,8 @@ def _encode(sae, features: Any, row_ids: np.ndarray, k: int, *, device: torch.de
              "precision": ("autocast_float16_compute_float32_storage" if device.type == "cuda"
                            else "cpu_float32_compute_float32_storage"),
              "normalized": True}
+    if histogram is not None:
+        stats["nnz_histogram"] = histogram.tolist()
     get_logger(progress_stage).info(
         "encoded %s rows at K=%d in %s | nnz mean %.2f min %d | %s empty",
         f"{rows:,}", k, format_duration(seconds), stats["nnz_mean"], nnz_min, f"{empty:,}")
