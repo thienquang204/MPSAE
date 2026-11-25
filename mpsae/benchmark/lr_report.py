@@ -163,10 +163,12 @@ def export(output,plan,*,figures=False):
             return '--' if val is None else f'{val:.2f}'+(f' $\\pm$ {sd:.2f}' if sd is not None else '')
         tex.append(f"{NAMES[r['condition']]} & {r['train_k']} & {r['probe_top1_n']} & {formatted('probe_top1')} & {formatted('probe_us')}"+r' \\')
     (folder/'linear_probe.tex').write_text('\n'.join(tex+[r'\bottomrule',r'\end{tabular}'])+'\n',encoding='utf-8')
+    from .unified_report import export_unified
+    unified=export_unified(output,plan,records,PERFORMANCE)
     result={'complete_1nn':sum(r.get('top1') is not None for r in rows),'expected_1nn':plan['expected_unique_1nn'],
             'probe_scores':sum(r.get('probe_top1') is not None for r in rows),
             'expected_probe_scores':plan['expected_probe_scores'],'missing_loss_logs':missing,
-            'scientific':plan['scientific'],'directory':str(output)}
+            'scientific':plan['scientific'],'directory':str(output),'unified':unified}
     atomic_json(output/'results.json',result)
     if figures:render_figures(folder,summary,losses,plan)
     old=read_json(output/'report_status.json') or {}

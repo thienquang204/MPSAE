@@ -155,6 +155,53 @@ checkpoint tensors or cached embeddings. New weights remain on the server in
 `training/fits/`. The latest output path is also recorded in
 `/workspace/matched-resnet50/lr_ablation/latest.json`.
 
+## Unified tables with the original study
+
+The same ZIP also contains a read-only union with **both original training batch
+groups**. This has seven conditions: CSR, CSRv2 and MPSAE at batch 1024 with LR
+4e-5; those same three methods at batch 4096 with LR 4e-5; and the new MPSAE
+batch-4096 condition with LR 8e-5. The focused four-condition LR tables above
+remain available.
+
+| File inside `reports/` | Contents |
+|---|---|
+| `unified_matched_table.csv` | Seven condition rows, six K columns, formatted accuracy and seed counts |
+| `unified_matched.tex` | The same matched-K accuracy table, with means and sample standard deviations |
+| `unified_per_seed.csv` | All available matched and cross-K results, with batch, LR, seed, train K, inference K, metrics and provenance |
+| `unified_summary.csv` | Numeric means, standard deviations and observation counts for every metric |
+| `unified_linear_probe.csv` / `.tex` | All seven conditions' available probe results, at K=32 |
+| `unified_status.json` | Counts, unavailable source information, incompatible skipped records and conflicting duplicate scores |
+
+At completion there are **84 matched 1-NN scores** (7 conditions x 6 K x 2 seeds)
+and **14 linear-probe scores**. Available off-diagonal results from the earlier
+cross-K extension are included as well. With the agreed reduced cross-K sweep
+complete for both original batches and the new LR, the union contains **168
+unique 1-NN scores plus 14 probe scores**. Counts reflect actual available
+records; missing points are not evaluated by the merger.
+
+Rows are deduplicated by backbone, method, training batch, LR, seed, train K and
+inference K. Batch sizes and learning rates are never pooled into one mean.
+Matched receipts supply diagonal results and probe scores; the LR extension's
+receipts take precedence over overlapping archived results. Conflicting scores
+are listed in the status file. Previous cross-K receipts must belong to the same
+original study and match its checkpoint and data identity. Incompatible numerical
+evaluators are excluded, and incompatible historical performance measurements
+are blanked in comparison tables while compatible accuracy remains available.
+
+This does **not** add training or inference. The unified reports refresh with the
+existing exports and are automatically added to `lr-ablation-results.zip`.
+If the LR study has already run, pull this code update and regenerate the ZIP:
+
+```bash
+cd /workspace/MPSAE
+git pull --ff-only origin refactor
+bash scripts/run_matched_lr_ablation.sh \
+  --workspace /workspace/matched-resnet50 --report-only
+```
+
+Keep the original `studies/` and, if available, `crossk/` result directories in
+that workspace. The merger reads result JSON files, not checkpoint tensors.
+
 ## Verification
 
 `tests/test_lr_ablation.py` checks exact study counts and recipe differences,
