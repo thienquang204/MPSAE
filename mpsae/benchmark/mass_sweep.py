@@ -239,7 +239,8 @@ def run(config, args, *, bundles=None):
                             spec = replace(spec, dim=dim, preset=replace(spec.preset, hidden_dim=max(64, 4*dim)))
                         fits = FitSettings(device=args.device, max_steps=2 if args.smoke else 0,
                             residency=args.residency, log_every=args.log_every,
-                            checkpoint_every=args.checkpoint_every, batch_size_override=config.batch_size)
+                            checkpoint_every=args.checkpoint_every, batch_size_override=config.batch_size,
+                            allow_training=not getattr(args, "evaluate_only", False))
                         per_epoch,total = total_updates(bundle,spec.preset,max_steps=fits.max_steps)
                         identity = fit_identity(cell,bundle,spec.preset,total_steps=total,
                                                 per_epoch=per_epoch,code_version=__version__,
@@ -371,6 +372,7 @@ def argument_parser():
     parser.add_argument('--embedding-repo',default=None)
     parser.add_argument('--continue-on-error',action='store_true')
     parser.add_argument('--plan',action='store_true')
+    parser.add_argument('--evaluate-only',action='store_true',help='require completed compatible SAE checkpoints; never train')
     parser.add_argument('--export-only',action='store_true')
     parser.add_argument('--smoke',action='store_true')
     return parser

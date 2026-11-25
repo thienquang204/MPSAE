@@ -1,0 +1,2 @@
+# Existing pinned training/extraction requirements, shared rather than copied.
+-r ../../../requirements-patch-scene.txt

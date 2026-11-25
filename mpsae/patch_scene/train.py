@@ -14,7 +14,7 @@ from .artifacts import save_torch
 from .config import VERSION
 
 
-def fit(config, method, features, labels, feature_identity, hub, device, *, preset=None, stop_after=None, training_source=None):
+def fit(config, method, features, labels, feature_identity, hub, device, *, preset=None, stop_after=None, training_source=None, allow_training=True):
     preset = preset or config.preset(method, feature_identity.get('encoder'))
     targets, label_stats = patch_targets(labels, classes=labels.shape[1])
     ranges = batch_ranges(len(features), preset.batch_size)
@@ -47,6 +47,10 @@ def fit(config, method, features, labels, feature_identity, hub, device, *, pres
     identity = json.loads(json.dumps(identity))
     relative = f'fits/{canonical_hash(identity)[:20]}'
     folder = hub.pull(relative)
+    if not allow_training:
+        completed = read_json(folder/"summary.json") or {}
+        if not completed.get("complete") or completed.get("identity") != identity or not (folder/"checkpoint.pt").is_file():
+            raise FileNotFoundError(f"{folder}: evaluation-only requires a completed compatible checkpoint")
     torch.manual_seed(config.seed)
     if str(device).startswith('cuda'):
         torch.cuda.manual_seed_all(config.seed)
@@ -76,6 +80,8 @@ def fit(config, method, features, labels, feature_identity, hub, device, *, pres
             if summary['checkpoint_sha256'] != sha256_file(path):
                 raise RuntimeError('completed checkpoint hash mismatch')
             return model.eval().requires_grad_(False), summary
+    if not allow_training:
+        raise RuntimeError(f"{folder}: completed summary has an incomplete checkpoint; evaluation-only cannot resume training")
     atomic_json(folder/'config.json', {'identity': identity, 'patch_label_statistics': label_stats})
     # Keep one bank resident; no image decoder/backbone remains during SAE training.
     x = torch.as_tensor(features, device=device) if training_source is None else None

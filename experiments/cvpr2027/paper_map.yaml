@@ -1,0 +1,118 @@
+tables:
+  '1':
+    title: ImageNet 1-NN
+    studies:
+    - imagenet_main
+    where:
+      task: imagenet_1nn
+    layout: inference
+  '2':
+    title: Nearest-neighbor segmentation
+    studies:
+    - voc_main
+    - nyuv2_main
+    - voc_weight
+    - nyuv2_weight
+    layout: segmentation
+  '3':
+    title: Retrieval mass sensitivity
+    studies:
+    - retrieval_mass
+    layout: mass
+  '4':
+    title: Retrieval weight sensitivity
+    studies:
+    - retrieval_weight
+    layout: weight
+  '5':
+    title: Direct K=2 versus truncation
+    studies:
+    - retrieval_k2
+    - retrieval_mass
+    where:
+      inference_k: 2
+      mass: 1.0
+    layout: k2
+  '6':
+    title: VOC SigLIP2 mass sensitivity
+    studies:
+    - voc_mass
+    where:
+      encoder: siglip2
+    layout: mass
+  '7':
+    title: VOC DINOv2 mass sensitivity
+    studies:
+    - voc_mass
+    where:
+      encoder: dinov2
+    layout: mass
+  '8':
+    title: VOC DINOv2 joint sensitivity
+    studies:
+    - voc_joint
+    - voc_main
+    where:
+      encoder: dinov2
+    matched: true
+    layout: joint
+  '9':
+    title: VOC SigLIP2 joint sensitivity
+    studies:
+    - voc_joint
+    - voc_main
+    where:
+      encoder: siglip2
+    matched: true
+    layout: joint
+  '10':
+    title: NYUv2 weight sensitivity
+    studies:
+    - nyuv2_weight
+    - nyuv2_main
+    loss_weight:
+    - 0.1
+    - 1.5
+    - 2.5
+    layout: segmentation
+  '11':
+    title: NYUv2 DINOv2 joint sensitivity
+    studies:
+    - nyuv2_joint
+    - nyuv2_main
+    where:
+      encoder: dinov2
+    mass:
+    - 0.3
+    - 0.5
+    - 1.0
+    matched: true
+    layout: joint
+  '12':
+    title: ViT-B/16 ImageNet linear probing
+    studies:
+    - imagenet_main
+    where:
+      task: imagenet_probe
+      encoder: vit_b16
+    layout: inference
+  '13':
+    title: ResNet-50 ImageNet linear probing
+    studies:
+    - imagenet_main
+    where:
+      task: imagenet_probe
+      encoder: ff2048
+    layout: inference
+figures:
+  '1':
+    kind: illustration
+    source_status: Editable source not yet supplied; preserve separately, never infer
+      from metrics
+  '2':
+    kind: metric
+    table: '1'
+    where:
+      encoder: ff2048
+    matched: true
+    filename: figure_02_resnet50

@@ -1,0 +1,5 @@
+# CPU-only reporting/planning; no torch or dataset packages.
+PyYAML==6.0.3
+matplotlib==3.10.7
+numpy==1.26.4; python_version < '3.13'
+numpy==2.5.4; python_version >= '3.13'

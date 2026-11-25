@@ -1,0 +1,50 @@
+description: ''
+runner: segmentation
+base:
+  methods:
+  - mpsae
+  include_dense: false
+  cityscapes_source: official
+  mpsae_ot_weight: 2.0
+  mpsae_ot_mass: 0.9
+  siglip2_mpsae_ot_weight: null
+  seed: 1227
+  k: 12
+  inference_k: null
+  evaluation_mode: matched
+  train_k:
+  - 3
+  - 12
+  - 48
+  encoders:
+  - siglip2
+  - dinov2
+  hidden_dim: 8192
+  image_size: 336
+  image_width: 448
+  all_train_patches: true
+  train_patches: 0
+  support_patches: 65536
+  epochs: 20
+  batch_size: 1024
+  lr: 4.0e-05
+  extraction_batch: 4
+  workers: 2
+  shard_images: 32
+  query_block: 16
+  neighbors: 30
+  temperature: 0.02
+  checkpoint_every: 512
+  log_every: 100
+  cache_dtype: float16
+  datasets:
+  - nyuv2
+  early_stopping: true
+  early_min_epochs: 15
+  early_patience: 3
+  early_min_delta: 0.001
+grid:
+  mpsae_ot_weight:
+  - 0.1
+  - 1.5
+  - 2.5

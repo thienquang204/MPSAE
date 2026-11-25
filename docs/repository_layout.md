@@ -31,3 +31,11 @@ scripts and their exclusive tests were deleted. Git history retains their source
 Small legacy registry/serialization paths remain to preserve cache identities;
 the public runner permits only the three supported campaigns.
 No saved results, datasets, feature caches or checkpoints were deleted.
+
+## Paper experiment layer
+
+`experiments/cvpr2027/` owns the frozen catalog, paper mapping, receipt import
+and CPU reporting. It invokes existing `mpsae` engines and leaves historical
+workspace layouts intact. `experiments/extensions/README.md` locates supported
+studies outside this draft. Large artifacts remain under configurable `work/`
+roots; local machine paths belong in ignored `paths.local.yaml`.

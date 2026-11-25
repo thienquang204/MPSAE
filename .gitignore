@@ -33,3 +33,6 @@ __pycache__/
 
 # Local-only segmentation server environment.
 .venv-segmentation/
+
+# Machine-specific paper paths; paper recipes themselves are tracked.
+/experiments/cvpr2027/paths.local.yaml

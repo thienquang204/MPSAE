@@ -1,0 +1,63 @@
+schema: 1
+paper:
+  filename: CVPR_2027_MPSAE.pdf
+  sha256: 3528042e5542e0050de5001b8f54f2e697af4fda17b48a9f41a7887eeacd7e33
+  pages: 18
+  source_commit: e504eb7
+  scope: Draft supplied 2026-11-25; exact historical artifacts still need indexing
+studies:
+  imagenet_main:
+    config: configs/imagenet/imagenet_main.yaml
+    expected:
+      sae_fits: 39
+      evaluations: 306
+  retrieval_mass:
+    config: configs/imagenet/retrieval_mass.yaml
+    expected:
+      sae_fits: 16
+      evaluations: 48
+  retrieval_weight:
+    config: configs/imagenet/retrieval_weight.yaml
+    expected:
+      sae_fits: 10
+      evaluations: 20
+  retrieval_k2:
+    config: configs/imagenet/retrieval_k2.yaml
+    expected:
+      sae_fits: 2
+      evaluations: 2
+  voc_main:
+    config: configs/segmentation/voc_main.yaml
+    expected:
+      sae_fits: 18
+      evaluations: 56
+  nyuv2_main:
+    config: configs/segmentation/nyuv2_main.yaml
+    expected:
+      sae_fits: 18
+      evaluations: 20
+  voc_weight:
+    config: configs/segmentation/voc_weight.yaml
+    expected:
+      sae_fits: 12
+      evaluations: 36
+  nyuv2_weight:
+    config: configs/segmentation/nyuv2_weight.yaml
+    expected:
+      sae_fits: 18
+      evaluations: 18
+  voc_mass:
+    config: configs/segmentation/voc_mass.yaml
+    expected:
+      sae_fits: 36
+      evaluations: 108
+  voc_joint:
+    config: configs/segmentation/voc_joint.yaml
+    expected:
+      sae_fits: 72
+      evaluations: 72
+  nyuv2_joint:
+    config: configs/segmentation/nyuv2_joint.yaml
+    expected:
+      sae_fits: 27
+      evaluations: 27

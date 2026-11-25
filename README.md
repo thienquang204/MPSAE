@@ -1,5 +1,14 @@
 # MPSAE — adaptive sparse embeddings, against CSR and CSRv2
 
+## Paper reproduction
+
+The experiments in `CVPR_2027_MPSAE.pdf` are organized in
+[experiments/cvpr2027](experiments/cvpr2027/README.md). Start there to inspect the
+frozen catalog, import saved server/Kaggle results, reproduce paper tables and
+figures, or launch selected runs locally. The notes below also describe older
+and broader workflows; their defaults are not automatically the paper recipe.
+
+
 Working notes for this repository. Not a release document.
 
 **What we claim.** CSR sparsifies a frozen embedding with a tied Top-K

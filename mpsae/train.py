@@ -49,6 +49,7 @@ class FitSettings:
     #: discards the checkpoint rather than resuming from it: ``--force train``
     #: means "do it again", not "do the rest of it".
     force: bool = False
+    allow_training: bool = True  # evaluation-only must never resume optimizer steps
     batch_size_override: int | None = None  # explicit ablation only; defaults unchanged
 
     def __post_init__(self) -> None:
@@ -274,6 +275,8 @@ def _fit(cell: Cell, bundle: Bundle, out_dir: str | Path, settings: FitSettings,
             raise RuntimeError(f"{out_dir}: checkpoint and summary disagree on the recipe")
     extending = any(can_extend_mpsaev2(record["identity"], identity)
                     for record in (saved, existing_config, finished) if record is not None)
+    if not settings.allow_training and (settings.force or extending or not finished or not finished.get("complete")):
+        raise FileNotFoundError(f"{out_dir}: evaluation-only requires a completed compatible checkpoint")
     if finished and finished.get("complete"):
         if saved is None:
             raise FileNotFoundError(f"{out_dir}: completed summary has no checkpoint")

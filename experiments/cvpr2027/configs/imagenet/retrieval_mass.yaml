@@ -1,0 +1,58 @@
+description: ''
+runner: retrieval
+base:
+  seeds:
+  - 1227
+  epochs: 10
+  lr: 4.0e-05
+  ot_eta: 0.2
+  ot_microbatch: 32
+  evaluation_mode: sweep
+  batch_size: 1024
+  ot_weight: 2.0
+  masses:
+  - 0.2
+  - 0.4
+  - 0.6
+  - 1.0
+variants:
+- backbones:
+  - ff2048
+  train_k:
+    ff2048:
+    - 8
+  inference_k:
+    ff2048:
+    - 2
+    - 8
+    - 64
+- backbones:
+  - ff2048
+  train_k:
+    ff2048:
+    - 32
+  inference_k:
+    ff2048:
+    - 2
+    - 32
+    - 64
+- backbones:
+  - vit_b16
+  train_k:
+    vit_b16:
+    - 12
+  inference_k:
+    vit_b16:
+    - 2
+    - 12
+    - 96
+- backbones:
+  - vit_b16
+  train_k:
+    vit_b16:
+    - 48
+  inference_k:
+    vit_b16:
+    - 2
+    - 48
+    - 96

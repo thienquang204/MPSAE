@@ -38,7 +38,7 @@ def linear_probe(train_codes: Any, train_labels: Any, val_codes: Any, val_labels
                  hidden_dim: int, device: torch.device | str, epochs: int = 10,
                  batch_size: int = 4096, lr: float = 1e-3, weight_decay: float = 0.0,
                  seed: int = 1227, num_classes: int = 1000,
-                 progress_stage: str = "probe") -> dict[str, Any]:
+                 progress_stage: str = "probe", return_head: bool = False) -> dict[str, Any]:
     """Fit one softmax classifier on the full latent and score it once.
 
     ``train_codes``/``val_codes`` are compact ``(indices, values)`` codes as
@@ -53,6 +53,9 @@ def linear_probe(train_codes: Any, train_labels: Any, val_codes: Any, val_labels
     default ``lr=1e-3`` is an Adam learning rate; the optimiser and every
     hyper-parameter are echoed in the result so the report can state them
     instead of the reader having to trust a default.
+
+    ``return_head=True`` also returns the fitted, frozen head for standalone
+    inference profiling; ordinary callers retain the JSON-only result.
 
     Returns top-1 and top-5 accuracy in percent, the final epoch's mean training
     loss, and the settings used.
@@ -126,7 +129,7 @@ def linear_probe(train_codes: Any, train_labels: Any, val_codes: Any, val_labels
             correct_5 += int(ranked.eq(truth[:, None]).any(dim=1).sum())
     log.info("probe top1 %.2f%% top5 %.2f%% (%s)", 100.0 * correct_1 / validation.rows,
              100.0 * correct_5 / validation.rows, format_duration(train_seconds))
-    return {"protocol": PROTOCOL,
+    result = {"protocol": PROTOCOL,
             "top1": 100.0 * correct_1 / validation.rows,
             "top5": 100.0 * correct_5 / validation.rows,
             "correct_top1": correct_1, "correct_top5": correct_5,
@@ -141,6 +144,9 @@ def linear_probe(train_codes: Any, train_labels: Any, val_codes: Any, val_labels
                          "input_scaling": "row_l2_as_encoded",
                          "seed": seed, "precision": "float32_tf32_disabled",
                          "selection": "fixed final epoch; validation labels only score"}}
+    if return_head:
+        result["head"] = head.eval().requires_grad_(False)
+    return result
 
 
 def _labels(labels: Any, num_classes: int, what: str) -> np.ndarray:

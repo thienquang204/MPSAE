@@ -45,9 +45,10 @@ def record_result(hub, campaign, result):
 
 class TaskRunner:
     """One process owns one GPU; retain at most one CPU feature bank between jobs."""
-    def __init__(self, config, sources, hub, device, *, smoke=False):
+    def __init__(self, config, sources, hub, device, *, smoke=False, allow_training=True):
         self.config, self.sources, self.hub, self.device = config, sources, hub, device
         self.smoke = smoke
+        self.allow_training = allow_training
         self.cached = None
 
     def prepare(self, task):
@@ -106,7 +107,8 @@ class TaskRunner:
                     source = ShardTraining(manifest, self.hub)
                     print(f'[full training] {source.rows:,} patches per epoch; streamed from disk', flush=True)
                 model, record = fit(config, task.method, features, labels, manifest['identity'],
-                                    self.hub, self.device, preset=preset, training_source=source)
+                                    self.hub, self.device, preset=preset, training_source=source,
+                                    allow_training=self.allow_training)
             grid = sorted(config.inference_ks, key=lambda k: (k != config.k, k)) if model is not None else (None,)
             for k in grid:
                 print(f'[job {task.dataset}/{task.encoder}/{task.method}] train K={task.train_k}; inference K={k}', flush=True)

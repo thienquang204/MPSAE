@@ -1,3 +1,6 @@
+The [CVPR 2027 reproduction guide](../experiments/cvpr2027/README.md) is the
+entry point for the supplied paper; it maps every table to explicit experiments.
+
 # Documentation
 
 Working notes for the MPSAE repository. Start with the top-level

@@ -1,0 +1,18 @@
+# Controlled optimizer study: 72 SAEs, 72 matched 1-NN scores + 12 probes = 84.
+backbone: ff2048
+methods: [csr, csrv2, mpsae]
+seeds: [1227, 2026]
+k_values: [2, 8, 32, 128, 256, 512]
+batch_sizes: [1024, 4096]
+epochs: 10
+lr: 0.00004
+probe_k: 32
+probe_epochs: 10
+probe_batch_size: 4096
+probe_lr: 0.001
+warmup: 5
+rounds: 5
+query_batch: 512
+gallery_chunk: 32768
+build_entry_cap: 4194304
+encode_batch_size: 2048

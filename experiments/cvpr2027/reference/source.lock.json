@@ -1,0 +1,23 @@
+{
+  "files": {
+    "mpsae/config.py": "d574754d849f086509d041263b88016dd3299311fbca42d098f2d448b0ab909e",
+    "mpsae/evaluate/knn.py": "f6c79fe1632efc99bed1d600d31ac06f97df46e14620c27ad6a45a72fffe1cdf",
+    "mpsae/evaluate/probe.py": "128811c6e235bbbb5243be58d474c6096f3ef9634019550e7ec111c54e8670cd",
+    "mpsae/losses.py": "7b227f930b2b3040b7176f9e0ca1e97422e3a7c045c7b15c6e4b370415f66c02",
+    "mpsae/methods.py": "6ceed44c149b4b13e2f5371304befb40cdc57b20b7c33abc86b59f28121743cd",
+    "mpsae/model.py": "b0828bfcbea30fd0feef9e81c170916b23c7cffd0ed5cd2ebfa77e92270a766f",
+    "mpsae/ot.py": "c5b9209c49e2113b83af0e6f151b6cfd91eb2aa107726ec9cee2c48df2f09f78",
+    "mpsae/ot_balanced.py": "3dab95d8fa7511d23254580948bf00e2d7b23a07e285f68b01a830510e65b1ac",
+    "mpsae/patch_scene/encoders.py": "5d32a884d60756782a4857c9e34a823cc3f79861d69b3831fc461e23d75cfcfc",
+    "mpsae/patch_scene/evaluate.py": "6b1ce9d82cc91dd83f52a840e13deb08db674e16303752b8f0bcdc33a47cd6c5",
+    "mpsae/patch_scene/features.py": "ae9bf23722a61147e99f7708bf16857e4f064374d012dae498d068185a66356c",
+    "mpsae/patch_scene/retrieval.py": "6178b7b24535ddc991d024c3b4f31de130df33f399a6fc7084b041cf44b0eb27",
+    "mpsae/patch_scene/train.py": "c75908bba9b33e597752c5e4db13c0b119de9264b7b6623a7e24d9e403b9dac8",
+    "mpsae/runs.py": "a396008e8c96b8b9def060bed209054192bf43aa6b8384260e6b92dce6fe0ea5",
+    "mpsae/schedules.py": "72bdc0c6f0e8b82db9293ef0173046f9f879f54495109dda3d48a45ec722ffcb",
+    "mpsae/segmentation/core.py": "7cfa42d56a6015577b9d4474ecc51e44147c8a02d9326a624b7771f81e14922b",
+    "mpsae/train.py": "7ef4e5b3185d3284bdcedeaf6a2aa54d4b5a922bf528a320db63cec10a71da97"
+  },
+  "normalization": "UTF-8 with LF",
+  "schema": 1
+}

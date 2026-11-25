@@ -1,0 +1,2 @@
+# Install torch==2.9.1 from the existing CUDA setup first.
+-r ../../../requirements-retrieval.txt

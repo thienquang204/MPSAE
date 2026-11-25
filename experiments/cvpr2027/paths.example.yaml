@@ -1,0 +1,7 @@
+imagenet: ../../work/direct-v1
+retrieval: ../../work/retrieval-studies
+segmentation: ../../work/patch-scene-paper
+output: ../../work/cvpr2027
+nyuv2_root: null
+note: Paths are relative to this paths file; replace with your existing workspaces.
+  No uploads.

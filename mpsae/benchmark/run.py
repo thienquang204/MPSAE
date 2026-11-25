@@ -391,7 +391,7 @@ def report_campaign(campaign: Campaign, workspace: str | Path, *, smoke=False):
 
 
 def run_campaign(campaign: Campaign, workspace: str | Path, *, device="cuda:0",
-                 workers=16, embed_batch_size=256, smoke=False, observer=None) -> dict[str, Any]:
+                 workers=16, embed_batch_size=256, smoke=False, observer=None, evaluate_only=False) -> dict[str, Any]:
     import os
     import torch
 
@@ -560,7 +560,8 @@ def run_campaign(campaign: Campaign, workspace: str | Path, *, device="cuda:0",
                     fits = FitSettings(device=device, max_steps=maximum,
                                        log_every=campaign.execution["train_log_every"],
                                        checkpoint_every=campaign.execution["checkpoint_every"],
-                                       residency=campaign.execution["feature_residency"])
+                                       residency=campaign.execution["feature_residency"],
+                                       allow_training=not evaluate_only)
                     settings = RunSettings(root=root / "runs", embeddings_dir=root / "embeddings",
                                            cache_dir=root / "cache", fit=fits,
                                            linear_probe=campaign.imagenet["linear_probe"],

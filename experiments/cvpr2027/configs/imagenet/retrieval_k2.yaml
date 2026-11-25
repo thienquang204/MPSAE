@@ -1,0 +1,32 @@
+description: Only the two dedicated 2->2 rows; Table 5 also reuses four retrieval_mass
+  rows.
+runner: retrieval
+base:
+  seeds:
+  - 1227
+  epochs: 10
+  lr: 4.0e-05
+  ot_eta: 0.2
+  ot_microbatch: 32
+  evaluation_mode: sweep
+  batch_size: 1024
+  ot_weight: 2.0
+  masses:
+  - 1.0
+variants:
+- backbones:
+  - ff2048
+  train_k:
+    ff2048:
+    - 2
+  inference_k:
+    ff2048:
+    - 2
+- backbones:
+  - vit_b16
+  train_k:
+    vit_b16:
+    - 2
+  inference_k:
+    vit_b16:
+    - 2
