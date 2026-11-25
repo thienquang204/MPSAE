@@ -4,6 +4,14 @@ This standalone extension compares the three methods under identical optimizer
 settings **within each training-batch group**. It does not change the frozen
 CVPR 2027 catalog or launch segmentation/downstream experiments.
 
+For inference at multiple K values using the completed checkpoints on the same
+server, see [Cross-K inference](CROSS_K.md). This optional extension selects
+train K=8 and 32 and inference K=2, 8, 32, 128; it adds no training or probe fits.
+
+For the separate MPSAE learning-rate comparison at batch 4096 (4e-5 versus
+8e-5, alongside existing CSR/CSRv2), see [Learning-rate ablation](LEARNING_RATE.md).
+One command trains only the new condition and packages the comparison results.
+
 ## Experiment plan and counts
 
 | Setting | Value |

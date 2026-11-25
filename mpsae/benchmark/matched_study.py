@@ -39,7 +39,7 @@ def _source_hash(runtime):
     return {k:v for k,v in runtime['source_sha256'].items() if k in SOURCES[:8]}
 
 
-def run(config,args):
+def run(config,args,*,on_progress=None):
     from .matched_report import export
     plan=config.plan()
     root=args.workspace/('SMOKE_ONLY' if args.smoke else '')
@@ -180,6 +180,8 @@ def run(config,args):
                     if str(args.device).startswith('cuda'):
                         torch.cuda.empty_cache()
                     export(campaign,plan,plots=False,bundle=False)
+                    if on_progress is not None:
+                        on_progress(campaign)
         except BaseException as error:
             state.update(status='interrupted' if isinstance(error,KeyboardInterrupt) else 'failed',error=str(error))
             raise
